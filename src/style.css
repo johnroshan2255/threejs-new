@@ -55,6 +55,17 @@ nav a img{
   font-weight: 100;
   z-index: 100;
 }
+.controls-hint{
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  padding: 20px;
+  color: #5b5b5b;
+  font-size: 0.85rem;
+  font-weight: 100;
+  z-index: 100;
+  pointer-events: none;
+}
 .credits a{
   color: #5b5b5b;
   text-decoration: none;

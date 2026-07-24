@@ -133,7 +133,7 @@ export class GrassMaterial {
         vec2 windDirection = normalize(uWindDirection); // Normalize the wind direction
         vec4 modelPosition = modelMatrix * instanceMatrix * vec4(position, 1.0);
 
-        float terrainSize = 100.;
+        float terrainSize = 140.;
         vGlobalUV = (terrainSize-vec2(modelPosition.xz))/terrainSize;
 
         vec4 noise = texture2D(uNoiseTexture,vGlobalUV+uTime*uNoiseSpeed);

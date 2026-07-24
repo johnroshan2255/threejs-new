@@ -3,12 +3,26 @@ import Stats from "stats-gl";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import * as dat from "dat.gui";
 
-import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { MeshSurfaceSampler } from "three/addons/math/MeshSurfaceSampler.js";
 import { GrassMaterial } from "./GrassMaterial";
+import { initPhysics, getWorld } from "./physics/world";
+import { createTerrainHeightfieldCollider } from "./physics/terrainCollider";
+import { setIslandTerrain } from "./terrain/islandHeight";
+import { createLargeTerrain, TERRAIN_CONFIG } from "./terrain/createLargeTerrain";
+import { createCar, type CarEntity } from "./entities/car/createCar";
+import { CarController } from "./entities/car/carController";
+import { CarInput } from "./entities/car/carInput";
+import { resetCarUpright } from "./entities/car/resetCar";
+import { syncCar } from "./entities/car/syncCar";
+import { updateChaseCamera } from "./three/chaseCamera";
+import { ChaseCameraInput } from "./three/chaseCameraInput";
+import {
+	createTree,
+	updateFoliageWind,
+	type TreeHandle,
+} from "./entities/tree";
 
 export class FluffyGrass {
-	// # Need access to these outside the comp
 	private loadingManager: THREE.LoadingManager;
 	private textureLoader: THREE.TextureLoader;
 	private gltfLoader: GLTFLoader;
@@ -18,13 +32,12 @@ export class FluffyGrass {
 	private scene: THREE.Scene;
 	private canvas: HTMLCanvasElement;
 	private stats: Stats;
-	private orbitControls: OrbitControls;
 	private gui: dat.GUI;
 	private sceneGUI: dat.GUI;
 	private sceneProps = {
 		fogColor: "#eeeeee",
 		terrainColor: "#5e875e",
-		fogDensity: 0.02,
+		fogDensity: 0.012,
 	};
 	private textures: { [key: string]: THREE.Texture } = {};
 
@@ -37,7 +50,14 @@ export class FluffyGrass {
 	private terrainMat: THREE.MeshPhongMaterial;
 	private grassGeometry = new THREE.BufferGeometry();
 	private grassMaterial: GrassMaterial;
-	private grassCount = 8000;
+	private grassCount = 30000;
+
+	private car: CarEntity | null = null;
+	private carInput: CarInput | null = null;
+	private carController: CarController | null = null;
+	private chaseCameraInput: ChaseCameraInput | null = null;
+	private trees: TreeHandle[] = [];
+	private lastFrameTime = performance.now();
 
 	constructor(_canvas: HTMLCanvasElement) {
 		this.loadingManager = new THREE.LoadingManager();
@@ -48,7 +68,6 @@ export class FluffyGrass {
 		this.gltfLoader = new GLTFLoader(this.loadingManager);
 
 		this.canvas = _canvas;
-		// this.canvas.style.pointerEvents = 'all';
 		this.stats = new Stats({
 			minimal: true,
 		});
@@ -72,7 +91,7 @@ export class FluffyGrass {
 			canvas: this.canvas,
 			antialias: true,
 			alpha: true,
-			precision: "highp", // Use high precision
+			precision: "highp",
 		});
 		this.renderer.shadowMap.enabled = true;
 		this.renderer.shadowMap.autoUpdate = true;
@@ -83,36 +102,39 @@ export class FluffyGrass {
 		this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 		this.scene.frustumCulled = true;
 
-		this.orbitControls = new OrbitControls(this.camera, canvas);
-		this.orbitControls.autoRotate = true;
-		this.orbitControls.autoRotateSpeed = -0.5;
-		this.orbitControls.enableDamping = true;
-
 		this.grassMaterial = new GrassMaterial();
 		this.terrainMat = new THREE.MeshPhongMaterial({
 			color: this.sceneProps.terrainColor,
 		});
 
-		this.init();
-	}
-
-	private init() {
 		this.setupGUI();
 		this.setupStats();
 		this.setupTextures();
-		// this.createCube();
-		this.loadModels();
 		this.setupEventListeners();
 		this.addLights();
 	}
 
-	private createCube() {
-		const geometry = new THREE.BoxGeometry(2, 7, 2);
-		const material = new THREE.MeshPhongMaterial({ color: 0x333333 });
-		const cube = new THREE.Mesh(geometry, material);
-		cube.position.set(6, 5, -3);
-		cube.castShadow = true;
-		this.scene.add(cube);
+	async start() {
+		const mark = (stage: string) => {
+			console.log(`[FluffyGrass] ${stage}`);
+			(window as unknown as { __bootStage?: string }).__bootStage = stage;
+		};
+
+		try {
+			mark("physics-init");
+			await initPhysics();
+			mark("load-models");
+			await this.loadModels();
+			mark("setup-trees");
+			await this.setupTrees();
+			mark("setup-car");
+			await this.setupCar();
+			mark("ready");
+			this.render();
+		} catch (err) {
+			mark(`error: ${err instanceof Error ? err.message : String(err)}`);
+			throw err;
+		}
 	}
 
 	private addLights() {
@@ -121,12 +143,12 @@ export class FluffyGrass {
 
 		const directionalLight = new THREE.DirectionalLight(0xffffff, 2);
 		directionalLight.castShadow = true;
-		directionalLight.position.set(100, 100, 100);
-		directionalLight.shadow.camera.far = 200;
-		directionalLight.shadow.camera.left = -50;
-		directionalLight.shadow.camera.right = 50;
-		directionalLight.shadow.camera.top = 50;
-		directionalLight.shadow.camera.bottom = -50;
+		directionalLight.position.set(220, 220, 220);
+		directionalLight.shadow.camera.far = 500;
+		directionalLight.shadow.camera.left = -90;
+		directionalLight.shadow.camera.right = 90;
+		directionalLight.shadow.camera.top = 90;
+		directionalLight.shadow.camera.bottom = -90;
 		directionalLight.shadow.mapSize.set(2048, 2048);
 
 		this.scene.add(directionalLight);
@@ -136,12 +158,8 @@ export class FluffyGrass {
 		surfaceMesh: THREE.Mesh,
 		grassGeometry: THREE.BufferGeometry
 	) {
-		// Create a sampler for a Mesh surface.
-		const sampler = new MeshSurfaceSampler(surfaceMesh)
-			.setWeightAttribute("color")
-			.build();
+		const sampler = new MeshSurfaceSampler(surfaceMesh).build();
 
-		// Create a material for grass
 		const grassInstancedMesh = new THREE.InstancedMesh(
 			grassGeometry,
 			this.grassMaterial.material,
@@ -157,23 +175,16 @@ export class FluffyGrass {
 		const yAxis = new THREE.Vector3(0, 1, 0);
 		const matrix = new THREE.Matrix4();
 
-		// Sample randomly from the surface, creating an instance of the sample
-		// geometry at each sample point.
 		for (let i = 0; i < this.grassCount; i++) {
 			sampler.sample(position, normal);
 
-			// Align the instance with the surface normal
 			quaternion.setFromUnitVectors(yAxis, normal);
-			// Create a random rotation around the y-axis
 			const randomRotation = new THREE.Euler(0, Math.random() * Math.PI * 2, 0);
 			const randomQuaternion = new THREE.Quaternion().setFromEuler(
 				randomRotation
 			);
 
-			// Combine the alignment with the random rotation
 			quaternion.multiply(randomQuaternion);
-
-			// Set the new scale in the matrix
 			matrix.compose(position, quaternion, scale);
 
 			grassInstancedMesh.setMatrixAt(i, matrix);
@@ -182,64 +193,128 @@ export class FluffyGrass {
 		this.scene.add(grassInstancedMesh);
 	}
 
-	private loadModels() {
+	private loadGltf(url: string): Promise<THREE.Group> {
+		return new Promise((resolve, reject) => {
+			this.gltfLoader.load(
+				url,
+				(gltf) => resolve(gltf.scene),
+				undefined,
+				reject
+			);
+		});
+	}
+
+	private async loadModels() {
 		this.sceneGUI
 			.addColor(this.sceneProps, "terrainColor")
 			.onChange((value) => {
 				this.terrainMat.color.set(value);
 			});
-		this.gltfLoader.load("/island.glb", (gltf) => {
-			let terrainMesh: THREE.Mesh;
-			gltf.scene.traverse((child) => {
-				if (child instanceof THREE.Mesh) {
-					child.material = this.terrainMat;
-					child.receiveShadow = true;
-					child.geometry.scale(3, 3, 3);
-					terrainMesh = child;
-				}
-			});
-			this.scene.add(gltf.scene);
 
-			// load grass model
-			this.gltfLoader.load("/grassLODs.glb", (gltf) => {
-				gltf.scene.traverse((child) => {
-					if (child instanceof THREE.Mesh) {
-						if (child.name.includes("LOD00")) {
-							child.geometry.scale(5, 5, 5);
-							this.grassGeometry = child.geometry;
-						}
-					}
-				});
+		const { mesh, heights, nrows, ncols } = createLargeTerrain(this.terrainMat);
+		this.scene.add(mesh);
 
-				this.addGrass(terrainMesh, this.grassGeometry);
-			});
+		mesh.updateMatrixWorld(true);
+		setIslandTerrain(mesh);
+		createTerrainHeightfieldCollider(heights, nrows, ncols);
+
+		const grassScene = await this.loadGltf("/grassLODs.glb");
+		grassScene.traverse((child) => {
+			if (child instanceof THREE.Mesh && child.name.includes("LOD00")) {
+				child.geometry.scale(5, 5, 5);
+				this.grassGeometry = child.geometry;
+			}
 		});
 
-		const material = new THREE.MeshPhongMaterial({ color: 0x333333 });
+		this.addGrass(mesh, this.grassGeometry);
 
-		this.gltfLoader.load("/fluffy_grass_text.glb", (gltf) => {
-			gltf.scene.traverse((child) => {
-				if (child instanceof THREE.Mesh) {
-					child.material = material;
-					child.geometry.scale(3, 3, 3);
-					child.position.y += 0.5;
-					child.castShadow = true;
-					child.receiveShadow = true;
-				}
-			});
-			this.scene.add(gltf.scene);
-		});
+		console.log(
+			`[FluffyGrass] terrain ${TERRAIN_CONFIG.size}×${TERRAIN_CONFIG.size}, grass=${this.grassCount}`
+		);
 	}
 
-	public render() {
+	private async setupTrees() {
+		const { x: hx, z: hz } = TERRAIN_CONFIG.mainHill;
+		const tree = await createTree({
+			position: [hx, 0, hz],
+			leafColor: "#3f6d21",
+			scale: 3.4,
+			rotationY: 0.4,
+			// Bigger leaf cards + stacked rotated layers = fuller canopy
+			foliageScale: 1.55,
+			inflate: 0.12,
+			leafLayers: 5,
+			manager: this.loadingManager,
+		});
+		this.trees = [tree];
+		this.scene.add(tree.group);
+	}
+
+	private async setupCar() {
+		const car = await createCar(this.loadingManager);
+		this.car = car;
+
+		this.scene.add(car.mesh);
+		for (const wheel of car.wheels) {
+			car.mesh.add(wheel);
+		}
+
+		this.carController = new CarController(
+			car.body,
+			car.vehicle,
+			car.driveFrontAxleIndices,
+			car.driveRearAxleIndices,
+			car.steeringWheelIndices
+		);
+
+		this.carInput = new CarInput(this.carController, () => {
+			if (this.car && this.carController) {
+				resetCarUpright(this.car, this.carController);
+			}
+		});
+
+		this.chaseCameraInput = new ChaseCameraInput(this.canvas);
+		syncCar(car);
+
+		(window as unknown as { __fluffyDebug?: unknown }).__fluffyDebug = {
+			getCarPos: () => {
+				const t = car.body.translation();
+				return { x: t.x, y: t.y, z: t.z };
+			},
+			getCamPos: () => ({
+				x: this.camera.position.x,
+				y: this.camera.position.y,
+				z: this.camera.position.z,
+			}),
+			sceneChildren: this.scene.children.length,
+		};
+	}
+
+	private render = () => {
+		const now = performance.now();
+		let frameDt = (now - this.lastFrameTime) * 0.001;
+		this.lastFrameTime = now;
+		if (frameDt <= 0 || isNaN(frameDt)) frameDt = 1 / 60;
+		const dt = Math.min(Math.max(frameDt, 0.001), 0.033);
+
 		this.Uniforms.uTime.value += this.clock.getDelta();
 		this.grassMaterial.update(this.Uniforms.uTime.value);
+		updateFoliageWind(dt);
+
+		if (this.car && this.carInput && this.chaseCameraInput) {
+			const world = getWorld();
+			world.timestep = dt;
+			this.carInput.applyInput(dt);
+			world.step();
+			this.carInput.afterPhysics(dt);
+			syncCar(this.car);
+			updateChaseCamera(this.camera, this.car, this.chaseCameraInput, dt);
+		}
+
 		this.renderer.render(this.scene, this.camera);
-		// this.postProcessingManager.update();
 		this.stats.update();
-		requestAnimationFrame(() => this.render());
-		this.orbitControls.update();
-	}
+		requestAnimationFrame(this.render);
+	};
 
 	private setupTextures() {
 		this.textures.perlinNoise = this.textureLoader.load("/perlinnoise.webp");
@@ -266,7 +341,6 @@ export class FluffyGrass {
 		guiContainer.style.display = "block";
 
 		this.sceneGUI = this.gui.addFolder("Scene Properties");
-		this.sceneGUI.add(this.orbitControls, "autoRotate").name("Auto Rotate");
 		this.sceneGUI
 			.add(this.sceneProps, "fogDensity", 0, 0.05, 0.000001)
 			.onChange((value) => {
@@ -284,65 +358,38 @@ export class FluffyGrass {
 
 	private setupStats() {
 		this.stats.init(this.renderer);
-		this.stats.dom.style.bottom = "45px";
-		this.stats.dom.style.top = "auto";
-		this.stats.dom.style.left = "auto";
-		// this.stats.dom.style.right = "0";
-		this.stats.dom.style.display = "none";
-		document.body.appendChild(this.stats.dom);
+		const statsDom = (this.stats as unknown as { dom: HTMLElement }).dom;
+		statsDom.style.bottom = "45px";
+		statsDom.style.top = "auto";
+		statsDom.style.left = "auto";
+		statsDom.style.display = "none";
+		document.body.appendChild(statsDom);
 	}
 
 	private setupEventListeners() {
 		window.addEventListener("resize", () => this.setAspectResolution(), false);
 
-		this.stats.dom.addEventListener("click", () => {
+		const statsDom = (this.stats as unknown as { dom: HTMLElement }).dom;
+		statsDom.addEventListener("click", () => {
 			console.log(this.renderer.info.render);
 		});
-
-		// const randomizeGrassColor = document.querySelector(
-		// 	".randomizeButton"
-		// ) as HTMLButtonElement;
-		// randomizeGrassColor.addEventListener("click", () => {
-		// 	this.randomizeGrassColor();
-		// });
 	}
 
 	private setAspectResolution() {
 		this.camera.aspect = window.innerWidth / window.innerHeight;
 		this.camera.updateProjectionMatrix();
-
 		this.renderer.setSize(window.innerWidth, window.innerHeight);
-		// this.postProcessingManager.composer.setSize(
-		// 	window.innerWidth,
-		// 	window.innerHeight,
-		// );
-	}
-
-	private randomizeGrassColor() {
-		const randomTipColorGenerator = () => {
-			const r = Math.random();
-			const g = Math.random();
-			const b = Math.random();
-			return new THREE.Color(r, g, b);
-		};
-		const randomColorGenerator = () => {
-			// generate random color and keep it dark
-			const r = Math.random() * 0.5;
-			const g = Math.random() * 0.5;
-			const b = Math.random() * 0.5;
-			return new THREE.Color(r, g, b);
-		};
-		// find new terrain color, grass base and tip1,tip2 colors randomly
-		const terrainColor = randomColorGenerator();
-		const grassTip1Color = randomTipColorGenerator();
-		const grassTip2Color = randomTipColorGenerator();
-		this.terrainMat.color = terrainColor;
-		this.grassMaterial.uniforms.baseColor.value = terrainColor;
-		this.grassMaterial.uniforms.tipColor1.value = grassTip1Color;
-		this.grassMaterial.uniforms.tipColor2.value = grassTip2Color;
 	}
 }
 
 const canvas = document.querySelector("#canvas") as HTMLCanvasElement;
 const app = new FluffyGrass(canvas);
-app.render();
+app.start().catch((err) => {
+	console.error("Failed to start FluffyGrass:", err);
+	(window as unknown as { __bootError?: string }).__bootError =
+		err instanceof Error ? `${err.message}\n${err.stack}` : String(err);
+	const hint = document.querySelector(".controls-hint");
+	if (hint) {
+		hint.textContent = `Boot error: ${err instanceof Error ? err.message : String(err)}`;
+	}
+});
