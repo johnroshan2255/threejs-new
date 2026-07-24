@@ -156,7 +156,8 @@ export class GrassMaterial {
         vUv = vec2(uv.x,1.-uv.y);
         vNormal = normalize(normalMatrix * normal);
         vWindColor = vec2(xDisp,zDisp);
-        vViewPosition = mvPosition.xyz;
+        // Must match wind-displaced position so spot headlights hit the blades
+        vViewPosition = viewPosition.xyz;
       }    
       `;
 
@@ -208,7 +209,7 @@ export class GrassMaterial {
         vec3 geometryViewDir = ( isOrthographic ) ? vec3( 0, 0, 1 ) : normalize( vViewPosition );
         vec3 geometryClearcoatNormal;
           IncidentLight directLight;
-          float shadow = 0.0;
+          float shadow = 1.0;
           float currentShadow = 0.0;
           float NdotL;
           if(uEnableShadows == 1){
@@ -216,11 +217,13 @@ export class GrassMaterial {
               DirectionalLight directionalLight;
             #if defined( USE_SHADOWMAP ) && NUM_DIR_LIGHT_SHADOWS > 0
               DirectionalLightShadow directionalLightShadow;
+              shadow = 0.0;
             #endif
               #pragma unroll_loop_start
               for ( int i = 0; i < NUM_DIR_LIGHTS; i ++ ) {
                 directionalLight = directionalLights[ i ];
                 getDirectionalLightInfo( directionalLight, directLight );
+            #if defined( USE_SHADOWMAP ) && NUM_DIR_LIGHT_SHADOWS > 0
                 directionalLightShadow = directionalLightShadows[ i ];
                 currentShadow = getShadow( directionalShadowMap[ i ], 
                   directionalLightShadow.shadowMapSize, 
@@ -231,6 +234,7 @@ export class GrassMaterial {
                 float weight = clamp( pow( length( vDirectionalShadowCoord[ i ].xy * 2. - 1. ), 4. ), .0, 1. );
 
                 shadow += mix( currentShadow, 1., weight);
+            #endif
               }
               #pragma unroll_loop_end
             #endif
@@ -238,8 +242,21 @@ export class GrassMaterial {
           } else{
             grassFinalColor = grassFinalColor ;
           }
-        diffuseColor.rgb = clamp(diffuseColor.rgb*shadow,0.0,1.0);
 
+        // Car headlights (SpotLights) — soft contribution so grass doesn't blow out
+        #if ( NUM_SPOT_LIGHTS > 0 )
+          SpotLight spotLight;
+          #pragma unroll_loop_start
+          for ( int i = 0; i < NUM_SPOT_LIGHTS; i ++ ) {
+            spotLight = spotLights[ i ];
+            getSpotLightInfo( spotLight, geometryPosition, directLight );
+            NdotL = saturate( abs( dot( geometryNormal, directLight.direction ) ) );
+            grassFinalColor += diffuseColor.rgb * directLight.color * NdotL * 0.28;
+          }
+          #pragma unroll_loop_end
+        #endif
+
+        // Keep alpha for cutout; don't multiply RGB by shadow again (breaks night when no shadow maps).
         #include <alphatest_fragment>
         gl_FragColor = vec4(grassFinalColor ,1.0);
 
