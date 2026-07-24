@@ -5,40 +5,31 @@
   <meta charset="UTF-8" />
   <link rel="stylesheet" href="/src/style.css">
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Fluffy Grass Three.js</title>
-  <meta name="description"
-    content="Fluffiest Grass on the internet. Built using threejs. Grass Material by thebenezer." />
-  <meta name="keywords" content="Three.js, grass material, tutorial, thebenezer, Zero x Infinity" />
-  <meta property="og:title" content="Fluffy Grass Three.js" />
-  <meta property="og:description"
-    content="Fluffiest Grass on the internet. Built using threejs. Grass Material by thebenezer." />
+  <title>The Car Game</title>
+  <meta name="description" content="Drive through fluffy grass in a Three.js world with day and night." />
+  <meta name="keywords" content="Three.js, car game, grass, day night cycle" />
+  <meta property="og:title" content="The Car Game" />
+  <meta property="og:description" content="Drive through fluffy grass in a Three.js world with day and night." />
   <meta property="og:image" content="/social2.webp" />
-  <meta property="og:url" content="https://fluffygrass.vercel.app" />
-  <!-- twitter -->
+  <meta property="og:url" content="https://thecargame.vercel.app" />
   <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:site" content="@th_ebenezer" />
-  <meta name="twitter:creator" content="@th_ebenezer" />
-  <meta name="twitter:title" content="Fluffy Grass Three.js" />
-  <meta name="twitter:description"
-    content="Fluffiest Grass on the internet. Built using threejs. Grass Material by thebenezer." />
+  <meta name="twitter:title" content="The Car Game" />
+  <meta name="twitter:description" content="Drive through fluffy grass in a Three.js world with day and night." />
   <meta name="twitter:image" content="/social2.webp" />
-
 </head>
 
 <body>
-  <nav>
-    <a href="https://github.com/thebenezer/FluffyGrass">
-      <img src="/github-mark.svg" alt="GitHub" />
-    </a>
-  </nav>
-  <div class="credits">
-    <p>Created by <a href="https://twitter.com/th_ebenezer">thebenezer</a></p>
-  </div>
+  <button type="button" class="settings-toggle" id="settings-toggle" aria-label="Open settings" title="Settings">
+    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="currentColor">
+      <path d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.07 7.07 0 0 0-1.63-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.59.24-1.13.55-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.71 8.84a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94L2.83 14.52a.5.5 0 0 0-.12.64l1.92 3.32c.12.22.39.3.6.22l2.39-.96c.5.39 1.04.71 1.63.94l.36 2.54c.05.24.26.42.5.42h3.84c.24 0 .45-.18.5-.42l.36-2.54c.59-.24 1.13-.55 1.63-.94l2.39.96c.22.08.48 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z"/>
+    </svg>
+  </button>
+  <nav></nav>
+  <div class="credits"></div>
   <div class="controls-hint">
-    <p>WASD drive · Space brake · R reset · Drag orbit · Scroll zoom · Open Controls → Day/Night</p>
+    <p>WASD drive · Space brake · R reset · Drag orbit · Scroll zoom · Mobile: on-screen pads</p>
   </div>
   <canvas id="canvas"></canvas>
-  <!-- <button class="randomizeButton">Randomize</button> -->
   <script type="module" src="/src/main.ts"></script>
 </body>
 

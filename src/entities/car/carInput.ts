@@ -1,9 +1,12 @@
 import { CarController } from "./carController";
 import type { DriveInput } from "./carController";
+import type { MobileControls } from "../../ui/mobileControls";
 
 const GAME_KEYS = new Set(["KeyW", "KeyA", "KeyS", "KeyD", "Space", "KeyR"]);
 
 export class CarInput {
+	private mobile: MobileControls | null = null;
+
 	constructor(
 		private controller: CarController,
 		private onReset: () => void
@@ -11,6 +14,10 @@ export class CarInput {
 		window.addEventListener("keydown", this.onKeyDown);
 		window.addEventListener("keyup", this.onKeyUp);
 		window.addEventListener("blur", this.clearKeys);
+	}
+
+	setMobileControls(mobile: MobileControls | null) {
+		this.mobile = mobile;
 	}
 
 	private keys = {
@@ -79,10 +86,19 @@ export class CarInput {
 		if (this.keys.a) steer += 1;
 		if (this.keys.d) steer -= 1;
 
+		let braking = this.keys.space;
+
+		const touch = this.mobile?.getState();
+		if (touch) {
+			if (touch.throttle !== 0) throttle = touch.throttle;
+			if (touch.steer !== 0) steer = touch.steer;
+			if (touch.braking) braking = true;
+		}
+
 		const input: DriveInput = {
 			throttle,
 			steer,
-			braking: this.keys.space,
+			braking,
 		};
 
 		this.controller.applyInput(dt, input);

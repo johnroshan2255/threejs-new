@@ -23,6 +23,10 @@ export class ChaseCameraInput {
 
 	private onPointerDown = (e: PointerEvent) => {
 		if (e.button !== 0) return;
+		// Don't orbit when using on-screen mobile controls / settings
+		const target = e.target as HTMLElement | null;
+		if (target?.closest?.(".mobile-controls, .settings-toggle, .dg")) return;
+
 		this.dragging = true;
 		this.lastX = e.clientX;
 		this.lastY = e.clientY;

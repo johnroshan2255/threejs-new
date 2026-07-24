@@ -33,6 +33,8 @@ import {
 	type DayPeriod,
 } from "./environment/dayNightCycle";
 import { createFireflies, type Fireflies } from "./environment/fireflies";
+import { createMobileControls, type MobileControls } from "./ui/mobileControls";
+import { createOrientationGate, type OrientationGate } from "./ui/orientationGate";
 
 export class FluffyGrass {
 	private loadingManager: THREE.LoadingManager;
@@ -71,6 +73,8 @@ export class FluffyGrass {
 	private trees: TreeHandle[] = [];
 	private dayNight: DayNightCycle | null = null;
 	private fireflies: Fireflies | null = null;
+	private mobileControls: MobileControls | null = null;
+	private orientationGate: OrientationGate | null = null;
 	private carHeadlights: CarHeadlights | null = null;
 	private dayNightGui = {
 		period: "morning" as DayPeriod,
@@ -142,6 +146,7 @@ export class FluffyGrass {
 		this.setupStats();
 		this.setupTextures();
 		this.setupEventListeners();
+		this.orientationGate = createOrientationGate();
 		this.dayNight = createDayNightCycle(this.scene, { shadowExtent: 90 });
 		this.dayNight.auto = this.dayNightGui.auto;
 		this.dayNight.speed = this.dayNightGui.speed;
@@ -359,6 +364,13 @@ export class FluffyGrass {
 			}
 		});
 
+		this.mobileControls = createMobileControls(() => {
+			if (this.car && this.carController) {
+				resetCarUpright(this.car, this.carController);
+			}
+		});
+		this.carInput.setMobileControls(this.mobileControls);
+
 		this.chaseCameraInput = new ChaseCameraInput(this.canvas);
 		syncCar(car);
 	}
@@ -398,23 +410,28 @@ export class FluffyGrass {
 		}
 
 		if (this.car && this.carInput && this.chaseCameraInput) {
+			const playAllowed = this.orientationGate?.isPlayAllowed() ?? true;
 			const world = getWorld();
 			world.timestep = dt;
-			this.carInput.applyInput(dt);
+			if (playAllowed) {
+				this.carInput.applyInput(dt);
+			}
 			world.step();
-			this.carInput.afterPhysics(dt);
+			if (playAllowed) {
+				this.carInput.afterPhysics(dt);
+			}
 			syncCar(this.car);
 			updateChaseCamera(this.camera, this.car, this.chaseCameraInput, dt);
 
 			// Leave the map → wait 2s → respawn at start
-			if (this.carController && isCarOutsideWorld(this.car)) {
+			if (playAllowed && this.carController && isCarOutsideWorld(this.car)) {
 				this.outOfWorldTimer += dt;
 				if (this.outOfWorldTimer >= 2) {
 					respawnCarAtStart(this.car, this.carController);
 					syncCar(this.car);
 					this.outOfWorldTimer = 0;
 				}
-			} else {
+			} else if (playAllowed) {
 				this.outOfWorldTimer = 0;
 			}
 		}
@@ -463,6 +480,7 @@ export class FluffyGrass {
 
 	private setupGUI() {
 		this.gui.close();
+		this.gui.domElement.classList.add("fg-settings");
 		const guiContainer = this.gui.domElement.parentElement as HTMLDivElement;
 		guiContainer.style.zIndex = "9999";
 		guiContainer.style.position = "fixed";
@@ -471,16 +489,37 @@ export class FluffyGrass {
 		guiContainer.style.right = "auto";
 		guiContainer.style.display = "block";
 
-		this.sceneGUI = this.gui.addFolder("Scene Properties");
+		const toggle = document.getElementById("settings-toggle");
+		const syncToggle = () => {
+			const open = !this.gui.closed;
+			this.gui.domElement.classList.toggle("fg-hidden", !open);
+			toggle?.classList.toggle("is-open", open);
+			toggle?.setAttribute(
+				"aria-label",
+				open ? "Close settings" : "Open settings"
+			);
+		};
+		syncToggle();
+		toggle?.addEventListener("click", () => {
+			if (this.gui.closed) this.gui.open();
+			else this.gui.close();
+			syncToggle();
+		});
+
+		this.sceneGUI = this.gui.addFolder("Scene");
 		this.sceneGUI
 			.add(this.sceneProps, "fogDensity", 0, 0.05, 0.000001)
+			.name("Fog density")
 			.onChange((value) => {
 				(this.scene.fog as THREE.FogExp2).density = value;
 			});
-		this.sceneGUI.addColor(this.sceneProps, "fogColor").onChange((value) => {
-			this.scene.fog?.color.set(value);
-			this.scene.background = new THREE.Color(value);
-		});
+		this.sceneGUI
+			.addColor(this.sceneProps, "fogColor")
+			.name("Fog color")
+			.onChange((value) => {
+				this.scene.fog?.color.set(value);
+				this.scene.background = new THREE.Color(value);
+			});
 
 		this.grassMaterial.setupGUI(this.sceneGUI);
 
@@ -507,7 +546,7 @@ export class FluffyGrass {
 			});
 		skyFolder
 			.add(this.dayNightGui, "speed", 0.02, 0.5, 0.01)
-			.name("Cycle speed (5min≈0.08)")
+			.name("Cycle speed")
 			.onChange((value: number) => {
 				if (this.dayNight) this.dayNight.speed = value;
 			});

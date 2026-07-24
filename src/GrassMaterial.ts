@@ -283,24 +283,24 @@ export class GrassMaterial {
 	}
 
 	setupGUI(gui: GUI) {
-		const folder = gui.addFolder("Grass Props");
-		folder.addColor(this.grassColorProps, "baseColor").onChange((value) => {
+		const folder = gui.addFolder("Grass");
+		folder.addColor(this.grassColorProps, "baseColor").name("Base").onChange((value) => {
 			this.uniforms.baseColor.value.set(value);
 		});
-		folder.addColor(this.grassColorProps, "tipColor1").onChange((value) => {
+		folder.addColor(this.grassColorProps, "tipColor1").name("Tip A").onChange((value) => {
 			this.uniforms.tipColor1.value.set(value);
 		});
-		folder.addColor(this.grassColorProps, "tipColor2").onChange((value) => {
+		folder.addColor(this.grassColorProps, "tipColor2").name("Tip B").onChange((value) => {
 			this.uniforms.tipColor2.value.set(value);
 		});
-		folder.add(this.uniforms.uNoiseScale, "value", 0, 5).name("Noise Scale");
+		folder.add(this.uniforms.uNoiseScale, "value", 0, 5).name("Noise");
 		folder
 			.add(this.uniforms.uGrassLightIntensity, "value", 0, 2)
-			.name("Light Intensity");
+			.name("Light");
 		folder
 			.add(this.uniforms.uShadowDarkness, "value", 0, 1)
-			.name("ShadowDarkness");
-		folder.add(this.uniforms.uEnableShadows, "value").name("Enable Shadows");
+			.name("Shadow");
+		folder.add(this.uniforms.uEnableShadows, "value").name("Shadows");
 
 		folder.open();
 	}
