@@ -88,15 +88,16 @@ export class CarInput {
 
 		let braking = this.keys.space;
 
-		// Prefer live touch pads when they are active (mobile)
-		const touch = this.mobile?.isActive() ? this.mobile.getState() : null;
+		// Always merge mobile pad state when controls exist (Android touch)
+		const touch = this.mobile?.getState();
 		if (touch) {
-			throttle = touch.throttle !== 0 ? touch.throttle : throttle;
-			steer = touch.steer !== 0 ? touch.steer : steer;
-			braking = touch.braking || braking;
+			if (touch.throttle !== 0) throttle = touch.throttle;
+			if (Math.abs(touch.steer) > 0.001) steer = touch.steer;
+			if (touch.braking) braking = true;
 		}
 
-		this.controller.applyInput(dt, { throttle, steer, braking } satisfies DriveInput);
+		const input: DriveInput = { throttle, steer, braking };
+		this.controller.applyInput(dt, input);
 	}
 
 	afterPhysics(dt: number) {

@@ -1,18 +1,16 @@
+import { isMobileDevice } from "./mobileControls";
+
 export type OrientationGate = {
 	/** False on phones/tablets held in portrait. */
 	isPlayAllowed: () => boolean;
 	dispose: () => void;
 };
 
-function isMobileDevice(): boolean {
-	return (
-		window.matchMedia("(hover: none)").matches ||
-		window.matchMedia("(pointer: coarse)").matches ||
-		/Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
-	);
-}
-
 function isPortrait(): boolean {
+	// Prefer geometry — more reliable than CSS orientation on some Androids
+	if (window.innerHeight > 0 && window.innerWidth > 0) {
+		return window.innerHeight > window.innerWidth;
+	}
 	return window.matchMedia("(orientation: portrait)").matches;
 }
 
@@ -36,7 +34,7 @@ export function createOrientationGate(): OrientationGate {
 				</svg>
 			</div>
 			<p class="orientation-gate-title">Rotate your phone</p>
-			<p class="orientation-gate-text">Turn to landscape to play</p>
+			<p class="orientation-gate-text">Turn sideways (landscape) to drive on iPhone &amp; Android</p>
 		</div>
 	`;
 	document.body.appendChild(overlay);
@@ -48,18 +46,25 @@ export function createOrientationGate(): OrientationGate {
 		overlay.setAttribute("aria-hidden", lock ? "false" : "true");
 	};
 
+	const delayedSync = () => {
+		sync();
+		// Android often reports old size during orientationchange
+		window.setTimeout(sync, 100);
+		window.setTimeout(sync, 350);
+	};
+
 	sync();
-	window.addEventListener("resize", sync);
-	window.addEventListener("orientationchange", sync);
+	window.addEventListener("resize", delayedSync);
+	window.addEventListener("orientationchange", delayedSync);
 	const mq = window.matchMedia("(orientation: portrait)");
-	mq.addEventListener("change", sync);
+	mq.addEventListener("change", delayedSync);
 
 	return {
 		isPlayAllowed: () => !(isMobileDevice() && isPortrait()),
 		dispose() {
-			window.removeEventListener("resize", sync);
-			window.removeEventListener("orientationchange", sync);
-			mq.removeEventListener("change", sync);
+			window.removeEventListener("resize", delayedSync);
+			window.removeEventListener("orientationchange", delayedSync);
+			mq.removeEventListener("change", delayedSync);
 			overlay.remove();
 			document.body.classList.remove("orientation-portrait-lock");
 		},

@@ -434,9 +434,11 @@ body.has-mobile-controls .controls-hint {
 .mc-btn {
 	appearance: none;
 	-webkit-appearance: none;
+	display: grid;
+	place-items: center;
 	border: 1px solid rgba(210, 230, 190, 0.28);
 	border-radius: 20px;
-	background: rgba(10, 16, 12, 0.42);
+	background: rgba(10, 16, 12, 0.55);
 	backdrop-filter: blur(10px);
 	-webkit-backdrop-filter: blur(10px);
 	color: rgba(240, 248, 232, 0.95);
@@ -449,6 +451,7 @@ body.has-mobile-controls .controls-hint {
 	-webkit-user-select: none;
 	user-select: none;
 	-webkit-tap-highlight-color: transparent;
+	cursor: pointer;
 }
 
 .mc-btn.is-active {
@@ -563,7 +566,11 @@ body.has-mobile-controls .controls-hint {
 	}
 }
 
-body.orientation-portrait-lock .mobile-controls,
+body.orientation-portrait-lock .mobile-controls {
+	visibility: hidden !important;
+	pointer-events: none !important;
+}
+
 body.orientation-portrait-lock .settings-toggle,
 body.orientation-portrait-lock .controls-hint,
 body.orientation-portrait-lock .dg.ac {

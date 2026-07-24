@@ -7,45 +7,59 @@ export type MobileDriveState = {
 export type MobileControls = {
 	root: HTMLElement;
 	getState: () => MobileDriveState;
-	/** True when on-screen pads should be used (phones / tablets). */
 	isActive: () => boolean;
 	dispose: () => void;
 };
 
-function isMobileDevice(): boolean {
+/** True for phones/tablets — Android, iPhone, iPad (incl. iPadOS desktop UA). */
+export function isMobileDevice(): boolean {
+	if (typeof navigator === "undefined") return false;
+	const ua = navigator.userAgent || "";
+	const touchPoints = navigator.maxTouchPoints || 0;
+
+	// iPadOS 13+ reports as MacIntel but is a tablet
+	const iPadDesktopUa =
+		navigator.platform === "MacIntel" && touchPoints > 1;
+
 	return (
-		window.matchMedia("(hover: none)").matches ||
+		iPadDesktopUa ||
+		/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile/i.test(
+			ua
+		) ||
 		window.matchMedia("(pointer: coarse)").matches ||
-		/Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
+		(touchPoints > 0 &&
+			window.matchMedia("(hover: none)").matches &&
+			Math.min(window.screen.width, window.screen.height) <= 1024)
 	);
 }
 
-/** Soft curve so small finger moves don't snap to full lock. */
-function softenAxis(v: number, deadzone = 0.18, power = 1.55): number {
+function softenAxis(v: number, deadzone = 0.14, power = 1.35): number {
 	const a = Math.abs(v);
 	if (a < deadzone) return 0;
 	const t = (a - deadzone) / (1 - deadzone);
 	return Math.sign(v) * Math.pow(Math.min(1, t), power);
 }
 
+type TouchKind = "steer" | "gas" | "reverse" | "brake" | "reset";
+
 /**
- * On-screen drive controls for phones/tablets.
- * Left: relative steer pad · Right: gas / reverse / brake / reset.
+ * On-screen drive pads for Android + iPhone/iPad.
+ * Uses Touch Events as the primary path (best cross-mobile support).
  */
 export function createMobileControls(onReset: () => void): MobileControls {
 	const root = document.createElement("div");
 	root.className = "mobile-controls";
 	root.id = "mobile-controls";
 	root.innerHTML = `
-		<div class="mc-steer" id="mc-steer" aria-label="Steer">
+		<div class="mc-steer" id="mc-steer" data-mc="steer" aria-label="Steer">
 			<div class="mc-steer-ring"></div>
 			<div class="mc-steer-knob" id="mc-steer-knob"></div>
 		</div>
 		<div class="mc-actions">
-			<button type="button" class="mc-btn mc-gas" id="mc-gas" aria-label="Accelerate">▲</button>
-			<button type="button" class="mc-btn mc-brake" id="mc-brake" aria-label="Reverse">▼</button>
-			<button type="button" class="mc-btn mc-handbrake" id="mc-handbrake" aria-label="Brake">BRAKE</button>
-			<button type="button" class="mc-btn mc-reset" id="mc-reset" aria-label="Reset">R</button>
+			<div class="mc-btn mc-gas" id="mc-gas" data-mc="gas" role="button" tabindex="0" aria-label="Accelerate">▲</div>
+			<div class="mc-btn mc-brake" id="mc-brake" data-mc="reverse" role="button" tabindex="0" aria-label="Reverse">▼</div>
+			<div class="mc-btn mc-handbrake" id="mc-handbrake" data-mc="brake" role="button" tabindex="0" aria-label="Brake">BRAKE</div>
+			<div class="mc-btn mc-reset" id="mc-reset" data-mc="reset" role="button" tabindex="0" aria-label="Reset">R</div>
 		</div>
 	`;
 	document.body.appendChild(root);
@@ -57,12 +71,8 @@ export function createMobileControls(onReset: () => void): MobileControls {
 
 	const steerPad = root.querySelector("#mc-steer") as HTMLElement;
 	const knob = root.querySelector("#mc-steer-knob") as HTMLElement;
-	const gasBtn = root.querySelector("#mc-gas") as HTMLButtonElement;
-	const brakeBtn = root.querySelector("#mc-brake") as HTMLButtonElement;
-	const handbrakeBtn = root.querySelector("#mc-handbrake") as HTMLButtonElement;
-	const resetBtn = root.querySelector("#mc-reset") as HTMLButtonElement;
 
-	let steerPointerId: number | null = null;
+	const active = new Map<number, TouchKind>();
 	let steerOriginX = 0;
 
 	const syncVisibility = () => {
@@ -73,166 +83,191 @@ export function createMobileControls(onReset: () => void): MobileControls {
 	};
 	syncVisibility();
 
-	const onOrient = () => syncVisibility();
-	window.addEventListener("resize", onOrient);
-	window.addEventListener("orientationchange", onOrient);
-	const mq = window.matchMedia("(pointer: coarse)");
-	mq.addEventListener("change", syncVisibility);
+	const delayedSync = () => {
+		syncVisibility();
+		window.setTimeout(syncVisibility, 100);
+		window.setTimeout(syncVisibility, 350);
+	};
+	window.addEventListener("resize", delayedSync);
+	window.addEventListener("orientationchange", delayedSync);
 
 	const setKnob = (visualX: number) => {
-		const x = Math.max(-40, Math.min(40, visualX * 40));
+		const x = Math.max(-42, Math.min(42, visualX * 42));
 		knob.style.transform = `translate(calc(-50% + ${x}px), -50%)`;
 	};
 
 	const updateSteer = (clientX: number) => {
 		const rect = steerPad.getBoundingClientRect();
-		// Relative drag from press point — less twitchy than absolute-from-center
-		const travel = rect.width * 0.42;
-		let raw = (clientX - steerOriginX) / Math.max(24, travel);
+		const travel = Math.max(28, rect.width * 0.45);
+		let raw = (clientX - steerOriginX) / travel;
 		raw = Math.max(-1, Math.min(1, raw));
-		const soft = softenAxis(raw, 0.16, 1.45);
-		// Slightly reduced max lock on touch
-		steer = -soft * 0.82;
+		const soft = softenAxis(raw);
+		steer = -soft * 0.9;
 		setKnob(soft);
 	};
 
-	const endSteer = (pointerId: number) => {
-		if (steerPointerId !== pointerId) return;
-		steerPointerId = null;
+	const clearSteer = () => {
 		steer = 0;
 		setKnob(0);
 		steerPad.classList.remove("is-active");
 	};
 
-	const onSteerDown = (e: PointerEvent) => {
-		if (steerPointerId !== null) return;
-		e.preventDefault();
-		e.stopPropagation();
-		steerPointerId = e.pointerId;
-		steerOriginX = e.clientX;
-		steerPad.classList.add("is-active");
-		try {
-			steerPad.setPointerCapture(e.pointerId);
-		} catch {
-			/* iOS can throw if already released */
+	const applyKind = (kind: TouchKind, down: boolean) => {
+		switch (kind) {
+			case "gas":
+				gas = down;
+				break;
+			case "reverse":
+				reverse = down;
+				break;
+			case "brake":
+				braking = down;
+				break;
+			case "steer":
+				if (!down) clearSteer();
+				break;
+			case "reset":
+				if (down) onReset();
+				break;
 		}
-		updateSteer(e.clientX);
+		const el = root.querySelector(`[data-mc="${kind}"]`);
+		el?.classList.toggle("is-active", down && kind !== "reset");
 	};
 
-	const onSteerMove = (e: PointerEvent) => {
-		if (steerPointerId !== e.pointerId) return;
-		e.preventDefault();
-		e.stopPropagation();
-		updateSteer(e.clientX);
+	const kindFromPoint = (clientX: number, clientY: number): TouchKind | null => {
+		const hit = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
+		const el = hit?.closest?.("[data-mc]") as HTMLElement | null;
+		if (!el || !root.contains(el)) return null;
+		const v = el.dataset.mc;
+		if (
+			v === "steer" ||
+			v === "gas" ||
+			v === "reverse" ||
+			v === "brake" ||
+			v === "reset"
+		) {
+			return v;
+		}
+		return null;
 	};
 
-	const onSteerUp = (e: PointerEvent) => {
-		e.preventDefault();
-		e.stopPropagation();
-		endSteer(e.pointerId);
+	const kindFromTarget = (target: EventTarget | null): TouchKind | null => {
+		const el = (target as HTMLElement | null)?.closest?.("[data-mc]") as
+			| HTMLElement
+			| null
+			| undefined;
+		if (!el || !root.contains(el)) return null;
+		const v = el.dataset.mc;
+		if (
+			v === "steer" ||
+			v === "gas" ||
+			v === "reverse" ||
+			v === "brake" ||
+			v === "reset"
+		) {
+			return v;
+		}
+		return null;
 	};
 
-	steerPad.addEventListener("pointerdown", onSteerDown);
-	steerPad.addEventListener("pointermove", onSteerMove);
-	steerPad.addEventListener("pointerup", onSteerUp);
-	steerPad.addEventListener("pointercancel", onSteerUp);
+	const startControl = (id: number, kind: TouchKind, clientX: number) => {
+		active.set(id, kind);
+		if (kind === "steer") {
+			steerOriginX = clientX;
+			steerPad.classList.add("is-active");
+			updateSteer(clientX);
+		} else {
+			applyKind(kind, true);
+		}
+	};
 
-	const held = new Map<number, HTMLButtonElement>();
+	const endControl = (id: number) => {
+		const kind = active.get(id);
+		if (!kind) return;
+		active.delete(id);
+		if (kind === "steer") clearSteer();
+		else if (kind !== "reset") applyKind(kind, false);
+	};
 
-	const bindHold = (
-		btn: HTMLButtonElement,
-		on: () => void,
-		off: () => void
-	) => {
-		const down = (e: PointerEvent) => {
+	const onTouchStart = (e: TouchEvent) => {
+		for (let i = 0; i < e.changedTouches.length; i++) {
+			const t = e.changedTouches[i];
+			const kind =
+				kindFromTarget(t.target) || kindFromPoint(t.clientX, t.clientY);
+			if (!kind) continue;
 			e.preventDefault();
-			e.stopPropagation();
-			held.set(e.pointerId, btn);
-			btn.classList.add("is-active");
-			try {
-				btn.setPointerCapture(e.pointerId);
-			} catch {
-				/* ignore */
-			}
-			on();
-		};
-		const up = (e: PointerEvent) => {
-			if (!held.has(e.pointerId)) return;
-			held.delete(e.pointerId);
-			e.preventDefault();
-			e.stopPropagation();
-			btn.classList.remove("is-active");
-			off();
-		};
-		btn.addEventListener("pointerdown", down);
-		btn.addEventListener("pointerup", up);
-		btn.addEventListener("pointercancel", up);
-		// Do NOT clear on lostpointercapture — iOS fires it spuriously and killed input
+			startControl(t.identifier, kind, t.clientX);
+		}
 	};
 
-	bindHold(
-		gasBtn,
-		() => {
-			gas = true;
-		},
-		() => {
-			gas = false;
+	const onTouchMove = (e: TouchEvent) => {
+		let used = false;
+		for (let i = 0; i < e.touches.length; i++) {
+			const t = e.touches[i];
+			const kind = active.get(t.identifier);
+			if (!kind) continue;
+			used = true;
+			if (kind === "steer") updateSteer(t.clientX);
 		}
-	);
-	bindHold(
-		brakeBtn,
-		() => {
-			reverse = true;
-		},
-		() => {
-			reverse = false;
-		}
-	);
-	bindHold(
-		handbrakeBtn,
-		() => {
-			braking = true;
-		},
-		() => {
-			braking = false;
-		}
-	);
+		if (used) e.preventDefault();
+	};
 
-	resetBtn.addEventListener("pointerdown", (e) => {
+	const onTouchEnd = (e: TouchEvent) => {
+		for (let i = 0; i < e.changedTouches.length; i++) {
+			endControl(e.changedTouches[i].identifier);
+		}
+	};
+
+	// Touch path — Android Chrome + iOS Safari
+	root.addEventListener("touchstart", onTouchStart, { passive: false });
+	window.addEventListener("touchmove", onTouchMove, { passive: false });
+	window.addEventListener("touchend", onTouchEnd, { passive: false });
+	window.addEventListener("touchcancel", onTouchEnd, { passive: false });
+
+	// Mouse / desktop DevTools fallback (ignore real touch pointers — already handled)
+	const onPointerDown = (e: PointerEvent) => {
+		if (e.pointerType === "touch") return;
+		const kind =
+			kindFromTarget(e.target) || kindFromPoint(e.clientX, e.clientY);
+		if (!kind) return;
 		e.preventDefault();
 		e.stopPropagation();
-		onReset();
-	});
+		startControl(e.pointerId, kind, e.clientX);
+	};
+	const onPointerMove = (e: PointerEvent) => {
+		if (e.pointerType === "touch") return;
+		const kind = active.get(e.pointerId);
+		if (kind === "steer") updateSteer(e.clientX);
+	};
+	const onPointerUp = (e: PointerEvent) => {
+		if (e.pointerType === "touch") return;
+		endControl(e.pointerId);
+	};
 
-	// Keep page from scrolling under the pads
-	root.addEventListener(
-		"touchmove",
-		(e) => {
-			e.preventDefault();
-		},
-		{ passive: false }
-	);
-
-	root.addEventListener(
-		"pointerdown",
-		(e) => {
-			e.stopPropagation();
-		},
-		true
-	);
+	root.addEventListener("pointerdown", onPointerDown);
+	window.addEventListener("pointermove", onPointerMove);
+	window.addEventListener("pointerup", onPointerUp);
+	window.addEventListener("pointercancel", onPointerUp);
 
 	return {
 		root,
-		isActive: () => isMobileDevice(),
+		isActive: () =>
+			isMobileDevice() &&
+			!document.body.classList.contains("orientation-portrait-lock"),
 		getState: () => ({
 			throttle: gas ? 1 : reverse ? -1 : 0,
 			steer,
 			braking,
 		}),
 		dispose() {
-			window.removeEventListener("resize", onOrient);
-			window.removeEventListener("orientationchange", onOrient);
-			mq.removeEventListener("change", syncVisibility);
+			window.removeEventListener("resize", delayedSync);
+			window.removeEventListener("orientationchange", delayedSync);
+			window.removeEventListener("touchmove", onTouchMove);
+			window.removeEventListener("touchend", onTouchEnd);
+			window.removeEventListener("touchcancel", onTouchEnd);
+			window.removeEventListener("pointermove", onPointerMove);
+			window.removeEventListener("pointerup", onPointerUp);
+			window.removeEventListener("pointercancel", onPointerUp);
 			root.remove();
 			document.body.classList.remove("has-mobile-controls");
 		},
