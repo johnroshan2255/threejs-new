@@ -22,6 +22,8 @@ html {
 	position: fixed;
 	top: 0;
 	left: 0;
+	z-index: 0;
+	touch-action: none;
 }
 
 nav {
@@ -355,10 +357,16 @@ nav a img {
 	touch-action: none;
 	user-select: none;
 	-webkit-user-select: none;
+	-webkit-touch-callout: none;
 }
 
 .mobile-controls.is-visible {
 	display: block;
+}
+
+body.has-mobile-controls {
+	overscroll-behavior: none;
+	touch-action: none;
 }
 
 body.has-mobile-controls .controls-hint {
@@ -369,116 +377,123 @@ body.has-mobile-controls .controls-hint {
 	pointer-events: auto;
 	position: absolute;
 	left: max(16px, env(safe-area-inset-left));
-	bottom: max(20px, env(safe-area-inset-bottom));
-	width: 132px;
-	height: 132px;
+	bottom: max(18px, env(safe-area-inset-bottom));
+	width: 148px;
+	height: 148px;
 	border-radius: 50%;
+	touch-action: none;
+	-webkit-user-select: none;
 }
 
 .mc-steer-ring {
 	position: absolute;
 	inset: 0;
 	border-radius: 50%;
-	border: 1px solid rgba(210, 230, 190, 0.22);
-	background: rgba(10, 16, 12, 0.28);
+	border: 1px solid rgba(210, 230, 190, 0.28);
+	background: rgba(10, 16, 12, 0.4);
 	backdrop-filter: blur(10px);
 	-webkit-backdrop-filter: blur(10px);
 	box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
 .mc-steer.is-active .mc-steer-ring {
-	border-color: rgba(210, 230, 190, 0.4);
-	background: rgba(14, 22, 16, 0.4);
+	border-color: rgba(210, 230, 190, 0.5);
+	background: rgba(14, 22, 16, 0.5);
 }
 
 .mc-steer-knob {
 	position: absolute;
 	top: 50%;
 	left: 50%;
-	width: 52px;
-	height: 52px;
+	width: 58px;
+	height: 58px;
 	border-radius: 50%;
 	transform: translate(-50%, -50%);
-	background: rgba(210, 230, 190, 0.28);
-	border: 1px solid rgba(230, 245, 215, 0.35);
+	background: rgba(210, 230, 190, 0.35);
+	border: 1px solid rgba(230, 245, 215, 0.4);
 	box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
-	transition: background 0.15s ease;
+	pointer-events: none;
 }
 
 .mc-steer.is-active .mc-steer-knob {
-	background: rgba(210, 230, 190, 0.48);
+	background: rgba(210, 230, 190, 0.55);
 }
 
 .mc-actions {
 	pointer-events: auto;
 	position: absolute;
 	right: max(16px, env(safe-area-inset-right));
-	bottom: max(20px, env(safe-area-inset-bottom));
+	bottom: max(18px, env(safe-area-inset-bottom));
 	display: grid;
-	grid-template-columns: 72px 72px;
-	grid-template-rows: 72px 56px;
-	gap: 10px;
+	grid-template-columns: 78px 78px;
+	grid-template-rows: 78px 60px;
+	gap: 12px;
+	touch-action: none;
 }
 
 .mc-btn {
 	appearance: none;
-	border: 1px solid rgba(210, 230, 190, 0.22);
-	border-radius: 18px;
-	background: rgba(10, 16, 12, 0.32);
+	-webkit-appearance: none;
+	border: 1px solid rgba(210, 230, 190, 0.28);
+	border-radius: 20px;
+	background: rgba(10, 16, 12, 0.42);
 	backdrop-filter: blur(10px);
 	-webkit-backdrop-filter: blur(10px);
-	color: rgba(240, 248, 232, 0.92);
+	color: rgba(240, 248, 232, 0.95);
 	font-family: "Sora", system-ui, sans-serif;
 	font-weight: 600;
-	font-size: 18px;
+	font-size: 20px;
 	letter-spacing: 0.02em;
 	box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
 	touch-action: none;
+	-webkit-user-select: none;
+	user-select: none;
+	-webkit-tap-highlight-color: transparent;
 }
 
 .mc-btn.is-active {
-	background: rgba(180, 210, 160, 0.32);
-	border-color: rgba(210, 230, 190, 0.45);
+	background: rgba(180, 210, 160, 0.42);
+	border-color: rgba(210, 230, 190, 0.55);
 	color: #fff;
 }
 
 .mc-gas {
 	grid-column: 2;
 	grid-row: 1;
-	font-size: 22px;
+	font-size: 24px;
 }
 
 .mc-brake {
 	grid-column: 2;
 	grid-row: 2;
-	font-size: 22px;
-	border-radius: 16px;
+	font-size: 24px;
+	border-radius: 18px;
 }
 
 .mc-handbrake {
 	grid-column: 1;
 	grid-row: 1;
-	font-size: 11px;
+	font-size: 12px;
 	letter-spacing: 0.06em;
 }
 
 .mc-reset {
 	grid-column: 1;
 	grid-row: 2;
-	font-size: 16px;
-	border-radius: 16px;
+	font-size: 17px;
+	border-radius: 18px;
 }
 
 @media (max-width: 420px) {
 	.mc-steer {
-		width: 112px;
-		height: 112px;
+		width: 128px;
+		height: 128px;
 	}
 
 	.mc-actions {
-		grid-template-columns: 64px 64px;
-		grid-template-rows: 64px 52px;
-		gap: 8px;
+		grid-template-columns: 70px 70px;
+		grid-template-rows: 70px 56px;
+		gap: 10px;
 	}
 }
 

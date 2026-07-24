@@ -88,20 +88,15 @@ export class CarInput {
 
 		let braking = this.keys.space;
 
-		const touch = this.mobile?.getState();
+		// Prefer live touch pads when they are active (mobile)
+		const touch = this.mobile?.isActive() ? this.mobile.getState() : null;
 		if (touch) {
-			if (touch.throttle !== 0) throttle = touch.throttle;
-			if (touch.steer !== 0) steer = touch.steer;
-			if (touch.braking) braking = true;
+			throttle = touch.throttle !== 0 ? touch.throttle : throttle;
+			steer = touch.steer !== 0 ? touch.steer : steer;
+			braking = touch.braking || braking;
 		}
 
-		const input: DriveInput = {
-			throttle,
-			steer,
-			braking,
-		};
-
-		this.controller.applyInput(dt, input);
+		this.controller.applyInput(dt, { throttle, steer, braking } satisfies DriveInput);
 	}
 
 	afterPhysics(dt: number) {
