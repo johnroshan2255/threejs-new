@@ -5,6 +5,7 @@ import type { MobileControls } from "../../ui/mobileControls";
 const GAME_KEYS = new Set(["KeyW", "KeyA", "KeyS", "KeyD", "Space", "KeyR"]);
 
 export class CarInput {
+	public isEnabled = false;
 	private mobile: MobileControls | null = null;
 
 	constructor(
@@ -29,6 +30,7 @@ export class CarInput {
 	};
 
 	private onKeyDown = (e: KeyboardEvent) => {
+		if (!this.isEnabled) return;
 		if (e.code === "KeyR") {
 			e.preventDefault();
 			if (e.repeat) return;

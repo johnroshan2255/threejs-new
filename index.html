@@ -21,6 +21,100 @@
 </head>
 
 <body>
+  <div id="loading-screen" class="loading-screen">
+    <!-- Left panel (Loading Content) -->
+    <div class="loading-panel">
+      <div class="loading-content">
+        <h1>The Car Game</h1>
+        <div class="loading-bar-container">
+          <div id="loading-bar" class="loading-bar"></div>
+        </div>
+        <p id="loading-text">Loading... 0%</p>
+        <div class="main-action-buttons" style="display: flex; gap: 12px; justify-content: center; align-items: stretch; margin-bottom: 15px; flex-direction: column; width: 250px; margin-left: auto; margin-right: auto;">
+          <button id="play-button" class="play-button" disabled>Loading...</button>
+          <button id="host-button" class="play-button host-btn" disabled style="background: linear-gradient(135deg, #e3a35b, #d97777); display: none;">Host Game</button>
+          <button id="join-button" class="play-button join-btn" disabled style="background: linear-gradient(135deg, #5ba3e3, #77d9c4); display: none;">Join Game</button>
+        </div>
+      </div>
+    </div>
+    
+    <button id="create-account-btn" class="create-account-btn">Create Account</button>
+
+    <!-- Right panel (Account Form) -->
+    <div id="account-panel" class="account-panel">
+      <div class="account-panel-content">
+        <h2>Create Account</h2>
+        <input type="text" id="username" placeholder="Username" />
+        <input type="email" id="email" placeholder="Email" />
+        <div class="account-buttons">
+          <button id="submit-account-btn" class="submit-btn">Submit</button>
+          <button id="close-account-btn" class="close-btn">Cancel</button>
+        </div>
+        <p id="account-success-msg" style="display: none; color: #a3d977; margin-top: 10px;">Account created!</p>
+      </div>
+    </div>
+
+    <!-- Right panel (Login Form) -->
+    <div id="login-panel" class="account-panel login-panel">
+      <div class="account-panel-content">
+        <h2>Login to Play</h2>
+        <input type="email" id="login-email" placeholder="Email Address" />
+        <div class="account-buttons">
+          <button id="submit-login-btn" class="submit-btn">Login</button>
+          <button id="close-login-btn" class="close-btn">Cancel</button>
+        </div>
+        <p id="login-error-msg" style="display: none; color: #e3a35b; margin-top: 10px;"></p>
+      </div>
+    </div>
+
+    <!-- Right panel (Join Game Form) -->
+    <div id="join-panel" class="account-panel login-panel">
+      <div class="account-panel-content">
+        <h2>Join Game</h2>
+        <input type="text" id="join-room-code" placeholder="Enter 5-Letter Room Code" style="text-transform: uppercase;" maxlength="5" />
+        <div class="account-buttons">
+          <button id="submit-join-btn" class="submit-btn" style="background: linear-gradient(135deg, #5ba3e3, #77d9c4);">Join Room</button>
+          <button id="close-join-btn" class="close-btn">Cancel</button>
+        </div>
+        <p id="join-error-msg" style="display: none; color: #e3a35b; margin-top: 10px;"></p>
+      </div>
+    </div>
+
+    </div>
+  </div>
+
+  <!-- Multiplayer Lobby Overlay -->
+  <div id="lobby-panel" class="lobby-panel" style="display: none;">
+    <div class="lobby-content">
+      <h2>Multiplayer Lobby</h2>
+      <div class="player-grid" id="lobby-players-grid">
+        <div class="player-slot" id="player-slot-0"><div class="slot-content empty">Waiting...</div></div>
+        <div class="player-slot" id="player-slot-1"><div class="slot-content empty">Waiting...</div></div>
+        <div class="player-slot" id="player-slot-2"><div class="slot-content empty">Waiting...</div></div>
+        <div class="player-slot" id="player-slot-3"><div class="slot-content empty">Waiting...</div></div>
+      </div>
+      <div class="lobby-buttons">
+        <button id="start-game-btn" class="start-game-btn" style="display: none;" disabled>Waiting for players...</button>
+        <button id="leave-lobby-btn" class="leave-lobby-btn">Leave Room</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Room List Panel -->
+  <div id="room-list-panel" class="lobby-panel" style="display: none;">
+    <div class="lobby-content" style="max-width: 600px;">
+      <h2>Active Rooms</h2>
+      <div id="room-list-container" class="room-list-container">
+        <!-- Rooms will be injected here -->
+        <div style="color: white; text-align: center; padding: 20px;">Fetching rooms...</div>
+      </div>
+      <div class="lobby-buttons">
+        <button id="refresh-rooms-btn" class="start-game-btn" style="background: linear-gradient(135deg, #5ba3e3, #77d9c4);">Refresh List</button>
+        <button id="close-room-list-btn" class="leave-lobby-btn">Cancel</button>
+      </div>
+    </div>
+  </div>
+
   <button type="button" class="settings-toggle" id="settings-toggle" aria-label="Open settings" title="Settings">
     <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="currentColor">
       <path d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.07 7.07 0 0 0-1.63-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.59.24-1.13.55-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.71 8.84a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94L2.83 14.52a.5.5 0 0 0-.12.64l1.92 3.32c.12.22.39.3.6.22l2.39-.96c.5.39 1.04.71 1.63.94l.36 2.54c.05.24.26.42.5.42h3.84c.24 0 .45-.18.5-.42l.36-2.54c.59-.24 1.13-.55 1.63-.94l2.39.96c.22.08.48 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z"/>
@@ -31,6 +125,46 @@
   <div class="controls-hint">
     <p>WASD drive · Space brake · R reset · Drag orbit · Scroll zoom · Mobile: pads + drag canvas to look · pinch zoom</p>
   </div>
+  <div id="game-top-nav" class="game-top-nav" style="display: none;">
+    <button id="in-game-host-btn" class="game-nav-btn" style="background: linear-gradient(135deg, #e3a35b, #d97777); border: none;">Host Game</button>
+    <button id="in-game-join-btn" class="game-nav-btn" style="background: linear-gradient(135deg, #5ba3e3, #77d9c4); border: none;">Join Game</button>
+    <button id="logout-btn" class="game-nav-btn logout-btn-style">Logout</button>
+  </div>
+  
+  <div id="logout-confirm-modal" class="logout-modal" style="display: none;">
+    <div class="logout-modal-content">
+      <h3>Log Out</h3>
+      <p>Are you sure you want to log out?</p>
+      <div class="logout-buttons">
+        <button id="confirm-logout-btn" class="confirm-btn">Yes, Log Out</button>
+        <button id="cancel-logout-btn" class="cancel-btn">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="host-confirm-modal" class="logout-modal" style="display: none;">
+    <div class="logout-modal-content">
+      <h3>Host Game</h3>
+      <p>Are you sure you want to host a multiplayer game?</p>
+      <div class="logout-buttons">
+        <button id="confirm-host-btn" class="confirm-btn" style="background: linear-gradient(135deg, #e3a35b, #d97777);">Yes, Host Game</button>
+        <button id="cancel-host-btn" class="cancel-btn">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="join-confirm-modal" class="logout-modal" style="display: none;">
+    <div class="logout-modal-content">
+      <h3>Join Game</h3>
+      <input type="text" id="in-game-join-code" placeholder="Enter 5-Letter Code" style="text-transform: uppercase; width: 100%; padding: 10px; border-radius: 8px; border: 1px solid rgba(190, 220, 170, 0.3); background: rgba(0,0,0,0.3); color: #fff; margin-bottom: 20px; font-family: 'Sora';" maxlength="5" />
+      <p id="in-game-join-error" style="color: #e3a35b; display: none; margin-top: -10px; margin-bottom: 15px; font-size: 0.9rem;"></p>
+      <div class="logout-buttons">
+        <button id="confirm-join-btn" class="confirm-btn" style="background: linear-gradient(135deg, #5ba3e3, #77d9c4);">Join Room</button>
+        <button id="cancel-join-btn" class="cancel-btn">Cancel</button>
+      </div>
+    </div>
+  </div>
+
   <canvas id="canvas"></canvas>
   <script type="module" src="/src/main.ts"></script>
 </body>
