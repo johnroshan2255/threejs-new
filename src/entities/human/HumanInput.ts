@@ -27,6 +27,8 @@ export class HumanInput {
     private throwTimer = 0;
     private throwDuration = 1.0;
     
+    private knockbackTimer = 0;
+    
     // For mobile
     private mobileControls: MobileControls | null = null;
     
@@ -105,6 +107,14 @@ export class HumanInput {
         }
     }
 
+    public applyKnockback(impulse: THREE.Vector3) {
+        this.human.body.applyImpulse(impulse, true);
+        this.knockbackTimer = 0.5; // Stunned for 0.5 seconds while flying
+        // Cancel pickup/throw if hit
+        this.isPickingUp = false;
+        this.isThrowing = false;
+    }
+
     public update(dt: number, camera: THREE.PerspectiveCamera) {
         let forward = 0;
         let right = 0;
@@ -134,6 +144,12 @@ export class HumanInput {
         if (this.isEnabled && this.keys[" "] && isGrounded && now - this.lastJumpTime > 500) {
             currentVel.y = this.jumpForce;
             this.lastJumpTime = now;
+        }
+
+        if (this.knockbackTimer > 0) {
+            this.knockbackTimer -= dt;
+            if (!isGrounded) this.human.playAnimation("jump");
+            return; // Skip input processing to allow physics engine to move the character
         }
 
         // Pickup Logic

@@ -1,20 +1,27 @@
 import { CarController } from "./carController";
 import type { DriveInput } from "./carController";
 import type { MobileControls } from "../../ui/mobileControls";
+import { HornSound } from "../../audio/HornSound";
 
-const GAME_KEYS = new Set(["KeyW", "KeyA", "KeyS", "KeyD", "Space", "KeyR"]);
+const GAME_KEYS = new Set(["KeyW", "KeyA", "KeyS", "KeyD", "Space", "KeyR", "KeyE"]);
 
 export class CarInput {
 	public isEnabled = false;
 	private mobile: MobileControls | null = null;
+	private horn: HornSound;
 
 	constructor(
 		private controller: CarController,
 		private onReset: () => void
 	) {
+		this.horn = new HornSound();
 		window.addEventListener("keydown", this.onKeyDown);
 		window.addEventListener("keyup", this.onKeyUp);
 		window.addEventListener("blur", this.clearKeys);
+	}
+
+	public get isHonking() {
+		return this.horn.isPlaying;
 	}
 
 	setMobileControls(mobile: MobileControls | null) {
@@ -42,16 +49,29 @@ export class CarInput {
 		if (!GAME_KEYS.has(e.code)) return;
 		e.preventDefault();
 		if (e.repeat) return;
+
+		if (e.code === "KeyE") {
+			this.horn.play();
+			return;
+		}
+
 		this.set(e, true);
 	};
 
 	private onKeyUp = (e: KeyboardEvent) => {
 		if (!GAME_KEYS.has(e.code)) return;
 		e.preventDefault();
+
+		if (e.code === "KeyE") {
+			this.horn.stop();
+			return;
+		}
+
 		this.set(e, false);
 	};
 
 	private clearKeys = () => {
+		this.horn.stop();
 		this.keys.w = false;
 		this.keys.s = false;
 		this.keys.a = false;

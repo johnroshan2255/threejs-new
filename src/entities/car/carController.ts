@@ -26,6 +26,15 @@ export class CarController {
 		return this.braking;
 	}
 
+	getThrottle(): number {
+		return this.throttle;
+	}
+
+	getSpeed(): number {
+		const v = this.body.linvel();
+		return Math.hypot(v.x, v.z);
+	}
+
 	applyInput(dt: number, input: DriveInput) {
 		this.braking = input.braking;
 

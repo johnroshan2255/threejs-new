@@ -24,6 +24,17 @@ export function updateChaseCamera(
 	_forward.copy(getCarGroundForward(car.body));
 
 	const carYaw = Math.atan2(_forward.x, _forward.z);
+
+	// Auto-center camera if car is moving and user isn't dragging
+	if (!input.isDragging) {
+		const v = car.body.linvel();
+		const speed = Math.hypot(v.x, v.z);
+		if (speed > 1.0) {
+			// Gently lerp relative yaw back to 0
+			input.yaw *= Math.exp(-2.0 * dt);
+		}
+	}
+
 	const camYaw = carYaw + input.yaw;
 	const pitch = input.pitch;
 
@@ -39,7 +50,8 @@ export function updateChaseCamera(
 	const blend = 1 - Math.exp(-CAM_SMOOTH * dt);
 	camera.position.lerp(_targetCam, blend);
 
-	_lookAt.copy(_carPos).addScaledVector(_forward, CAM_LOOK_AHEAD);
+	const lookAheadDist = CAM_LOOK_AHEAD * Math.max(0, Math.cos(input.yaw));
+	_lookAt.copy(_carPos).addScaledVector(_forward, lookAheadDist);
 	_lookAt.y = _carPos.y + 1.1;
 
 	camera.lookAt(_lookAt);
@@ -54,6 +66,27 @@ export function updateHumanCamera(
 	dt: number
 ): void {
 	_humanPos.copy(human.mesh.position);
+
+	// Auto-center camera if human is moving and user isn't dragging
+	if (!input.isDragging) {
+		const v = human.body.linvel();
+		const speed = Math.hypot(v.x, v.z);
+		if (speed > 0.5) {
+			// Human yaw is derived from its quaternion
+			const euler = new THREE.Euler().setFromQuaternion(human.mesh.quaternion, "YXZ");
+			const humanYaw = euler.y;
+			
+			// We want input.yaw to approach (humanYaw - Math.PI)
+			// Need to handle wrap-around for shortest path interpolation
+			let targetYaw = humanYaw - Math.PI;
+			
+			// Normalize angles to -PI to PI
+			const diff = Math.atan2(Math.sin(targetYaw - input.yaw), Math.cos(targetYaw - input.yaw));
+			
+			// Gently lerp
+			input.yaw += diff * (1 - Math.exp(-3.0 * dt));
+		}
+	}
 
 	// Instead of snapping to the human's rotation, we let the camera rotate freely via input.
 	// We'll base camYaw purely on the input yaw relative to an absolute coordinate (or you can use mesh forward if you want it to behave like a vehicle).

@@ -41,10 +41,10 @@ export async function createCar(
 
 	const spawnY = getWorldTerrainY(spawn.x, spawn.z) + spawn.clearance;
 
-	const hx = chassisSize.x / 2;
+	const hx = Math.max(0.1, (chassisSize.x / 2) - colliderRoundness);
 	const hy = chassisSize.y / 2;
-	const hz = chassisSize.z / 2;
-	const colliderHy = hy * colliderHeightScale;
+	const hz = Math.max(0.1, (chassisSize.z / 2) - colliderRoundness);
+	const colliderHy = Math.max(0.1, (hy * colliderHeightScale) - colliderRoundness);
 	const colliderLocalY = colliderYOffset + hy * colliderLocalYFactor;
 
 	const body = world.createRigidBody(

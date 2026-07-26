@@ -11,11 +11,8 @@ const _euler = new THREE.Euler(0, 0, 0, "YXZ");
 
 /** True when the car has left the driveable terrain (or fallen off the map). */
 export function isCarOutsideWorld(car: CarEntity): boolean {
-	const half = TERRAIN_CONFIG.size * 0.5;
 	const t = car.body.translation();
 	return (
-		Math.abs(t.x) > half ||
-		Math.abs(t.z) > half ||
 		t.y < -15 ||
 		t.y > 90
 	);

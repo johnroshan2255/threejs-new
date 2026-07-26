@@ -13,7 +13,8 @@ export class ChaseCameraInput {
 	yaw = 0;
 	pitch = 0.22;
 	distance = 8;
-
+	
+	public isDragging = false;
 	private dragging = false;
 	private lastX = 0;
 	private lastY = 0;
@@ -58,6 +59,7 @@ export class ChaseCameraInput {
 
 	private beginDrag(id: number, x: number, y: number, touch: boolean) {
 		this.dragging = true;
+		this.isDragging = true;
 		this.activeId = id;
 		this.lastX = x;
 		this.lastY = y;
@@ -80,6 +82,7 @@ export class ChaseCameraInput {
 	private endDrag(id: number) {
 		if (this.activeId !== null && id !== this.activeId) return;
 		this.dragging = false;
+		this.isDragging = false;
 		this.activeId = null;
 		this.domElement.style.cursor = "grab";
 	}

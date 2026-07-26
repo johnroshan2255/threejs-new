@@ -1,7 +1,7 @@
 import * as THREE from "three";
 import type RAPIER from "@dimforge/rapier3d-compat";
 
-const _localForward = new THREE.Vector3(0, 0, -1);
+const _localForward = new THREE.Vector3(0, 0, 1);
 const _worldForward = new THREE.Vector3();
 const _quat = new THREE.Quaternion();
 
@@ -11,7 +11,7 @@ export function getCarGroundForward(body: RAPIER.RigidBody): THREE.Vector3 {
 	_worldForward.y = 0;
 
 	if (_worldForward.lengthSq() < 1e-6) {
-		return _worldForward.set(0, 0, -1);
+		return _worldForward.set(0, 0, 1);
 	}
 
 	return _worldForward.normalize();
@@ -23,7 +23,7 @@ export function getCarForward3D(body: RAPIER.RigidBody): THREE.Vector3 {
 	_worldForward.copy(_localForward).applyQuaternion(_quat);
 
 	if (_worldForward.lengthSq() < 1e-6) {
-		return _worldForward.set(0, 0, -1);
+		return _worldForward.set(0, 0, 1);
 	}
 
 	return _worldForward.normalize();
