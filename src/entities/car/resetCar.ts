@@ -13,7 +13,7 @@ const _euler = new THREE.Euler(0, 0, 0, "YXZ");
 export function isCarOutsideWorld(car: CarEntity): boolean {
 	const t = car.body.translation();
 	return (
-		t.y < -15 ||
+		t.y < -120 ||
 		t.y > 90
 	);
 }
@@ -42,10 +42,16 @@ export function resetCarUpright(car: CarEntity, controller: CarController) {
 	settleVehicle(car);
 }
 
-/** Put the car back at the configured spawn after leaving the world. */
-export function respawnCarAtStart(car: CarEntity, controller: CarController) {
-	const { x, z, clearance } = CAR_CONFIG.spawn;
-	const y = getWorldTerrainY(x, z) + clearance;
+export function respawnCarAtStart(car: CarEntity, controller: CarController, customSpawnPoint?: THREE.Vector3) {
+	let x = CAR_CONFIG.spawn.x;
+	let z = CAR_CONFIG.spawn.z;
+	let y = getWorldTerrainY(x, z) + CAR_CONFIG.spawn.clearance;
+
+	if (customSpawnPoint) {
+		x = customSpawnPoint.x;
+		z = customSpawnPoint.z;
+		y = customSpawnPoint.y + CAR_CONFIG.spawn.clearance;
+	}
 
 	car.body.setTranslation({ x, y, z }, true);
 	car.body.setRotation({ x: 0, y: 0, z: 0, w: 1 }, true);

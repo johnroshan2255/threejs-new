@@ -86,13 +86,34 @@ export function sampleTerrainHeight(x: number, z: number): number {
 	const edge = Math.max(Math.abs(x), Math.abs(z)) / half;
 	const edgeMask = 1 - Math.pow(Math.min(edge, 1), 3) * 0.35;
 
+	// Flatten the terrain noise around the pond (up to 18m radius) to ensure a solid rim
+	const distToPond = Math.hypot(x - (-20), z - 5);
+	let pondMask = 1.0;
+	if (distToPond < 18) {
+		const t = Math.max(0, (distToPond - 12) / 6);
+		pondMask = t * t * (3 - 2 * t);
+	}
+
 	const base =
-		(rolling * hillStrength + detail + broad) * maxHeight * 0.35 * edgeMask;
+		(rolling * hillStrength + detail + broad) * maxHeight * 0.35 * edgeMask * pondMask;
 
 	const mound = hillMound(x, z, mainHill.x, mainHill.z, mainHill.radius);
 	const hill = mound * mainHill.height * edgeMask;
 
-	return base + hill;
+	// Create a perfectly fitted basin for the 20x20 pond.
+	// We want the water to sit very close to ground level (-0.5m) so it's visible from all angles.
+	let basin = 0;
+	if (distToPond <= 10) {
+		// Inside the water: smooth bowl dropping from -0.5m at the shore to -6m at the center.
+		const norm = distToPond / 10.0;
+		basin = -6.0 + 5.5 * (norm * norm * norm); // cubic dropoff for a nice deep center
+	} else if (distToPond <= 13) {
+		// Shoreline: gently slope from the water's edge (-0.5m) up to the flat rim (0m).
+		const norm = (distToPond - 10) / 3.0;
+		basin = -0.5 * (1 - norm);
+	}
+	
+	return base + hill + basin;
 }
 
 /**
@@ -119,6 +140,8 @@ export function createLargeTerrain(material: THREE.Material): {
 
 	positions.needsUpdate = true;
 	geometry.computeVertexNormals();
+	geometry.computeBoundingBox();
+	geometry.computeBoundingSphere();
 
 	const mesh = new THREE.Mesh(geometry, material);
 	mesh.name = "large-terrain";

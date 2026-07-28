@@ -59,7 +59,11 @@ export class VolumetricFogSystem {
         }
     }
 
-    public update(carPos: THREE.Vector3, camera: THREE.Camera) {
+    public setColor(color: THREE.Color) {
+        (this.mesh.material as THREE.MeshBasicMaterial).color.copy(color);
+    }
+
+    public update(carPos: THREE.Vector3, camera: THREE.Camera, baseRadius: number = 65, fogCenter?: THREE.Vector3) {
         const time = performance.now() * 0.0005;
 
         for (let i = 0; i < this.particleCount; i++) {
@@ -69,10 +73,8 @@ export class VolumetricFogSystem {
             const rand4 = Math.cos(i * 159.357);
 
             // Create a hollow ring of fog.
-            // Island is roughly up to 60m radius.
-            // Fog starts at 65m and goes out to 300m.
-            const minRadius = 65;
-            const maxRadius = 300;
+            const minRadius = baseRadius;
+            const maxRadius = baseRadius + 235; // keep the thickness roughly the same
             const r = minRadius + (maxRadius - minRadius) * Math.abs(rand1);
             
             const theta = rand2 * Math.PI * 2;
@@ -80,10 +82,17 @@ export class VolumetricFogSystem {
             let x = r * Math.cos(theta);
             let z = r * Math.sin(theta);
             
-            // If the car goes deep into the bridge (e.g. Z > 100), shift the fog forward
-            // so we don't run out of fog, but keep the hollow area behind so we don't cover the grass.
-            if (carPos.z > 100) {
-                z += (carPos.z - 100);
+            if (fogCenter) {
+                // If a center is explicitly provided, center the fog entirely around it
+                x += fogCenter.x;
+                z += fogCenter.z;
+            } else {
+                // Original behavior for the starting world: 
+                // Keep the hollow area around the starting island (Z=0),
+                // but shift it forward on the bridge so we don't run out of fog.
+                if (carPos.z > 100) {
+                    z += (carPos.z - 100);
+                }
             }
 
             // Height sits below the grass (which is at Y=0).

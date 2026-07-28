@@ -38,13 +38,30 @@ export class HumanEntity {
         console.log("[HumanEntity] Available animations:");
         gltfAnimations.forEach((clip) => {
             console.log(` - ${clip.name}`);
+            const nameLower = clip.name.toLowerCase();
+            
+            // Strip horizontal root motion for locomotion animations so they play in-place
+            if (nameLower.includes("walk") || nameLower.includes("run")) {
+                clip.tracks.forEach(track => {
+                    if (track.name.toLowerCase().includes(".position")) {
+                        const values = track.values;
+                        const startX = values[0];
+                        const startZ = values[2];
+                        for (let i = 0; i < values.length; i += 3) {
+                            values[i] = startX;
+                            values[i + 2] = startZ;
+                        }
+                    }
+                });
+            }
+
             const action = this.mixer.clipAction(clip);
-            this.animations.set(clip.name.toLowerCase(), action);
+            this.animations.set(nameLower, action);
         });
 
         // Physics Setup (Capsule)
-        const radius = 0.3;
-        const halfHeight = 0.5; // Total height = 1.0 + 2*0.3 = 1.6m
+        const radius = 0.45; // reduced so players can get closer
+        const halfHeight = 1.5; // scaled by 3
         const rigidBodyDesc = RAPIER.RigidBodyDesc.dynamic()
             .setTranslation(initialPosition.x, initialPosition.y + halfHeight + radius + 1.0, initialPosition.z)
             .setLinearDamping(4.0) // High damping to stop instantly when no input
@@ -64,92 +81,59 @@ export class HumanEntity {
 
     public update(dt: number) {
         this.mixer.update(dt);
-        
-        // Apply procedural overrides AFTER the mixer updates
-        this.updateProceduralAnimation();
 
         // Sync visual mesh to physics body
         const translation = this.body.translation();
         // Offset mesh down so feet are at bottom of capsule.
-        this.mesh.position.set(translation.x, translation.y - 0.8, translation.z); 
+        this.mesh.position.set(translation.x, translation.y - 2.4, translation.z); 
     }
 
-    private updateProceduralAnimation() {
-        if (this.pickupProgress <= 0) return;
 
-        // Lazy initialize bones
-        if (!this.spineBone) {
-            this.mesh.traverse((child) => {
-                const name = child.name.toLowerCase();
-                if (name.includes("spine") && !this.spineBone) this.spineBone = child;
-                if (name.includes("rightarm") && !this.rightArmBone) this.rightArmBone = child;
-                if (name.includes("leftarm") && !this.leftArmBone) this.leftArmBone = child;
-            });
-        }
 
-        if (this.throwProgress > 0) {
-            // Throwing animation (2-handed overhead style)
-            const p = this.throwProgress;
-            
-            // Windup from 0 to 0.5, then throw from 0.5 to 1.0
-            const windup = p < 0.5 ? (p * 2) : 1 - ((p - 0.5) * 2);
-            
-            if (this.spineBone) {
-                // Lean back during windup
-                this.spineBone.rotateX(windup * 0.3);
-            }
-            
-            // Bring arms forward, then lift them up/back during windup, and slam them down
-            const armX = Math.PI / 4 + windup * Math.PI / 2;
-            
-            if (this.rightArmBone) {
-                this.rightArmBone.rotateX(armX);
-                this.rightArmBone.rotateZ(Math.PI / 6); // inward
-            }
-            if (this.leftArmBone) {
-                this.leftArmBone.rotateX(armX);
-                this.leftArmBone.rotateZ(-Math.PI / 6); // inward
-            }
-            return;
-        }
-
-        if (this.pickupProgress <= 0) return;
-
-        // Calculate bend amount (0 to 1 to 0)
-        // Progress goes from 0 to 1, so sin(progress * PI) creates a nice curve peaking at 0.5
-        const bendAmount = Math.sin(this.pickupProgress * Math.PI);
-
-        if (this.spineBone) {
-            // Mixamo spine bones usually bend forward on the X axis
-            this.spineBone.rotateX(Math.PI / 3 * bendAmount);
-        }
-        if (this.rightArmBone) {
-            // Rotate arm down and forward
-            this.rightArmBone.rotateZ(Math.PI / 4 * bendAmount);
-            this.rightArmBone.rotateX(Math.PI / 4 * bendAmount);
-        }
-    }
-
-    public playAnimation(name: string, fadeDuration: number = 0.2) {
-        // Simple heuristic to match common animation names
+    public playAnimation(name: string, fadeDuration: number = 0.2): number {
+        const lowerName = name.toLowerCase();
         let targetAction: THREE.AnimationAction | undefined;
         
-        // Find exact or partial match
+        // Exact match first
         for (const [clipName, action] of this.animations.entries()) {
-            if (clipName.includes(name.toLowerCase())) {
+            if (clipName === lowerName) {
                 targetAction = action;
                 break;
             }
         }
 
-        if (!targetAction || targetAction === this.activeAction) return;
-
-        if (this.activeAction) {
-            this.activeAction.fadeOut(fadeDuration);
+        // Partial match fallback
+        if (!targetAction) {
+            for (const [clipName, action] of this.animations.entries()) {
+                if (clipName.includes(lowerName)) {
+                    targetAction = action;
+                    break;
+                }
+            }
         }
 
-        targetAction.reset().fadeIn(fadeDuration).play();
-        this.activeAction = targetAction;
-        this.activeAnimationName = targetAction.getClip().name.toLowerCase();
+        if (!targetAction) return 0;
+
+        if (targetAction !== this.activeAction) {
+            if (this.activeAction) {
+                this.activeAction.fadeOut(fadeDuration);
+            }
+
+            targetAction.reset().fadeIn(fadeDuration);
+            
+            if (lowerName === "being carried" || lowerName === "fall down" || lowerName === "sit to stand" || lowerName === "sweep fall" || lowerName === "stand to sit") {
+                targetAction.setLoop(THREE.LoopOnce, 1);
+                targetAction.clampWhenFinished = true;
+            } else {
+                targetAction.setLoop(THREE.LoopRepeat, Infinity);
+                targetAction.clampWhenFinished = false;
+            }
+            
+            targetAction.play();
+            this.activeAction = targetAction;
+            this.activeAnimationName = targetAction.getClip().name.toLowerCase();
+        }
+
+        return targetAction.getClip().duration;
     }
 }

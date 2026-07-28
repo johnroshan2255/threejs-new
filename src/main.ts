@@ -11,6 +11,7 @@ import { initPhysics, getWorld } from "./physics/world";
 import { createTerrainHeightfieldCollider } from "./physics/terrainCollider";
 import { setIslandTerrain, getWorldTerrainY } from "./terrain/islandHeight";
 import { createLargeTerrain, TERRAIN_CONFIG } from "./terrain/createLargeTerrain";
+import { Pond } from "./entities/water";
 import { createCar, type CarEntity } from "./entities/car/createCar";
 import { loadKenneySuvVisual } from "./entities/car/kenneyCarVisual";
 import { CarController } from "./entities/car/carController";
@@ -63,6 +64,8 @@ type RemotePlayer = {
 	targetHumanQuaternion: THREE.Quaternion;
 	targetCarPosition: THREE.Vector3;
 	targetCarQuaternion: THREE.Quaternion;
+	isBeingCarried?: boolean;
+	isCarryingPlayer?: boolean;
 };
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:3000";
@@ -83,10 +86,11 @@ export class FluffyGrass {
 		fogColor: "#eeeeee",
 		terrainColor: "#5e875e",
 		fogDensity: 0.012,
-		humanScale: 0.01,
+		humanScale: 0.03,
+		mapMode: false,
 	};
 	private textures: { [key: string]: THREE.Texture } = {};
-	
+
 	// Interactive Objects
 	private bombs: { mesh: THREE.Group, body: RAPIER.RigidBody | null, id: number, isFlying?: boolean, flightTime?: number }[] = [];
 
@@ -97,6 +101,7 @@ export class FluffyGrass {
 	private clock = new THREE.Clock();
 
 	private terrainMat: THREE.MeshPhongMaterial;
+	private pond?: Pond;
 	private grassGeometry = new THREE.BufferGeometry();
 	private grassMaterial: GrassMaterial;
 	private grassCount = 30000;
@@ -117,9 +122,12 @@ export class FluffyGrass {
 	private interactionPrompt: HTMLElement | null = null;
 
 	private socket: Socket | null = null;
-	private roomCode: string | null = null;
+	private roomCode = "";
+
 	private userData: any = null;
-	private mySlotIndex: number = 0;
+	private mySlotIndex = 0;
+
+	private isBeingCarriedBy: string | null = null;
 	private lobbyModels: THREE.Group[] = [];
 	private lobbyMixers: THREE.AnimationMixer[] = [];
 	private remotePlayers: Map<string, RemotePlayer> = new Map();
@@ -140,6 +148,9 @@ export class FluffyGrass {
 		hour: 7,
 	};
 	private worldGroup = new THREE.Group();
+	private newWorldGroup = new THREE.Group();
+	private hasStartedLoadingNewWorld = false;
+	private currentFogRadius = 65;
 	private volumetricFog: VolumetricFogSystem | null = null;
 	private lastFrameTime = performance.now();
 	private frameFireflyIntensity = 0;
@@ -152,7 +163,7 @@ export class FluffyGrass {
 
 	constructor(_canvas: HTMLCanvasElement) {
 		this.loadingManager = new THREE.LoadingManager();
-		
+
 		const loadingBar = document.getElementById("loading-bar");
 		const loadingText = document.getElementById("loading-text");
 		this.loadingManager.onProgress = (url, itemsLoaded, itemsTotal) => {
@@ -164,9 +175,9 @@ export class FluffyGrass {
 		};
 		this.textureLoader = new THREE.TextureLoader(this.loadingManager);
 
-		this.gui = new dat.GUI();
+		this.gui = new dat.GUI({ hideable: false });
 		this.gui.hide(); // Hide until login
-		this.sceneGUI = new dat.GUI({ title: "Scene Details" });
+		this.sceneGUI = new dat.GUI({ hideable: false });
 		this.sceneGUI.hide(); // Hide until login
 
 		this.gltfLoader = new GLTFLoader(this.loadingManager);
@@ -189,6 +200,7 @@ export class FluffyGrass {
 		this.scene = new THREE.Scene();
 		this.scene.add(this.camera);
 		this.scene.add(this.worldGroup);
+		this.scene.add(this.newWorldGroup);
 
 		this.audioListener = new THREE.AudioListener();
 		this.camera.add(this.audioListener);
@@ -217,6 +229,8 @@ export class FluffyGrass {
 		this.grassMaterial = new GrassMaterial();
 		this.terrainMat = new THREE.MeshPhongMaterial({
 			color: this.sceneProps.terrainColor,
+			shininess: 0,
+			flatShading: true
 		});
 
 		this.setupGUI();
@@ -227,13 +241,13 @@ export class FluffyGrass {
 		this.orientationGate = createOrientationGate();
 		this.dayNight = createDayNightCycle(this.scene, { shadowExtent: 90 });
 		this.dayNight.auto = this.dayNightGui.auto;
-		
+
 		this.createBombs();
 		this.dayNight.speed = this.dayNightGui.speed;
-		
+
 		this.smokeSystem = new SmokeTrailSystem();
 		this.scene.add(this.smokeSystem.mesh);
-		
+
 		this.explosionSystem = new ExplosionSystem();
 		this.scene.add(this.explosionSystem.mesh);
 
@@ -243,15 +257,15 @@ export class FluffyGrass {
 			await this.setupTrees();
 			await this.setupCar();
 			await this.setupHuman();
-			
+
 			// Initialize Volumetric Fog
 			this.volumetricFog = new VolumetricFogSystem(300);
 			this.scene.add(this.volumetricFog.group);
 
-			// Initialize Bridge at the edge of the map (z = 60)
-			this.proceduralBridge = new ProceduralBridge(getWorld(), new THREE.Vector3(0, -1.0, 60), 8, 2);
+			// Initialize Bridge at the edge of the map (z = 60), max generation up to Z = 200
+			this.proceduralBridge = new ProceduralBridge(getWorld(), new THREE.Vector3(0, -1.0, 60), 8, 2, 200);
 			this.scene.add(this.proceduralBridge.group);
-			
+
 			await this.createLobbyModels();
 		})();
 	}
@@ -270,11 +284,11 @@ export class FluffyGrass {
 			const playButton = document.getElementById("play-button") as HTMLButtonElement;
 			const hostButton = document.getElementById("host-button") as HTMLButtonElement;
 			if (loadingText) loadingText.textContent = "Ready to play!";
-			
+
 			let loginAction: "play" | "host" | "join" = "play";
 			let joinRoomCode = "";
 
-			const proceed = (action: "play"|"host"|"join", user: any) => {
+			const proceed = (action: "play" | "host" | "join", user: any) => {
 				this.userData = user;
 				if (action === "play") {
 					this.isGameActive = true;
@@ -289,7 +303,7 @@ export class FluffyGrass {
 					const loadingScreen = document.getElementById("loading-screen");
 					loadingScreen!.style.opacity = "0";
 					setTimeout(() => { loadingScreen!.style.display = "none"; }, 500);
-					
+
 					if (this.engineSound) this.engineSound.init();
 
 					for (const model of this.lobbyModels) {
@@ -297,7 +311,7 @@ export class FluffyGrass {
 					}
 
 					// Spawn based on slot index to avoid overlapping cars
-					const spawnX = this.mySlotIndex * 8; 
+					const spawnX = this.mySlotIndex * 8;
 					if (this.car && this.car.body) {
 						const currPos = this.car.body.translation();
 						const spawnY = getWorldTerrainY(spawnX, currPos.z) + 2.0;
@@ -323,11 +337,11 @@ export class FluffyGrass {
 			};
 			(window as any).proceedPlayFn = proceed;
 
-			const checkTokenAndProceed = async (action: "play"|"host"|"join") => {
+			const checkTokenAndProceed = async (action: "play" | "host" | "join") => {
 				loginAction = action;
 				const loadingScreen = document.getElementById("loading-screen");
 				const token = localStorage.getItem("authToken");
-				
+
 				if (token) {
 					if (loadingText) loadingText.textContent = "Authenticating...";
 					try {
@@ -511,7 +525,7 @@ export class FluffyGrass {
 			const logoutModal = document.getElementById("logout-confirm-modal");
 			const confirmLogoutBtn = document.getElementById("confirm-logout-btn");
 			const cancelLogoutBtn = document.getElementById("cancel-logout-btn");
-			
+
 			if (logoutBtn && logoutModal && confirmLogoutBtn && cancelLogoutBtn) {
 				logoutBtn.addEventListener("click", () => {
 					logoutModal.style.display = "flex";
@@ -556,11 +570,11 @@ export class FluffyGrass {
 			const closeRoomListBtn = document.getElementById("close-room-list-btn");
 			const refreshRoomsBtn = document.getElementById("refresh-rooms-btn");
 			const roomListPanel = document.getElementById("room-list-panel");
-			
+
 			if (closeRoomListBtn && roomListPanel) {
 				closeRoomListBtn.addEventListener("click", () => {
 					roomListPanel.style.display = "none";
-					
+
 					// If they were in-game, bring back the top nav
 					if (this.isGameActive) {
 						const gameTopNav = document.getElementById("game-top-nav");
@@ -568,7 +582,7 @@ export class FluffyGrass {
 					}
 				});
 			}
-			
+
 			if (refreshRoomsBtn) {
 				refreshRoomsBtn.addEventListener("click", () => {
 					this.fetchRooms();
@@ -578,14 +592,14 @@ export class FluffyGrass {
 			// Setup Lobby Buttons
 			const leaveLobbyBtn = document.getElementById("leave-lobby-btn");
 			const startGameBtn = document.getElementById("start-game-btn");
-			
+
 			if (leaveLobbyBtn) {
 				leaveLobbyBtn.addEventListener("click", () => {
 					if (this.socket) {
 						this.socket.disconnect();
 						this.socket = null; // Clear socket so we can reconnect later
 					}
-					
+
 					if (this.userData || localStorage.getItem("authToken")) {
 						document.getElementById("lobby-panel")!.style.display = "none";
 						proceed("play", this.userData);
@@ -614,7 +628,7 @@ export class FluffyGrass {
 	private ensureSocket() {
 		if (!this.socket) {
 			this.socket = io(SERVER_URL);
-			
+
 			this.socket.on("room-updated", (players: any[]) => {
 				for (let i = 0; i < 4; i++) {
 					const slot = document.querySelector(`#player-slot-${i} .slot-content`);
@@ -632,7 +646,7 @@ export class FluffyGrass {
 						}
 					}
 				}
-				
+
 				// Enable Start Game if host and >= 2 players
 				const startBtn = document.getElementById("start-game-btn") as HTMLButtonElement;
 				if (startBtn && this.socket?.id === players[0]?.socketId) {
@@ -693,7 +707,7 @@ export class FluffyGrass {
 				const { socketId, bombId } = data;
 				const rp = this.remotePlayers.get(socketId);
 				const bombData = this.bombs.find(b => b.id === bombId);
-				
+
 				if (rp && rp.loaded && bombData) {
 					bombData.isFlying = false;
 					// Remove physics body
@@ -701,12 +715,12 @@ export class FluffyGrass {
 						getWorld().removeRigidBody(bombData.body);
 						bombData.body = null;
 					}
-					
+
 					let hand: THREE.Object3D | null = null;
 					rp.humanGroup.traverse((child: any) => {
 						if (child.name.toLowerCase().includes("righthand") && !hand) hand = child;
 					});
-					
+
 					if (hand) {
 						bombData.mesh.position.set(0, 0.1, 0);
 						hand.add(bombData.mesh);
@@ -720,39 +734,74 @@ export class FluffyGrass {
 			this.socket.on("bomb-thrown", (data: any) => {
 				const { bombId, position, velocity } = data;
 				const bombData = this.bombs.find(b => b.id === bombId);
-				
+
 				if (bombData) {
 					// Add back to scene
 					this.scene.add(bombData.mesh);
 					bombData.mesh.position.set(position.x, position.y, position.z);
-					
+
 					// Recreate physics
 					const rbDesc = RAPIER.RigidBodyDesc.dynamic()
 						.setTranslation(position.x, position.y, position.z)
 						.setLinearDamping(0.1)
 						.setAngularDamping(0.5);
 					const body = getWorld().createRigidBody(rbDesc);
-					
+
 					const colDesc = RAPIER.ColliderDesc.ball(0.5).setMass(10);
 					getWorld().createCollider(colDesc, body);
-					
+
 					bombData.body = body;
 					bombData.isFlying = true;
 					bombData.flightTime = 0;
 					body.applyImpulse(velocity, true);
-					
+
 					BombSound.playThrowSound(bombData.mesh.position);
 				}
 			});
 
+			this.socket.on("player-picked-up", (data: any) => {
+				const { socketId, targetSocketId } = data;
+				if (targetSocketId === this.socket?.id) {
+					// We are being carried!
+					this.isBeingCarriedBy = socketId;
+				}
+				
+				// Update remote player state
+				const carrier = this.remotePlayers.get(socketId);
+				if (carrier) carrier.isCarryingPlayer = true;
+				
+				const target = this.remotePlayers.get(targetSocketId);
+				if (target) target.isBeingCarried = true;
+			});
+
+			this.socket.on("player-thrown", (data: any) => {
+				const { socketId, targetSocketId, position, velocity } = data;
+				if (targetSocketId === this.socket?.id) {
+					// We were thrown!
+					this.isBeingCarriedBy = null;
+					if (this.human && this.humanInput) {
+						this.human.body.setTranslation(position, true);
+						this.humanInput.applyKnockback(new THREE.Vector3(velocity.x, velocity.y, velocity.z));
+						this.humanInput.startRecoverySequence();
+					}
+				}
+				
+				// Update remote player state
+				const carrier = this.remotePlayers.get(socketId);
+				if (carrier) carrier.isCarryingPlayer = false;
+				
+				const target = this.remotePlayers.get(targetSocketId);
+				if (target) target.isBeingCarried = false;
+			});
+
 			this.socket.on("player-state-updated", async (data: any) => {
 				const { socketId, state } = data;
-				
+
 				// Ensure remote player object exists
 				let rp = this.remotePlayers.get(socketId);
 				if (!rp) {
 					// Async load the remote models
-					rp = { 
+					rp = {
 						loaded: false,
 						targetHumanPosition: new THREE.Vector3(),
 						targetHumanQuaternion: new THREE.Quaternion(),
@@ -765,11 +814,32 @@ export class FluffyGrass {
 					const humanGroup = humanGltf.scene;
 					humanGroup.scale.setScalar(this.sceneProps.humanScale);
 					this.scene.add(humanGroup);
-					
+
 					const mixer = new THREE.AnimationMixer(humanGroup);
 					const animations = new Map<string, THREE.AnimationAction>();
 					humanGltf.animations.forEach((clip: any) => {
-						animations.set(clip.name.toLowerCase(), mixer.clipAction(clip));
+						const nameLower = clip.name.toLowerCase();
+						if (nameLower.includes("walk") || nameLower.includes("run")) {
+							clip.tracks.forEach((track: any) => {
+								if (track.name.toLowerCase().includes(".position")) {
+									const values = track.values;
+									const startX = values[0];
+									const startZ = values[2];
+									for (let i = 0; i < values.length; i += 3) {
+										values[i] = startX;
+										values[i + 2] = startZ;
+									}
+								}
+							});
+						}
+						const action = mixer.clipAction(clip);
+						if (nameLower === "being carried" || nameLower === "fall down" || nameLower === "sit to stand" || nameLower === "sweep fall" || nameLower === "stand to sit") {
+							action.setLoop(THREE.LoopOnce, 1);
+							action.clampWhenFinished = true;
+						} else {
+							action.setLoop(THREE.LoopRepeat, Infinity);
+						}
+						animations.set(nameLower, action);
 					});
 
 					const layout = await loadKenneySuvVisual(CAR_CONFIG.colliderYOffset, this.loadingManager);
@@ -783,12 +853,12 @@ export class FluffyGrass {
 					this.scene.add(carGroup);
 
 					// Create Kinematic Physics Bodies
-					const humanRadius = 0.3;
-					const humanHalfHeight = 0.5;
+					const humanRadius = 0.45;
+					const humanHalfHeight = 1.5;
 					const humanDesc = RAPIER.RigidBodyDesc.kinematicPositionBased();
 					const humanBody = getWorld().createRigidBody(humanDesc);
 					const humanCollider = RAPIER.ColliderDesc.capsule(humanHalfHeight, humanRadius)
-						.setTranslation(0, 0.8, 0); // Offset upwards from feet
+						.setTranslation(0, 2.4, 0); // Offset upwards from feet
 					getWorld().createCollider(humanCollider, humanBody);
 
 					const hx = Math.max(0.1, (layout.chassisSize.x / 2) - CAR_CONFIG.colliderRoundness);
@@ -811,7 +881,7 @@ export class FluffyGrass {
 					rp.mixer = mixer;
 					rp.animations = animations;
 					rp.currentAction = null;
-					
+
 					// Avoid overwriting if they disconnected while loading
 					if (!this.remotePlayers.has(socketId)) {
 						this.scene.remove(humanGroup);
@@ -833,7 +903,7 @@ export class FluffyGrass {
 					rp.targetCarPosition.set(state.carPosition.x, state.carPosition.y, state.carPosition.z);
 					rp.targetCarQuaternion.set(state.carQuaternion.x, state.carQuaternion.y, state.carQuaternion.z, state.carQuaternion.w);
 				}
-				
+
 				if (!rp.engineSound) {
 					rp.engineSound = new EngineSound(true);
 					rp.engineSound.init();
@@ -841,19 +911,26 @@ export class FluffyGrass {
 				if (!rp.hornSound) {
 					rp.hornSound = new HornSound();
 				}
-				
+
 				if (state.honking && !rp.hornSound.isPlaying) {
 					rp.hornSound.play();
 				} else if (!state.honking && rp.hornSound.isPlaying) {
 					rp.hornSound.stop();
 				}
-				
+
 				if (state.activeEntity === "human") {
-					rp.carGroup.visible = true;
+					rp.carGroup.visible = true; // Wait, actually should carGroup be true here? Yes, if they left it. But humanGroup should be true too!
+					rp.humanGroup.visible = true;
 					rp.engineSound.update(0, 0, rp.carGroup.position);
-					
+
 					// Handle Animation
-					if (state.animation && rp.animations.has(state.animation)) {
+					if (rp.isBeingCarried && rp.animations.has("being carried")) {
+						if (rp.currentAction !== rp.animations.get("being carried")) {
+							if (rp.currentAction) rp.currentAction.fadeOut(0.2);
+							rp.currentAction = rp.animations.get("being carried");
+							rp.currentAction!.reset().fadeIn(0.2).play();
+						}
+					} else if (state.animation && rp.animations.has(state.animation)) {
 						if (rp.currentAction !== rp.animations.get(state.animation)) {
 							if (rp.currentAction) rp.currentAction.fadeOut(0.2);
 							rp.currentAction = rp.animations.get(state.animation);
@@ -866,7 +943,7 @@ export class FluffyGrass {
 					rp.engineSound.update(state.speed || 0, state.throttle || 0, rp.carGroup.position);
 				}
 			});
-			
+
 			this.socket.on("user-disconnected", (socketId: string) => {
 				const rp = this.remotePlayers.get(socketId);
 				if (rp && rp.loaded) {
@@ -940,13 +1017,13 @@ export class FluffyGrass {
 	private fetchRooms() {
 		// Ensure socket is connected and listeners are attached
 		this.ensureSocket();
-		
+
 		const roomListPanel = document.getElementById("room-list-panel");
 		const roomListContainer = document.getElementById("room-list-container");
 		const gameTopNav = document.getElementById("game-top-nav");
 		const loadingScreen = document.getElementById("loading-screen");
 		const joinConfirmModal = document.getElementById("join-confirm-modal");
-		
+
 		if (roomListPanel) roomListPanel.style.display = "flex";
 		if (gameTopNav) gameTopNav.style.display = "none";
 		if (joinConfirmModal) joinConfirmModal.style.display = "none";
@@ -961,7 +1038,7 @@ export class FluffyGrass {
 		this.socket!.emit("get-rooms", (res: any) => {
 			if (res.success && roomListContainer) {
 				roomListContainer.innerHTML = "";
-				
+
 				if (res.rooms.length === 0) {
 					roomListContainer.innerHTML = `<div style="color: rgba(255,255,255,0.5); text-align: center; padding: 20px;">No active rooms found. Why not host one?</div>`;
 					return;
@@ -970,9 +1047,9 @@ export class FluffyGrass {
 				res.rooms.forEach((room: any) => {
 					const roomItem = document.createElement("div");
 					roomItem.className = "room-item";
-					
+
 					const isFull = room.playerCount >= 4;
-					
+
 					roomItem.innerHTML = `
 						<div class="room-info">
 							<div class="room-host">${room.hostName}'s Game</div>
@@ -982,7 +1059,7 @@ export class FluffyGrass {
 							${isFull ? 'Full' : 'Join'}
 						</button>
 					`;
-					
+
 					if (!isFull) {
 						const joinBtn = roomItem.querySelector(".room-join-btn");
 						if (joinBtn) {
@@ -992,7 +1069,7 @@ export class FluffyGrass {
 							});
 						}
 					}
-					
+
 					roomListContainer.appendChild(roomItem);
 				});
 			}
@@ -1014,7 +1091,7 @@ export class FluffyGrass {
 
 		for (let i = 0; i < 5; i++) {
 			const clone = bombScene.clone(true);
-			
+
 			const startPos = new THREE.Vector3();
 			if (i === 0) {
 				// Put the very first bomb exactly next to the car so it's impossible to miss
@@ -1028,10 +1105,10 @@ export class FluffyGrass {
 					CAR_CONFIG.spawn.z + Math.sin(angle) * dist
 				);
 			}
-			
+
 			// Float it slightly above the ground so it drops in realistically
-			startPos.y = getWorldTerrainY(startPos.x, startPos.z) + 3.0; 
-			
+			startPos.y = getWorldTerrainY(startPos.x, startPos.z) + 3.0;
+
 			clone.position.copy(startPos);
 			clone.traverse((child) => {
 				if (child instanceof THREE.Mesh) {
@@ -1047,7 +1124,7 @@ export class FluffyGrass {
 				.setLinearDamping(0.5)
 				.setAngularDamping(0.5);
 			const body = world.createRigidBody(rbDesc);
-			
+
 			const colDesc = RAPIER.ColliderDesc.ball(0.5).setMass(10);
 			world.createCollider(colDesc, body);
 
@@ -1058,7 +1135,11 @@ export class FluffyGrass {
 
 	private addGrass(
 		surfaceMesh: THREE.Mesh,
-		grassGeometry: THREE.BufferGeometry
+		grassGeometry: THREE.BufferGeometry,
+		targetGroup: THREE.Group,
+		pondLocalPos: THREE.Vector2 = new THREE.Vector2(-20, 5),
+		grassHeightMultiplier: number = 1.0,
+		isNewWorld: boolean = false
 	) {
 		const sampler = new MeshSurfaceSampler(surfaceMesh).build();
 
@@ -1077,8 +1158,54 @@ export class FluffyGrass {
 		const yAxis = new THREE.Vector3(0, 1, 0);
 		const matrix = new THREE.Matrix4();
 
-		for (let i = 0; i < this.grassCount; i++) {
+		let instanceIndex = 0;
+		for (let i = 0; i < this.grassCount * 1.5; i++) { // sample more to hit target
+			if (instanceIndex >= this.grassCount) break;
 			sampler.sample(position, normal);
+
+			if (isNewWorld) {
+				// Only place grass on flat-ish surfaces (like real mountains)
+				// dot = 1.0 means perfectly flat, dot = 0 means vertical cliff
+				const steepness = normal.dot(yAxis);
+				if (steepness < 0.5) continue; // Very steep cliff — no grass at all
+				if (steepness < 0.7 && Math.random() > 0.15) continue; // Moderately steep — very sparse grass
+
+				// Cluster grass into natural patches using noise
+				// This creates distinct groups of grass with bare ground between them
+				const clusterNoise =
+					Math.sin(position.x * 0.4 + position.z * 0.3) *
+					Math.cos(position.z * 0.5 - position.x * 0.2) +
+					Math.sin(position.x * 0.8 + 2.1) * Math.cos(position.z * 0.7 + 1.3) * 0.5;
+				if (clusterNoise < 0.2) continue; // Skip — bare ground between clusters
+			}
+
+			// Use the provided pond local position to clear grass around it
+			const distToPond = Math.hypot(position.x - pondLocalPos.x, position.z - pondLocalPos.y);
+			let heightScale = 1.0;
+
+			if (distToPond < 14) {
+				if (distToPond < 8) {
+					// Deep water - very sparse and short grass
+					if (Math.random() > 0.15) continue;
+					heightScale = 0.25 + Math.random() * 0.15;
+				} else if (distToPond < 10) {
+					// Shallow water - sparse short grass
+					if (Math.random() > 0.4) continue;
+					heightScale = 0.35 + Math.random() * 0.2;
+				} else {
+					// Shoreline - transition from short grass to full height
+					const t = (distToPond - 10) / 4;
+					heightScale = 0.45 + 0.55 * t;
+				}
+			}
+
+			// Base random scale variation for all grass
+			const randomVariation = 0.8 + Math.random() * 0.4;
+			scale.set(
+				randomVariation * grassHeightMultiplier,                 // X: Scaled width
+				heightScale * randomVariation * grassHeightMultiplier,   // Y: Scaled height
+				randomVariation * grassHeightMultiplier                  // Z: Scaled width
+			);
 
 			quaternion.setFromUnitVectors(yAxis, normal);
 			const randomRotation = new THREE.Euler(0, Math.random() * Math.PI * 2, 0);
@@ -1089,12 +1216,18 @@ export class FluffyGrass {
 			quaternion.multiply(randomQuaternion);
 			matrix.compose(position, quaternion, scale);
 
-			grassInstancedMesh.setMatrixAt(i, matrix);
+			grassInstancedMesh.setMatrixAt(instanceIndex, matrix);
+			instanceIndex++;
 		}
 
 		grassInstancedMesh.instanceMatrix.needsUpdate = true;
 		grassInstancedMesh.frustumCulled = false;
-		this.worldGroup.add(grassInstancedMesh);
+		grassInstancedMesh.name = 'Grass';
+		// Grass is restored to layer 0 (default) since we use visibility toggling now
+		grassInstancedMesh.layers.set(0);
+		// Copy position from surfaceMesh so grass aligns with offset terrains
+		grassInstancedMesh.position.copy(surfaceMesh.position);
+		targetGroup.add(grassInstancedMesh);
 	}
 
 	private loadGltf(url: string): Promise<THREE.Group> {
@@ -1128,11 +1261,25 @@ export class FluffyGrass {
 		setIslandTerrain(mesh);
 		createTerrainHeightfieldCollider(heights, nrows, ncols);
 
+		this.pond = new Pond({
+			width: 20,
+			height: 20,
+			circular: true,
+			renderer: this.renderer,
+			scene: this.scene,
+			camera: this.camera,
+			sunDirection: new THREE.Vector3(1, 1, 1).normalize()
+		});
+		// Position exactly in the basin we scooped out at (-20, 5)
+		this.pond.mesh.position.set(-20, -0.5, 5);
+		this.pond.mesh.renderOrder = 1; // Force water to draw AFTER grass!
+		this.worldGroup.add(this.pond.mesh);
+
 		const grassScene = await this.loadGltf("/grassLODs.glb");
 		let foundGrass = false;
 		grassScene.traverse((child) => {
 			if (child instanceof THREE.Mesh && child.name.includes("LOD00")) {
-				child.geometry.scale(5, 5, 5);
+				child.geometry.scale(5, 2, 5);
 				this.grassGeometry = child.geometry;
 				foundGrass = true;
 			}
@@ -1141,7 +1288,7 @@ export class FluffyGrass {
 			throw new Error("grassLODs.glb: GrassLOD00 mesh not found");
 		}
 
-		this.addGrass(mesh, this.grassGeometry);
+		this.addGrass(mesh, this.grassGeometry, this.worldGroup);
 
 		console.log(
 			`[FluffyGrass] terrain ${TERRAIN_CONFIG.size}×${TERRAIN_CONFIG.size}, grass=${this.grassCount}`
@@ -1288,7 +1435,7 @@ export class FluffyGrass {
 		// Connect the procedural pickup animation to grab the object
 		this.humanInput.checkCanPickup = () => {
 			if (!this.human) return null;
-			
+
 			// Check if already holding a bomb
 			let holdingBomb = false;
 			for (const bomb of this.bombs) {
@@ -1348,17 +1495,17 @@ export class FluffyGrass {
 				.setLinearDamping(0.1)
 				.setAngularDamping(0.5);
 			const body = getWorld().createRigidBody(rbDesc);
-			
+
 			const colDesc = RAPIER.ColliderDesc.ball(0.5).setMass(10);
 			getWorld().createCollider(colDesc, body);
-			
+
 			bombData.body = body;
 
 			// Throw it forward and HIGH into the air!
 			// We already have 'forward' from the top of the function
 			forward.y = 0; // flatten it so we don't depend on character pitch
 			forward.normalize();
-			
+
 			// Mass is 10. 
 			// Y Impulse = 80 -> Upward velocity 8m/s. Reaches ~3.2m high (plus the 1.5m start height = 4.7m total height!)
 			// X/Z Impulse = 50 -> Forward velocity 5m/s. Travels 7+ meters before hitting the ground.
@@ -1370,7 +1517,7 @@ export class FluffyGrass {
 			body.applyImpulse(vel, true);
 			bombData.isFlying = true;
 			bombData.flightTime = 0;
-			
+
 			BombSound.playThrowSound(bombData.mesh.position);
 
 			if (this.socket && this.roomCode) {
@@ -1398,7 +1545,7 @@ export class FluffyGrass {
 			this.human.mesh.traverse(child => {
 				if (child.name.toLowerCase().includes("righthand") && !hand) hand = child;
 			});
-			
+
 			if (hand) {
 				// Attach the object to the character's hand
 				obj.position.set(0, 0.1, 0); // local to hand
@@ -1413,6 +1560,64 @@ export class FluffyGrass {
 				this.socket.emit("bomb-pickup", { roomCode: this.roomCode, bombId: bombData.id });
 			}
 		};
+		this.humanInput.checkCanPickupPlayer = () => {
+			if (!this.human) return null;
+			let nearestPlayerId: string | null = null;
+			let minDst = Infinity;
+			
+			for (const [socketId, rp] of this.remotePlayers.entries()) {
+				if (!rp.loaded || !rp.humanGroup) continue;
+				if (rp.humanGroup.visible) {
+					const dist = this.human.mesh.position.distanceTo(rp.humanGroup.position);
+					if (dist < 2.5 && dist < minDst) {
+						minDst = dist;
+						nearestPlayerId = socketId;
+					}
+				}
+			}
+			return nearestPlayerId;
+		};
+
+		this.humanInput.onGrabPlayer = (socketId: string) => {
+			if (this.socket && this.roomCode) {
+				this.socket.emit("player-pickup", { roomCode: this.roomCode, targetSocketId: socketId });
+			}
+			const target = this.remotePlayers.get(socketId);
+			if (target) target.isBeingCarried = true;
+		};
+
+		this.humanInput.onThrowPlayer = (socketId: string) => {
+			if (!this.human) return;
+			// Get character's forward direction
+			const forward = new THREE.Vector3(0, 0, 1);
+			forward.applyQuaternion(this.human.mesh.quaternion);
+			forward.y = 0;
+			forward.normalize();
+			
+			const worldPos = new THREE.Vector3();
+			worldPos.copy(this.human.mesh.position);
+			worldPos.y += 1.5; 
+			worldPos.y += 2.4; // Account for physics body offset so they don't spawn underground!
+			worldPos.addScaledVector(forward, 1.5);
+			
+			const vel = {
+				x: forward.x * 3, // Toss them gently forward
+				y: 3,             // and slightly upward
+				z: forward.z * 3
+			};
+			
+			if (this.socket && this.roomCode) {
+				this.socket.emit("player-throw", {
+					roomCode: this.roomCode,
+					targetSocketId: socketId,
+					position: { x: worldPos.x, y: worldPos.y, z: worldPos.z },
+					velocity: vel
+				});
+			}
+			
+			const target = this.remotePlayers.get(socketId);
+			if (target) target.isBeingCarried = false;
+		};
 	}
 	private async createLobbyModels() {
 		// Add a light to the camera so the models are always visible in the lobby
@@ -1426,28 +1631,28 @@ export class FluffyGrass {
 			0x33ff33, // Green
 			0xffff33, // Yellow
 		];
-		
+
 		const spacing = 3.4;
 		const startX = -1.5 * spacing - 0.85; // Shifted even further left to perfectly center with UI
-		
+
 		for (let i = 0; i < 4; i++) {
 			// Reloading GLTF fixes SkinnedMesh bone references (clone() breaks them)
 			const gltf = await this.loadGltfFull("/poutine.glb");
 			const clone = gltf.scene;
 			clone.scale.setScalar(this.sceneProps.humanScale * 1.25); // Scale up slightly
-			
+
 			// Models will remain their original color
 			// (Removed tinting logic since model is a single mesh)
-			
+
 			// Set rotation to face the camera. (Math.PI / 4 is exactly forward!)
 			clone.rotation.set(0, Math.PI / 4, 0);
-			
+
 			// Position exactly aligned with 4 columns at z = -5, moved down slightly to sit nicely
 			clone.position.set(startX + (i * spacing), -1.0, -5.0);
-			
+
 			// Add to camera so it moves with it
 			this.camera.add(clone);
-			
+
 			// Play idle animation
 			const mixer = new THREE.AnimationMixer(clone);
 			const idleClip = gltf.animations.find((c: any) => c.name.toLowerCase().includes("idle"));
@@ -1455,7 +1660,7 @@ export class FluffyGrass {
 				mixer.clipAction(idleClip).play();
 			}
 			this.lobbyMixers.push(mixer);
-			
+
 			// Initially hidden until someone joins that slot
 			clone.visible = false;
 			this.lobbyModels.push(clone);
@@ -1474,9 +1679,13 @@ export class FluffyGrass {
 		this.Uniforms.uTime.value += this.clock.getDelta();
 
 		if (this.car) {
-			this.volumetricFog?.update(this.car.mesh.position, this.camera);
+			let fogCenter: THREE.Vector3 | undefined = undefined;
+			if (this.car.mesh.position.z > 130) {
+				fogCenter = this.car.mesh.position;
+			}
+			this.volumetricFog?.update(this.car.mesh.position, this.camera, this.currentFogRadius, fogCenter);
 			this.proceduralBridge?.update(this.car.mesh.position);
-			
+
 			// World Unloading Logic
 			// The bridge starts at Z = 60. By Z = 90, we are fully in the fog.
 			if (this.car.mesh.position.z > 90) {
@@ -1484,11 +1693,114 @@ export class FluffyGrass {
 			} else {
 				this.worldGroup.visible = true;
 			}
+			// Hide the pond earlier (at bridge start) so it's not visible through bridge gaps
+			if (this.pond && this.car.mesh.position.z > 55) {
+				this.pond.mesh.visible = false;
+			}
+
+			// New world loading logic
+			if (this.car.mesh.position.z > 130) {
+				if (!this.hasStartedLoadingNewWorld) {
+					this.hasStartedLoadingNewWorld = true;
+
+					if (this.dayNight) {
+						(this.dayNight as any).overrideColors = true;
+						const skyDome = this.scene.getObjectByName("sky-dome");
+						if (skyDome) skyDome.visible = false;
+					}
+
+					const finalHeight = this.proceduralBridge?.getFinalHeight() ?? 0;
+					const finalZ = this.proceduralBridge?.getLastGeneratedZ() ?? 215;
+					const finalX = this.proceduralBridge?.getLastGeneratedX() ?? 0;
+					this.createValleyTerrain(finalX, finalHeight, finalZ);
+				}
+
+				// Transition fog and background to dark moody teal
+				const targetColor = new THREE.Color(0x1e2b2f);
+				// Make volumetric fog softly blend with the sky but slightly lighter
+				const targetVolumetricColor = new THREE.Color(0x2c3f44);
+				const lerpFactor = dt * 0.5;
+				if (this.scene.fog instanceof THREE.FogExp2) {
+					this.scene.fog.color.lerp(targetColor, lerpFactor);
+					// Push global fog out enough to see the world, but thick enough to hide the terrain edges
+					this.scene.fog.density = THREE.MathUtils.lerp(this.scene.fog.density, 0.005, lerpFactor);
+				}
+				if (this.scene.background instanceof THREE.Color) {
+					this.scene.background.lerp(targetColor, lerpFactor);
+				}
+				if (this.volumetricFog) {
+					// Also lerp volumetric fog color
+					const mat = (this.volumetricFog.group.children[0] as THREE.InstancedMesh).material as THREE.MeshBasicMaterial;
+					mat.color.lerp(targetVolumetricColor, lerpFactor);
+				}
+				if (this.grassMaterial) {
+					this.grassMaterial.uniforms.baseColor.value.lerp(new THREE.Color(0x3e524e), lerpFactor);
+					this.grassMaterial.uniforms.tipColor1.value.lerp(new THREE.Color(0x799894), lerpFactor);
+					this.grassMaterial.uniforms.tipColor2.value.lerp(new THREE.Color(0x56726e), lerpFactor);
+				}
+
+				// Push volumetric fog radius out to form a ring around the new world
+				this.currentFogRadius = THREE.MathUtils.lerp(this.currentFogRadius, 250, lerpFactor);
+			}
 		}
 
 		if (this.worldGroup.visible) {
 			this.grassMaterial.update(this.Uniforms.uTime.value);
 			updateFoliageWind(dt);
+			if (this.pond) {
+				this.pond.update(dt);
+
+				// --- WATER RIPPLES PHYSICS INTERACTION ---
+				const waterY = this.pond.mesh.position.y;
+
+				// 1. Car Ripples (4 wheels)
+				if (this.car && this.car.body) {
+					// Check if car is near water level
+					if (Math.abs(this.car.mesh.position.y - waterY) < 2.0) {
+						const speed = this.car.body.linvel();
+						const velocity = Math.hypot(speed.x, speed.z);
+						if (velocity > 1.0) {
+							// Inject a ripple under the car
+							this.pond.createRipple({
+								position: this.car.mesh.position,
+								strength: Math.min(0.5, velocity * 0.05),
+								radius: 1.5
+							});
+						}
+					}
+				}
+
+				// 2. Human Ripples
+				if (this.human && this.human.body) {
+					if (Math.abs(this.human.mesh.position.y - waterY) < 1.0) {
+						const speed = this.human.body.linvel();
+						const velocity = Math.hypot(speed.x, speed.z);
+						if (velocity > 0.5) {
+							// Inject a ripple under the player
+							this.pond.createRipple({
+								position: this.human.mesh.position,
+								strength: 0.1,
+								radius: 0.8
+							});
+						}
+					}
+				}
+
+				// 3. Bomb Ripples
+				for (const bomb of this.bombs) {
+					if (bomb.body && Math.abs(bomb.mesh.position.y - waterY) < 0.5) {
+						const speed = bomb.body.linvel();
+						const velocity = Math.hypot(speed.x, speed.z);
+						if (velocity > 0.5) {
+							this.pond.createRipple({
+								position: bomb.mesh.position,
+								strength: 0.05,
+								radius: 0.5
+							});
+						}
+					}
+				}
+			}
 		}
 
 		if (!this.isGameActive) {
@@ -1524,17 +1836,41 @@ export class FluffyGrass {
 			const playAllowed = this.orientationGate?.isPlayAllowed() ?? true;
 			const world = getWorld();
 			world.timestep = dt;
-			
+
 			if (playAllowed) {
 				if (this.activePlayer === "car") {
 					this.carInput.applyInput(dt);
 				} else {
-					this.humanInput.update(dt, this.camera);
+					if (!this.isBeingCarriedBy) {
+						this.humanInput.isEnabled = true;
+						this.humanInput.update(dt, this.camera);
+					} else {
+						this.humanInput.isEnabled = false;
+					}
 				}
 			}
-			
+
+			if (this.isBeingCarriedBy) {
+				const carrier = this.remotePlayers.get(this.isBeingCarriedBy);
+				if (carrier && carrier.loaded && carrier.humanGroup) {
+					const forward = new THREE.Vector3(0, 0, 1).applyQuaternion(carrier.humanGroup.quaternion).normalize();
+					const right = new THREE.Vector3(-1, 0, 0).applyQuaternion(carrier.humanGroup.quaternion).normalize();
+					
+					const worldPos = new THREE.Vector3();
+					carrier.humanGroup.getWorldPosition(worldPos);
+					worldPos.addScaledVector(forward, 0.65); // Move forward into hands (increased distance)
+					worldPos.addScaledVector(right, 0.7); // Move to the right side (centered slightly more)
+					worldPos.y += 1.4; // Hands height for mesh
+					worldPos.y += 2.4; // Add physics body offset
+					
+					this.human.body.setTranslation(worldPos, true);
+					this.human.body.setLinvel({x:0, y:0, z:0}, true);
+				}
+				this.human.playAnimation("being carried");
+			}
+
 			world.step();
-			
+
 			if (playAllowed) {
 				if (this.activePlayer === "car") {
 					this.carInput.afterPhysics(dt);
@@ -1548,102 +1884,111 @@ export class FluffyGrass {
 				const throttle = this.carController.getThrottle();
 				this.engineSound.update(speed, throttle);
 			}
-			
+
 			// Sync bomb physics
 			if (this.worldGroup.visible) {
 				for (const bomb of this.bombs) {
-				if (bomb.body) {
-					const t = bomb.body.translation();
-					const r = bomb.body.rotation();
-					bomb.mesh.position.set(t.x, t.y, t.z);
-					bomb.mesh.quaternion.set(r.x, r.y, r.z, r.w);
-					
-					if (bomb.isFlying) {
-						bomb.flightTime = (bomb.flightTime || 0) + dt;
-						// If y is close to terrain, we've landed
-						const ty = getWorldTerrainY(t.x, t.z);
-						if (bomb.flightTime > 0.2 && t.y <= ty + 0.8) {
-							bomb.isFlying = false;
-							
-							// Trigger blast sound after 1 second
-							const blastPos = bomb.mesh.position.clone();
-							const blastId = bomb.id;
-							setTimeout(() => {
-								BombSound.playBlastSound(blastPos);
-								this.explosionSystem?.emit(blastPos);
-								
-								// --- KNOCKBACK PHYSICS ---
-								const blastRadius = 3.5; // Blast radius
-								
-								// 1. Player Knockback
-								if (this.human && this.humanInput) {
-									const dist = this.human.mesh.position.distanceTo(blastPos);
-									if (dist < blastRadius) {
-										const dir = new THREE.Vector3().subVectors(this.human.mesh.position, blastPos);
-										// Blast them up so they leave the ground and slide
-										dir.y = Math.max(0.5, dir.y + 1.0);
-										dir.normalize();
-										// Massive impulse to overcome the linear damping of the character controller
-										const force = 3000 * (1 - dist / blastRadius);
-										this.humanInput.applyKnockback(dir.multiplyScalar(force));
-									}
-								}
-								
-								// 2. Car Knockback
-								if (this.car && this.car.body) {
-									// Car is large, check distance from center
-									const dist = this.car.mesh.position.distanceTo(blastPos);
-									// Give car slightly larger blast reception radius due to size
-									if (dist < blastRadius + 2.0) {
-										const dir = new THREE.Vector3().subVectors(this.car.mesh.position, blastPos);
-										dir.y = Math.max(0.5, dir.y + 1.0); // Cars should flip!
-										dir.normalize();
-										// Car is massive (e.g. 1500kg). It requires a massive impulse to move/flip.
-										const force = 25000 * (1 - dist / (blastRadius + 2.0));
-										this.car.body.applyImpulse(dir.multiplyScalar(force), true);
-									}
-								}
-								
-								// 3. Other Bombs Knockback (Chain Reactions!)
-								for (const otherBomb of this.bombs) {
-									if (otherBomb.id !== blastId && otherBomb.body && otherBomb.mesh.parent === this.worldGroup) {
-										const dist = otherBomb.mesh.position.distanceTo(blastPos);
-										if (dist < blastRadius) {
-											const dir = new THREE.Vector3().subVectors(otherBomb.mesh.position, blastPos);
-											dir.y = Math.max(0.5, dir.y + 1.0);
-											dir.normalize();
-											const force = 150 * (1 - dist / blastRadius);
-											otherBomb.body.applyImpulse(dir.multiplyScalar(force), true);
-											
-											// Start their timer too! Chain reactions!
-											otherBomb.isFlying = true;
-											otherBomb.flightTime = 0;
+					if (bomb.body) {
+						const t = bomb.body.translation();
+						const r = bomb.body.rotation();
+						bomb.mesh.position.set(t.x, t.y, t.z);
+						bomb.mesh.quaternion.set(r.x, r.y, r.z, r.w);
+
+						if (bomb.isFlying) {
+							bomb.flightTime = (bomb.flightTime || 0) + dt;
+							// If y is close to terrain, we've landed
+							const ty = getWorldTerrainY(t.x, t.z);
+							if (bomb.flightTime > 0.2 && t.y <= ty + 0.8) {
+								bomb.isFlying = false;
+
+								// Trigger blast sound after 1 second
+								const blastPos = bomb.mesh.position.clone();
+								const blastId = bomb.id;
+								setTimeout(() => {
+									BombSound.playBlastSound(blastPos);
+									this.explosionSystem?.emit(blastPos);
+
+									// --- WATER SPLASH ---
+									if (this.pond) {
+										const distToPond = Math.hypot(blastPos.x - (-20), blastPos.z - 5);
+										const waterY = this.pond.mesh.position.y;
+										// If bomb is anywhere near or inside the pond (radius 15 to include shores)
+										if (distToPond < 15 && Math.abs(blastPos.y - waterY) < 4.0) {
+											this.pond.createRipple({
+												position: blastPos,
+												strength: 1.5, // Huge displacement
+												radius: 5.0    // Huge area
+											});
 										}
 									}
-								}
-								// -------------------------
-								
-								// Reset bomb position after explosion
-								const b = this.bombs.find(x => x.id === blastId);
-								if (b && b.body) {
-									const newPos = new THREE.Vector3(
-										(Math.random() - 0.5) * 50,
-										0,
-										(Math.random() - 0.5) * 50
-									);
-									newPos.y = getWorldTerrainY(newPos.x, newPos.z) + 5.0;
-									b.body.setTranslation(newPos, true);
-									b.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
-									b.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
-								}
-							}, 1000);
-						} else {
-							this.smokeSystem?.emit(bomb.mesh.position);
+
+									// --- KNOCKBACK PHYSICS ---
+									const blastRadius = 3.5; // Blast radius
+
+									// 1. Player Knockback
+									if (this.human && this.humanInput) {
+										const dist = this.human.mesh.position.distanceTo(blastPos);
+										if (dist < blastRadius) {
+											// Just trigger the animation sequence, do not apply physics knockback
+											this.humanInput.startRecoverySequence("explosion");
+										}
+									}
+
+									// 2. Car Knockback
+									if (this.car && this.car.body) {
+										// Car is large, check distance from center
+										const dist = this.car.mesh.position.distanceTo(blastPos);
+										// Give car slightly larger blast reception radius due to size
+										if (dist < blastRadius + 2.0) {
+											const dir = new THREE.Vector3().subVectors(this.car.mesh.position, blastPos);
+											dir.y = Math.max(0.5, dir.y + 1.0); // Cars should flip!
+											dir.normalize();
+											// Car is massive (e.g. 1500kg). It requires a massive impulse to move/flip.
+											const force = 25000 * (1 - dist / (blastRadius + 2.0));
+											this.car.body.applyImpulse(dir.multiplyScalar(force), true);
+										}
+									}
+
+									// 3. Other Bombs Knockback (Chain Reactions!)
+									for (const otherBomb of this.bombs) {
+										if (otherBomb.id !== blastId && otherBomb.body && otherBomb.mesh.parent === this.worldGroup) {
+											const dist = otherBomb.mesh.position.distanceTo(blastPos);
+											if (dist < blastRadius) {
+												const dir = new THREE.Vector3().subVectors(otherBomb.mesh.position, blastPos);
+												dir.y = Math.max(0.5, dir.y + 1.0);
+												dir.normalize();
+												const force = 150 * (1 - dist / blastRadius);
+												otherBomb.body.applyImpulse(dir.multiplyScalar(force), true);
+
+												// Start their timer too! Chain reactions!
+												otherBomb.isFlying = true;
+												otherBomb.flightTime = 0;
+											}
+										}
+									}
+									// -------------------------
+
+									// Reset bomb position after explosion
+									const b = this.bombs.find(x => x.id === blastId);
+									if (b && b.body) {
+										const newPos = new THREE.Vector3(
+											(Math.random() - 0.5) * 50,
+											0,
+											(Math.random() - 0.5) * 50
+										);
+										newPos.y = getWorldTerrainY(newPos.x, newPos.z) + 5.0;
+										b.body.setTranslation(newPos, true);
+										b.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+										b.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+									}
+								}, 1000);
+							} else {
+								this.smokeSystem?.emit(bomb.mesh.position);
+							}
 						}
 					}
 				}
 			}
-		}
 
 			if (!this.sceneProps.mapMode) {
 				if (this.activePlayer === "car") {
@@ -1660,7 +2005,7 @@ export class FluffyGrass {
 					this.interactionPrompt.style.display = "none";
 				} else {
 					const distToCar = this.human.mesh.position.distanceTo(this.car.mesh.position);
-					
+
 					let nearestBombDist = Infinity;
 					let holdingBomb = false;
 					for (const bomb of this.bombs) {
@@ -1674,6 +2019,14 @@ export class FluffyGrass {
 						}
 					}
 
+					let nearestPlayerDist = Infinity;
+					for (const [socketId, rp] of this.remotePlayers.entries()) {
+						if (rp.loaded && rp.humanGroup && rp.humanGroup.visible) {
+							const d = this.human.mesh.position.distanceTo(rp.humanGroup.position);
+							if (d < nearestPlayerDist) nearestPlayerDist = d;
+						}
+					}
+
 					if (distToCar < 3.0) {
 						this.interactionPrompt.style.display = "flex";
 						this.interactionPrompt.style.alignItems = "center";
@@ -1684,6 +2037,11 @@ export class FluffyGrass {
 						this.interactionPrompt.style.alignItems = "center";
 						this.interactionPrompt.style.justifyContent = "center";
 						this.interactionPrompt.textContent = "T";
+					} else if (this.humanInput.isCarryingPlayer || nearestPlayerDist < 2.5) {
+						this.interactionPrompt.style.display = "flex";
+						this.interactionPrompt.style.alignItems = "center";
+						this.interactionPrompt.style.justifyContent = "center";
+						this.interactionPrompt.textContent = "H";
 					} else {
 						this.interactionPrompt.style.display = "none";
 					}
@@ -1697,19 +2055,27 @@ export class FluffyGrass {
 					if (isCarOutsideWorld(this.car)) {
 						this.carOutOfWorldTimer += dt;
 						if (this.carOutOfWorldTimer >= 2) {
-							respawnCarAtStart(this.car, this.carController);
+							let customSpawn: THREE.Vector3 | undefined = undefined;
+							// If we are far enough along, respawn at the new world entrance
+							if (this.car.mesh.position.z > 130 && this.proceduralBridge) {
+								const finalHeight = this.proceduralBridge.getFinalHeight();
+								const bridgeEndZ = this.proceduralBridge.getLastGeneratedZ();
+								const bridgeEndX = this.proceduralBridge.getLastGeneratedX();
+								customSpawn = new THREE.Vector3(bridgeEndX, finalHeight, bridgeEndZ + 2);
+							}
+							respawnCarAtStart(this.car, this.carController, customSpawn);
 							this.carOutOfWorldTimer = 0;
 						}
 					} else {
 						this.carOutOfWorldTimer = 0;
 					}
 				}
-				
+
 				// Human respawn
 				if (this.human) {
 					const ht = this.human.body.translation();
-					const isOutside = ht.y < -15 || ht.y > 90;
-					
+					const isOutside = ht.y < -120 || ht.y > 90;
+
 					if (isOutside) {
 						this.humanOutOfWorldTimer += dt;
 						if (this.humanOutOfWorldTimer >= 2) {
@@ -1751,23 +2117,23 @@ export class FluffyGrass {
 				this.fireflies.update(dt, this.frameFireflyIntensity, threat);
 			}
 		}
-		
+
 		if (this.smokeSystem) {
 			this.smokeSystem.update(dt);
 		}
 		this.explosionSystem?.update(dt);
-		
+
 		// Multiplayer Synchronization Loop
 		if (this.socket && this.socket.connected && this.roomCode && this.isGameActive) {
 			const anyThis = this as any;
 			if (!anyThis._lastNetTick || now - anyThis._lastNetTick > 50) { // ~20Hz
 				anyThis._lastNetTick = now;
-				const state: any = { 
+				const state: any = {
 					activeEntity: this.activePlayer,
 					speed: this.carController ? this.carController.getSpeed() : 0,
 					throttle: this.carController ? this.carController.getThrottle() : 0
 				};
-				
+
 				if (this.human) {
 					const hp = this.human.mesh.position;
 					const hq = this.human.mesh.quaternion;
@@ -1775,30 +2141,53 @@ export class FluffyGrass {
 					state.humanQuaternion = { x: hq.x, y: hq.y, z: hq.z, w: hq.w };
 					state.animation = this.human.activeAnimationName;
 				}
-				
+
 				if (this.car) {
 					const cp = this.car.mesh.position;
 					const cq = this.car.mesh.quaternion;
 					state.carPosition = { x: cp.x, y: cp.y, z: cp.z };
 					state.carQuaternion = { x: cq.x, y: cq.y, z: cq.z, w: cq.w };
 				}
-				
+
 				this.socket.emit("player-state", { roomCode: this.roomCode, state });
 			}
 		}
 
 		// Update remote player animations and interpolation
-		for (const rp of this.remotePlayers.values()) {
+		for (const [id, rp] of this.remotePlayers.entries()) {
 			if (!rp.loaded) continue;
-			
+
 			const lerpFactor = 10 * dt; // Smoothness factor
-			
+
 			if (rp.humanGroup && rp.humanGroup.visible) {
-				rp.humanGroup.position.lerp(rp.targetHumanPosition, lerpFactor);
-				rp.humanGroup.quaternion.slerp(rp.targetHumanQuaternion, lerpFactor);
+				let isCarriedByMe = false;
+				if (this.humanInput && this.humanInput.isCarryingPlayer && this.humanInput.carriedPlayerId === id && this.human) {
+					isCarriedByMe = true;
+					// We are carrying this player! Snap them to our hands locally!
+					const forward = new THREE.Vector3(0, 0, 1).applyQuaternion(this.human.mesh.quaternion).normalize();
+					const right = new THREE.Vector3(-1, 0, 0).applyQuaternion(this.human.mesh.quaternion).normalize();
+					
+					const worldPos = new THREE.Vector3();
+					this.human.mesh.getWorldPosition(worldPos);
+					worldPos.addScaledVector(forward, 0.65); // Move forward into hands
+					worldPos.addScaledVector(right, 0.7); // Move to the right side
+					worldPos.y += 1.4; // Hands height
+					
+					rp.humanGroup.position.copy(worldPos);
+					rp.humanGroup.quaternion.copy(this.human.mesh.quaternion);
+				} else {
+					rp.humanGroup.position.lerp(rp.targetHumanPosition, lerpFactor);
+					rp.humanGroup.quaternion.slerp(rp.targetHumanQuaternion, lerpFactor);
+				}
+				
 				if (rp.humanBody) {
-					rp.humanBody.setNextKinematicTranslation(rp.humanGroup.position);
-					rp.humanBody.setNextKinematicRotation(rp.humanGroup.quaternion);
+					if (isCarriedByMe || rp.isBeingCarried) {
+						// Move their physics body far away so it doesn't push us into the sky!
+						rp.humanBody.setNextKinematicTranslation({ x: 0, y: -100, z: 0 });
+					} else {
+						rp.humanBody.setNextKinematicTranslation(rp.humanGroup.position);
+						rp.humanBody.setNextKinematicRotation(rp.humanGroup.quaternion);
+					}
 				}
 				if (rp.mixer) rp.mixer.update(dt);
 			} else {
@@ -1806,7 +2195,7 @@ export class FluffyGrass {
 					rp.humanBody.setNextKinematicTranslation({ x: 0, y: -100, z: 0 });
 				}
 			}
-			
+
 			if (rp.carGroup && rp.carGroup.visible) {
 				rp.carGroup.position.lerp(rp.targetCarPosition, lerpFactor);
 				rp.carGroup.quaternion.slerp(rp.targetCarQuaternion, lerpFactor);
@@ -1823,7 +2212,7 @@ export class FluffyGrass {
 
 		this.renderer.render(this.scene, this.camera);
 		this.stats.update();
-		
+
 		const gpuPanel = document.getElementById("custom-gpu-panel");
 		if (gpuPanel) {
 			gpuPanel.innerHTML = `GPU LOAD<br/>Calls: ${this.renderer.info.render.calls}<br/>Tris: ${this.renderer.info.render.triangles}`;
@@ -1961,7 +2350,7 @@ export class FluffyGrass {
 		this.interactionPrompt.style.pointerEvents = "auto"; // Make it clickable
 		this.interactionPrompt.style.cursor = "pointer";
 		this.interactionPrompt.style.zIndex = "1000";
-		
+
 		// Handle touch/click for mobile users
 		this.interactionPrompt.addEventListener("click", () => {
 			if (!this.isGameActive) return;
@@ -1973,26 +2362,26 @@ export class FluffyGrass {
 				}
 			}
 		});
-		
+
 		document.body.appendChild(this.interactionPrompt);
 	}
 
 	private setupStats() {
 		this.stats.init(this.renderer);
 		const statsDom = (this.stats as unknown as { dom: HTMLElement }).dom;
-		
+
 		statsDom.style.position = "fixed";
 		statsDom.style.bottom = "45px";
 		statsDom.style.right = "10px";
 		statsDom.style.left = "auto";
 		statsDom.style.top = "auto";
-		
+
 		// Use flexbox to line them up side-by-side
 		statsDom.style.display = "flex";
 		statsDom.style.flexDirection = "row";
 		statsDom.style.gap = "5px";
 		statsDom.style.zIndex = "10000";
-		
+
 		// Force all internal panels to be visible instead of just one
 		setTimeout(() => {
 			for (let i = 0; i < statsDom.children.length; i++) {
@@ -2000,7 +2389,7 @@ export class FluffyGrass {
 				child.style.display = "block";
 				child.style.position = "relative";
 			}
-			
+
 			// Some browsers block GPU timer queries, causing stats-gl to hide the GPU panel.
 			// We inject a custom GPU panel that reads raw Three.js WebGL draw calls and triangles.
 			const customGpuPanel = document.createElement("div");
@@ -2017,7 +2406,7 @@ export class FluffyGrass {
 			customGpuPanel.innerHTML = "GPU LOAD<br/>Calls: 0<br/>Tris: 0";
 			statsDom.appendChild(customGpuPanel);
 		}, 100); // small delay to ensure stats-gl has created the children
-		
+
 		document.body.appendChild(statsDom);
 	}
 
@@ -2039,12 +2428,12 @@ export class FluffyGrass {
 
 	private tryTogglePlayer() {
 		if (!this.car || !this.human) return;
-		
+
 		if (this.activePlayer === "car") {
 			// Switch to human (can exit car anytime)
 			this.activePlayer = "human";
 			const spawnPos = this.car.mesh.position.clone();
-			spawnPos.x += 3; 
+			spawnPos.x += 3;
 			spawnPos.y += 1;
 			this.human.body.setTranslation(spawnPos, true);
 			this.human.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
@@ -2059,6 +2448,152 @@ export class FluffyGrass {
 			this.human.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
 			this.human.mesh.visible = false;
 		}
+	}
+
+	private createValleyTerrain(bridgeEndX: number, bridgeEndHeight: number, bridgeEndZ: number) {
+		const width = 150;
+		const depth = 150;
+		const resolution = 256;
+		const geometry = new THREE.PlaneGeometry(width, depth, resolution, resolution);
+		geometry.rotateX(-Math.PI / 2); // Flat on the ground
+
+		const posAttr = geometry.attributes.position;
+
+		// We want the terrain to start exactly 1 meter before the bridge ends, so the bridge overlaps the terrain by 1 meter.
+		const terrainStartZ = bridgeEndZ - 1;
+		const centerZ = terrainStartZ + (depth / 2);
+		const centerX = bridgeEndX;
+
+		for (let i = 0; i < posAttr.count; i++) {
+			const vx = posAttr.getX(i);
+			const vz = posAttr.getZ(i);
+
+			// Distance from center
+			const d = Math.sqrt(vx * vx + vz * vz);
+
+			// Angle from center — used to make each side different
+			const angle = Math.atan2(vz, vx);
+
+			// Asymmetric depth: each compass direction gets a different max depth
+			const depthVariation = 0.4 + 0.6 * (
+				0.5 + 0.2 * Math.sin(angle * 1.0)
+				+ 0.15 * Math.sin(angle * 2.3 + 1.7)
+				+ 0.1 * Math.sin(angle * 3.7 + 0.5)
+				+ 0.05 * Math.cos(angle * 5.1 + 2.3)
+			);
+			const localMaxDepth = 100 * depthVariation;
+
+			// Asymmetric rim distance
+			const rimVariation = 63 + 7 * Math.sin(angle * 2.0 + 0.8) + 5 * Math.cos(angle * 3.5);
+
+			// Normalized distance from center to rim
+			let nd = Math.min(d / rimVariation, 1.0);
+
+			// GENTLE slope — sqrt gives a gradual descent from the rim that you can drive on
+			// nd=1 (rim) → h=1, nd=0.8 → h=0.89, nd=0.5 → h=0.71, nd=0 → h=0
+			let h = Math.sqrt(nd);
+
+			// Add organic bumps/ledges along the slope
+			const bump1 = Math.sin(nd * 4.0 * Math.PI + angle * 1.5) * 0.06;
+			const bump2 = Math.sin(nd * 7.0 * Math.PI + angle * 2.7 + 1.0) * 0.03;
+			h = Math.max(0, Math.min(1, h + bump1 + bump2));
+
+			// Keep the outer 5m as a flat plateau for the bridge connection
+			if (d > rimVariation) {
+				h = 1.0;
+			}
+
+			// Height: h=1 is bridge level, h=0 is bottom
+			let y = h * localMaxDepth + (bridgeEndHeight - localMaxDepth);
+
+			// ---- Moon-like crater surface ----
+			// Multiple overlapping crater depressions
+			const craterSeeds = [
+				{ cx: 15, cz: 20, r: 12 },
+				{ cx: -25, cz: 10, r: 18 },
+				{ cx: 5, cz: -30, r: 10 },
+				{ cx: -10, cz: -15, r: 14 },
+				{ cx: 30, cz: -5, r: 8 },
+				{ cx: -35, cz: -25, r: 15 },
+				{ cx: 20, cz: -35, r: 11 },
+				{ cx: -5, cz: 35, r: 9 },
+				{ cx: 40, cz: 25, r: 13 },
+				{ cx: -40, cz: 5, r: 10 },
+				{ cx: 0, cz: 0, r: 16 },
+				{ cx: -20, cz: 40, r: 12 },
+			];
+
+			for (const cr of craterSeeds) {
+				const cd = Math.sqrt((vx - cr.cx) * (vx - cr.cx) + (vz - cr.cz) * (vz - cr.cz));
+				if (cd < cr.r) {
+					// Smooth crater shape: deepest at center, raised rim
+					const t = cd / cr.r; // 0 at center, 1 at edge
+					// Crater profile: dip down then slight raised rim
+					const craterDepth = (1 - t * t) * 4.0; // max 4m deep
+					const rimBump = Math.exp(-((t - 0.85) * (t - 0.85)) * 50) * 1.5; // raised rim
+					y -= craterDepth;
+					y += rimBump;
+				}
+			}
+
+			// Rough, bumpy noise — multi-frequency for a patchy moon-like look
+			const n1 = Math.sin(vx * 0.3 + vz * 0.2) * Math.cos(vz * 0.25 - vx * 0.15) * 2.0;
+			const n2 = Math.sin(vx * 0.7 + 1.3) * Math.cos(vz * 0.6 + 0.7) * 1.0;
+			const n3 = Math.sin(vx * 1.5 + vz * 1.2) * 0.4; // fine grain roughness
+			const n4 = Math.cos(vx * 0.12 - vz * 0.18) * Math.sin(vz * 0.15 + vx * 0.1) * 3.0; // big undulations
+
+			// Fade noise near the rim to keep the bridge connection flat
+			const noiseFade = Math.min(1.0, Math.max(0, 1.0 - nd) * 3.0); // full noise inside, fades to 0 at rim
+			y += (n1 + n2 + n3 + n4) * noiseFade;
+
+			posAttr.setY(i, y);
+		}
+		geometry.computeVertexNormals();
+
+		const material = new THREE.MeshPhongMaterial({
+			color: 0x799894, // Pale desaturated teal
+			shininess: 0,
+			flatShading: true,
+			side: THREE.DoubleSide
+		});
+
+		const newTerrain = new THREE.Mesh(geometry, material);
+		newTerrain.position.set(centerX, 0, centerZ);
+		newTerrain.receiveShadow = true;
+		this.newWorldGroup.add(newTerrain);
+
+		// Add grass to the new world! (shorter grass: 0.3x height, clustered)
+		this.addGrass(newTerrain, this.grassGeometry, this.newWorldGroup, new THREE.Vector2(0, 0), 0.3, true);
+
+		// Physics Heightfield
+		const heights = new Float32Array((resolution + 1) * (resolution + 1));
+		for (let i = 0; i < posAttr.count; i++) {
+			const col = i % (resolution + 1);
+			const row = Math.floor(i / (resolution + 1));
+			heights[col * (resolution + 1) + row] = posAttr.getY(i);
+		}
+
+		const bodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(centerX, 0, centerZ);
+		const body = getWorld().createRigidBody(bodyDesc);
+		const colliderDesc = RAPIER.ColliderDesc.heightfield(
+			resolution, resolution, heights,
+			{ x: width, y: 1.0, z: depth }
+		);
+		getWorld().createCollider(colliderDesc, body);
+
+		// The Pond (flat water plane at the bottom — no cylinder sides poking through)
+		const pondGeometry = new THREE.CircleGeometry(18, 32);
+		pondGeometry.rotateX(-Math.PI / 2);
+		const pondMaterial = new THREE.MeshPhongMaterial({
+			color: 0x1a262a, // Dark moody water
+			transparent: true,
+			opacity: 0.9,
+			shininess: 100,
+			side: THREE.DoubleSide
+		});
+		const pondMesh = new THREE.Mesh(pondGeometry, pondMaterial);
+		pondMesh.position.set(centerX, bridgeEndHeight - 98, centerZ);
+		this.newWorldGroup.add(pondMesh);
 	}
 
 	private setAspectResolution() {

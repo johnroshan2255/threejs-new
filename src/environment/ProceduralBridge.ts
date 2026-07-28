@@ -37,17 +37,20 @@ export class ProceduralBridge {
     private segmentWidth: number;
     private thickness: number;
     private stepSize: number = 1.5;
+    private maxZ: number;
 
     constructor(
         private world: RAPIER.World,
         startPos: THREE.Vector3,
         segmentWidth: number = 8,
-        thickness: number = 2
+        thickness: number = 2,
+        maxZ: number = Infinity
     ) {
         this.group = new THREE.Group();
         this.group.position.copy(startPos);
         this.segmentWidth = segmentWidth;
         this.thickness = thickness;
+        this.maxZ = maxZ;
 
         const loader = new THREE.TextureLoader();
         const basePath = "/stone_bricks_wall_07_1k/stone_bricks_wall_07_";
@@ -195,7 +198,8 @@ export class ProceduralBridge {
 
     public update(carPosition: THREE.Vector3) {
         // 1. Generate new chunk definitions if we are getting close to the frontier
-        if (carPosition.z + this.loadDistance > this.lastGeneratedZ) {
+        // Stop generating once we hit the maxZ cap
+        if (carPosition.z + this.loadDistance > this.lastGeneratedZ && this.lastGeneratedZ < this.maxZ) {
             this.generateNextSegment();
         }
 
@@ -253,5 +257,28 @@ export class ProceduralBridge {
             }
         }
         this.chunks = [];
+    }
+
+    public getLastGeneratedZ(): number {
+        return this.lastGeneratedZ;
+    }
+
+    public getLastGeneratedX(): number {
+        if (this.points.length === 0) return this.group.position.x;
+        return this.group.position.x + this.points[this.points.length - 1].x;
+    }
+
+    public getFinalHeight(): number {
+        if (this.chunks.length === 0) return this.group.position.y + this.thickness / 2;
+        const lastChunk = this.chunks[this.chunks.length - 1];
+        if (lastChunk.items.length === 0) return this.group.position.y + this.thickness / 2;
+        
+        // Find a floor item (isGutter = false)
+        for (const item of lastChunk.items) {
+            if (!item.isGutter) {
+                return item.pos.y + this.group.position.y + item.height / 2;
+            }
+        }
+        return lastChunk.items[0].pos.y + this.group.position.y + lastChunk.items[0].height / 2;
     }
 }

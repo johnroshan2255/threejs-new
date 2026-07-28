@@ -318,6 +318,7 @@ export type DayNightCycle = {
 	getFireflyIntensity: () => number;
 	getGrassLight: () => number;
 	dispose: () => void;
+	overrideColors: boolean;
 };
 
 /**
@@ -405,13 +406,17 @@ export function createDayNightCycle(
 		return best;
 	}
 
+	let overrideColors = false;
+
 	function apply() {
 		sampleAtHour(hour, sample);
 
-		scene.background = sample.zenith.clone();
-		if (scene.fog instanceof THREE.FogExp2) {
-			scene.fog.color.copy(sample.fog);
-			scene.fog.density = sample.fogDensity;
+		if (!overrideColors) {
+			scene.background = sample.zenith.clone();
+			if (scene.fog instanceof THREE.FogExp2) {
+				scene.fog.color.copy(sample.fog);
+				scene.fog.density = sample.fogDensity;
+			}
 		}
 
 		ambient.color.copy(sample.ambient);
@@ -468,6 +473,12 @@ export function createDayNightCycle(
 		set hour(v: number) {
 			hour = ((v % 24) + 24) % 24;
 			apply();
+		},
+		get overrideColors() {
+			return overrideColors;
+		},
+		set overrideColors(v: boolean) {
+			overrideColors = v;
 		},
 		get auto() {
 			return auto;
