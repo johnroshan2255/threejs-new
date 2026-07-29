@@ -1,5 +1,4 @@
 uniform vec3 uColor;
-uniform vec3 uBottomColor;
 uniform float uOpacity;
 uniform float uReflectivity;
 uniform float uTime;
@@ -61,6 +60,14 @@ void main() {
       * (1.0 - smoothstep(mix(inner, outer, 0.7), outer, radial));
   }
 
+  // Irregular editor basins: optional aShore soft rim (1 = full water).
+  shore *= max(vShore, 0.001);
+  shoreMask = max(shoreMask, (1.0 - vShore) * 0.85);
+  // Outside the basin mask — cut completely (dense plane is rectangular).
+  if (vShore < 0.05 && uCircular < 0.5) {
+    discard;
+  }
+
   vec3 viewDir = normalize(vViewPosition);
 
   vec2 wave = animatedRippleOffset(vUv * 2.5, uTime) * 0.04;
@@ -86,9 +93,11 @@ void main() {
   screenUv += distortion * 0.85;
   screenUv = clamp(screenUv, vec2(0.002), vec2(0.998));
 
-  // Keep the pond floor clean and terrain-coloured. Sampling the refracted
-  // scene here exposed grass cards as a leaf-like pattern below the surface.
-  vec3 underwater = uBottomColor;
+  // Real refraction of the scene (threejs-water look) — not a flat blue fill.
+  vec3 underwater = vec3(0.55, 0.5, 0.35);
+  if (uHasRefractionMap > 0.5) {
+    underwater = texture2D(uRefractionMap, screenUv).rgb;
+  }
 
   float waterDepth = 1.2;
   if (uHasDepthMap > 0.5) {
@@ -116,16 +125,14 @@ void main() {
   // Near shore, bias even more toward seeing the terrain.
   refraction = mix(refraction, underwater, shoreMask * 0.55);
 
-  // Calculate world-space view direction for proper Fresnel
-  vec3 worldViewDir = normalize(cameraPosition - vWorldPosition);
-  float ndotv = max(dot(normal, worldViewDir), 0.0);
+  float ndotv = max(dot(normal, viewDir), 0.0);
   float fresnel = fresnelSchlick(ndotv, mix(0.015, 0.1, uReflectivity));
   float mixFactor = clamp(fresnel * fresnel, 0.0, 0.55) * mix(1.0, 0.65, shoreMask);
 
   vec3 color = mix(refraction, reflection, mixFactor);
   color *= uBrightness;
 
-  vec3 halfDir = normalize(worldViewDir + normalize(uSunDirection));
+  vec3 halfDir = normalize(viewDir + normalize(uSunDirection));
   float spec = pow(max(dot(normal, halfDir), 0.0), 220.0);
   color += vec3(1.0) * spec * 0.45;
 
@@ -133,10 +140,10 @@ void main() {
     ? smoothstep(0.04, 0.14, abs(vHeight) + length(normal.xz) * 0.08)
     : 0.0;
 
-  float shoreFoam = max(shoreMask, (1.0 - vShore) * 0.9) * uShoreFoam;
+  float shoreFoam = shoreMask * uShoreFoam;
   color = mix(color, vec3(0.92, 0.97, 1.0), max(foam * 0.22, shoreFoam));
 
-  // Soft alpha falloff at circular rim / irregular basin edge (blends into mud).
-  float alpha = mix(0.97, 1.0, mixFactor) * shore * vShore;
+  // Soft alpha falloff at the circular / basin rim (blends into grass).
+  float alpha = mix(0.97, 1.0, mixFactor) * shore;
   gl_FragColor = vec4(color, alpha);
 }

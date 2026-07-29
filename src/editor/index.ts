@@ -17,6 +17,7 @@ export { EditModeController, type EditModeHost } from "./EditModeController";
 export {
 	applyTerrainBrush,
 	digPondBasin,
+	digWaterBrush,
 	type TerrainSculptTarget,
 } from "./TerrainSculpt";
 export { EditSyncTransport } from "../net/EditSyncTransport";

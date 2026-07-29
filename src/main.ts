@@ -13,7 +13,7 @@ import {
 } from "./physics/terrainCollider";
 import { setIslandTerrain, getWorldTerrainY } from "./terrain/islandHeight";
 import { createLargeTerrain, TERRAIN_CONFIG } from "./terrain/createLargeTerrain";
-import { Pond } from "./entities/water";
+import { Pond, REFERENCE_WATER_LOOK } from "./entities/water";
 import { createCar, type CarEntity } from "./entities/car/createCar";
 import { loadKenneySuvVisual } from "./entities/car/kenneyCarVisual";
 import { CarController } from "./entities/car/carController";
@@ -303,6 +303,8 @@ export class FluffyGrass {
 			shininess: 0,
 			flatShading: true,
 			vertexColors: false,
+			// Dug basin cliffs face inward — DoubleSide keeps walls solid from outside.
+			side: THREE.DoubleSide,
 		});
 
 		this.setupStats();
@@ -1205,16 +1207,14 @@ export class FluffyGrass {
 		this.pond = new Pond({
 			width: 20,
 			height: 20,
+			segments: 128,
+			resolution: 256,
 			circular: true,
-			// Medium blue surface + bottom so green basin terrain doesn’t read through.
-			color: 0x3a7ab0,
-			bottomColor: 0x2f6a9a,
-			brightness: 1.14,
-			clarity: 0.72,
+			...REFERENCE_WATER_LOOK,
 			renderer: this.renderer,
 			scene: this.scene,
 			camera: this.camera,
-			sunDirection: new THREE.Vector3(1, 1, 1).normalize()
+			sunDirection: { x: 12, y: 22, z: 8 },
 		});
 		// Position exactly in the basin we scooped out at (-20, 5)
 		this.pond.mesh.position.set(-20, -0.5, 5);
@@ -2895,6 +2895,7 @@ export class FluffyGrass {
 			shininess: 0,
 			flatShading: true,
 			vertexColors: false,
+			side: THREE.DoubleSide,
 		});
 		const { mesh, heights, nrows, ncols, size } = createProceduralTerrain(mat, def);
 		this.customTerrainMesh = mesh;

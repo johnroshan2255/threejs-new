@@ -24,11 +24,8 @@ export interface WaterOptions {
   /** Wave propagation speed. */
   speed?: number;
 
-  /** Base water colour. */
+  /** Base water colour (light turquoise tint — see threejs-water). */
   color?: ColorRepresentation;
-
-  /** Solid pond-bottom colour shown beneath the water. */
-  bottomColor?: ColorRepresentation;
 
   /** Surface opacity (0–1). */
   opacity?: number;

@@ -4,7 +4,7 @@ export const TERRAIN_CONFIG = {
 	/** World size on X/Z (units). */
 	size: 200,
 	/** Grid resolution — higher = smoother hills, heavier collider. */
-	segments: 112,
+	segments: 254,
 	/** Peak hill height. */
 	maxHeight: 7,
 	/** How strong mid-frequency hills are. */

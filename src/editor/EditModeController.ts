@@ -205,10 +205,6 @@ export class EditModeController {
 				this.brushHelper.visible = this.enabled && this.isBrushTool(tool);
 				this.updateBrushColor();
 				if (tool !== "select") this.clearSelection();
-				if (tool === "paint-water" && this.brushRadius < 8) {
-					this.brushRadius = 10;
-					this.brushHelper.scale.setScalar(this.brushRadius);
-				}
 				if (tool === "camera" && this.viewMode === "orbit") {
 					this.syncOrbit();
 				}
@@ -319,11 +315,18 @@ export class EditModeController {
 		this.brushHelper.visible = enabled && this.isBrushTool(this.tool);
 
 		if (enabled) {
+			// Edit mode: basin digs only — hide simulated water so strokes can merge.
+			this.applier.setSpawnWaterSurfaces(false);
+			this.applier.clearPonds();
+			this.applier.forgetWaterSurfaceOps(this.store.toJSON().ops);
 			this.recenterCameraOnTerrain();
 			this.syncBrushToWorld();
 			if (!this.terrainBaselineHeights) this.captureTerrainBaseline();
 		} else {
-			this.commitRebuildCollider();
+			this.applier.setSpawnWaterSurfaces(true);
+			void this.applyBakedWaterSurfaces().finally(() => {
+				this.commitRebuildCollider();
+			});
 		}
 		this.refreshStatus();
 	}
@@ -351,9 +354,9 @@ export class EditModeController {
 	private syncBrushToWorld() {
 		const def = this.host.getActiveWorldDefinition();
 		const cell = def.size / Math.max(1, def.segments);
-		const minR = Math.max(2, cell * 1.5);
+		const minR = 0.1;
 		const maxR = Math.max(24, cell * 12);
-		const defaultR = Math.max(this.brushRadius, minR * 1.4);
+		const defaultR = Math.max(this.brushRadius, minR);
 		this.brushRadius = THREE.MathUtils.clamp(defaultR, minR, maxR);
 		this.ui.setBrushLimits(minR, maxR, this.brushRadius);
 		this.brushHelper.scale.setScalar(this.brushRadius);
@@ -391,9 +394,69 @@ export class EditModeController {
 
 	async saveEdits() {
 		this.ui.setSaveState("saving");
+		await this.bakeContinuousWaterSurfaces();
 		const result = await this.persistence.save({ download: false });
 		this.ui.setSaveState("saved", result.message);
 		this.refreshStatus();
+	}
+
+	/**
+	 * Merge all water dig strokes into continuous basin fill ops (one Pond per lake).
+	 * Dig ops stay; old createSurface ops are replaced. Ponds spawn only outside edit mode.
+	 */
+	private async bakeContinuousWaterSurfaces() {
+		const ops = this.store.toJSON().ops;
+		const stamps: Array<{ x: number; z: number; radius: number }> = [];
+		for (const op of ops) {
+			if (op.type !== "paint-water") continue;
+			if (!op.createSurface) {
+				stamps.push({ x: op.x, z: op.z, radius: op.radius });
+			} else if (op.basin?.cells?.length) {
+				// Legacy fills: treat saved cells as tiny stamps so re-save keeps them.
+				for (const c of op.basin.cells) {
+					stamps.push({ x: c.x, z: c.z, radius: 0.55 });
+				}
+			}
+		}
+
+		this.applier.clearPonds();
+		this.applier.forgetWaterSurfaceOps(ops);
+		this.store.stripWaterSurfaceOps();
+
+		if (!stamps.length) return;
+
+		const basins = this.applier.collectBasinsFromStamps(stamps);
+		for (const basin of basins) {
+			const op = this.store.createOp({
+				type: "paint-water",
+				x: basin.centerX,
+				z: basin.centerZ,
+				radius: Math.max(
+					2,
+					Math.hypot(basin.width, basin.depth) * 0.35
+				),
+				createSurface: true,
+				basin,
+			});
+			this.store.append(op, { trackHistory: false });
+			if (!this.enabled) {
+				await this.applier.apply(op);
+			}
+		}
+	}
+
+	/** Spawn Pond meshes from baked createSurface ops (play mode). */
+	private async applyBakedWaterSurfaces() {
+		this.applyingRemote = true;
+		try {
+			for (const op of this.store.toJSON().ops) {
+				if (op.type === "paint-water" && op.createSurface) {
+					await this.applier.apply(op);
+				}
+			}
+		} finally {
+			this.applyingRemote = false;
+		}
 	}
 
 	async reapplyStoredEdits() {
@@ -428,6 +491,7 @@ export class EditModeController {
 		this.applier.clearApplied();
 		// Baseline = pristine terrain before any edit ops.
 		this.captureTerrainBaseline();
+		this.applier.setSpawnWaterSurfaces(!this.enabled);
 		if (existing?.ops.length) {
 			void this.applier.applyMany(existing.ops).then(() => {
 				this.rebuildCollider();
@@ -887,18 +951,26 @@ export class EditModeController {
 					return;
 				}
 
-				const hit = this.pickTerrain(event.clientX, event.clientY);
-				if (!hit) return;
+				if (
+					this.tool === "sculpt" ||
+					this.tool === "paint-road" ||
+					this.tool === "paint-water"
+				) {
+					const hit = this.pickTerrain(event.clientX, event.clientY);
+					if (hit) {
+						this.store.beginStroke();
+						this.painting = true;
+						this.pointerDownPos.set(event.clientX, event.clientY);
+						this.cameraClickFocus = true; // might become a focus if not dragged
+						void this.brushAt(hit);
+						el.setPointerCapture(event.pointerId);
+					}
+					return;
+				}
 
-				if (this.tool === "sculpt" || this.tool === "paint-road") {
-					this.store.beginStroke();
-					this.painting = true;
-					void this.brushAt(hit);
-					el.setPointerCapture(event.pointerId);
-				} else if (this.tool === "place-mesh") {
-					void this.placeAt(hit);
-				} else if (this.tool === "paint-water") {
-					void this.placeWaterAt(hit);
+				if (this.tool === "place-mesh") {
+					const hit = this.pickTerrain(event.clientX, event.clientY);
+					if (hit) void this.placeAt(hit);
 				}
 			},
 			{ passive: false }
@@ -937,7 +1009,9 @@ export class EditModeController {
 				this.brushHelper.visible = this.isBrushTool(this.tool);
 				if (
 					this.painting &&
-					(this.tool === "sculpt" || this.tool === "paint-road")
+					(this.tool === "sculpt" ||
+						this.tool === "paint-road" ||
+						this.tool === "paint-water")
 				) {
 					void this.brushAt(hit);
 				}
@@ -947,8 +1021,10 @@ export class EditModeController {
 		el.addEventListener("pointerup", (event) => {
 			if (!this.enabled) return;
 			if (this.painting) {
+				const finishingTerrain =
+					this.tool === "sculpt" || this.tool === "paint-water";
 				this.painting = false;
-				if (this.tool === "sculpt") this.commitRebuildCollider();
+				if (finishingTerrain) this.commitRebuildCollider();
 				this.store.endStroke();
 			}
 
@@ -1081,31 +1157,17 @@ export class EditModeController {
 				})
 			);
 		}
-	}
 
-	/** Click places island-style water; basin cell coords are saved in the op JSON. */
-	private async placeWaterAt(point: THREE.Vector3) {
-		if (this.placeBusy) return;
-		this.placeBusy = true;
-		try {
-			const def = this.host.getActiveWorldDefinition();
-			const cell = def.size / Math.max(1, def.segments);
-			// Dig must span several cells or the basin vanishes on coarse grids.
-			const radius = Math.max(cell * 3.5, this.brushRadius, 8);
-			const basin = this.applier.prepareBasinAt(point.x, point.z, radius);
-			if (!basin) return;
+		if (this.tool === "paint-water") {
 			await this.commitOp(
 				this.store.createOp({
 					type: "paint-water",
 					x: point.x,
 					z: point.z,
-					radius,
-					createSurface: true,
-					basin,
+					radius: this.brushRadius,
+					createSurface: false,
 				})
 			);
-		} finally {
-			this.placeBusy = false;
 		}
 	}
 

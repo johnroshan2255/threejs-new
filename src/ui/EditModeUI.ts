@@ -123,7 +123,7 @@ export class EditModeUI {
 				<div class="edit-sync-status" id="edit-sync-status">Island · 0 edits</div>
 			</aside>
 			<div class="edit-mode-hint" id="edit-mode-hint" hidden>
-				Undo/Redo each stroke · Orbit: MMB / RMB / Alt+LMB · New World: pick size 0.1–10 km
+				Water: dig basin only · Save World fills continuous water · Exit Edit to see it
 			</div>
 			<div class="edit-create-modal" id="edit-create-modal" hidden>
 				<div class="edit-create-dialog" role="dialog" aria-labelledby="edit-create-title">
@@ -316,11 +316,11 @@ export class EditModeUI {
 		const radius = this.root.querySelector<HTMLInputElement>("#edit-brush-radius");
 		const radiusValue = this.root.querySelector<HTMLElement>("#edit-brush-radius-value");
 		if (!radius) return;
-		const step = min >= 4 ? 0.5 : 0.5;
-		radius.min = String(Math.round(min * 2) / 2);
-		radius.max = String(Math.round(max * 2) / 2);
+		const step = min < 1 ? 0.1 : 0.5;
+		radius.min = String(min);
+		radius.max = String(max);
 		radius.step = String(step);
-		radius.value = String(Math.round(value * 2) / 2);
+		radius.value = String(value);
 		if (radiusValue) radiusValue.textContent = radius.value;
 		this.options.onBrushChange(Number(radius.value), this.currentBrushStrength());
 	}

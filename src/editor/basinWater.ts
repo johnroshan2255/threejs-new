@@ -188,8 +188,9 @@ function stitchBoundaryLoops(
 }
 
 /**
- * Smooth shoreline mesh: Chaikin-rounded outline + soft alpha rim (no grid stairs).
- * Falls back to cell quads if outline extraction fails.
+ * Dense plane clipped to an expanded basin outline.
+ * Interior verts are required so ripple heightfield displacement shows waves
+ * (outline-only triangulation had almost no verts → flat water).
  */
 function geometryFromSmoothedShore(
 	cells: BasinCellSpec[],
@@ -234,71 +235,79 @@ function geometryFromSmoothedShore(
 	if (ring.length < 3) return null;
 	if (ringArea(ring) < 0) ring = ring.slice().reverse();
 
-	// Round off stair-steps, then build a soft fade band into the mud.
+	// Push water past the dug banks so the rim hides the edge.
 	const smoothed = chaikinClosed(ring, 3);
-	const soft = Math.max(0.4, cellSize * 0.55);
-	const outer = offsetRing(smoothed, -soft * 0.45);
-	const inner = offsetRing(smoothed, soft * 0.7);
-	if (outer.length < 3 || inner.length < 3) return null;
-	if (ringArea(inner) < 0) return null;
+	const expand = Math.max(2.0, cellSize * 2.4);
+	const fill = offsetRing(smoothed, -expand);
+	if (fill.length < 3 || ringArea(fill) < 0) return null;
 
-	const positions: number[] = [];
-	const uvs: number[] = [];
-	const shores: number[] = [];
-	const indices: number[] = [];
-
-	const pushVert = (p: XZ, shore: number) => {
-		const lx = p.x - centerX;
-		const lz = p.z - centerZ;
-		positions.push(lx, 0, lz);
-		uvs.push(lx / width + 0.5, 0.5 - lz / depth);
-		shores.push(shore);
-		return shores.length - 1;
-	};
-
-	const innerIdx: number[] = [];
-	for (const p of inner) innerIdx.push(pushVert(p, 1));
-	const outerIdx: number[] = [];
-	for (const p of outer) outerIdx.push(pushVert(p, 0));
-
-	const contour = inner.map((p) => new THREE.Vector2(p.x - centerX, p.z - centerZ));
-	let faces: number[][];
-	try {
-		faces = THREE.ShapeUtils.triangulateShape(contour, []);
-	} catch {
-		return null;
-	}
-	if (!faces.length) return null;
-	for (const face of faces) {
-		const a = face[0]!;
-		const b = face[1]!;
-		const c = face[2]!;
-		// ShapeUtils winding in XY → map to XZ with +Y up.
-		indices.push(innerIdx[a]!, innerIdx[c]!, innerIdx[b]!);
-	}
-
-	const n = Math.min(innerIdx.length, outerIdx.length);
-	for (let i = 0; i < n; i++) {
-		const i0 = innerIdx[i]!;
-		const i1 = innerIdx[(i + 1) % n]!;
-		const o0 = outerIdx[i]!;
-		const o1 = outerIdx[(i + 1) % n]!;
-		indices.push(i0, o0, o1);
-		indices.push(i0, o1, i1);
-	}
-
-	const geometry = new THREE.BufferGeometry();
-	geometry.setAttribute(
-		"position",
-		new THREE.Float32BufferAttribute(positions, 3)
+	const segs = Math.min(
+		96,
+		Math.max(40, Math.round(Math.max(width, depth) * 1.6))
 	);
-	geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+	const geometry = new THREE.PlaneGeometry(width, depth, segs, segs);
+	geometry.rotateX(-Math.PI / 2);
+
+	const positions = geometry.attributes.position as THREE.BufferAttribute;
+	const shores = new Float32Array(positions.count);
+	const localPoly = fill.map((p) => ({
+		x: p.x - centerX,
+		z: p.z - centerZ,
+	}));
+
+	for (let i = 0; i < positions.count; i++) {
+		const lx = positions.getX(i);
+		const lz = positions.getZ(i);
+		const inside = pointInPolyXZ(lx, lz, localPoly);
+		if (!inside) {
+			shores[i] = 0;
+			continue;
+		}
+		const dist = distToPolyEdge(lx, lz, localPoly);
+		// Soft band near edge; interior stays fully wet for waves.
+		const soft = Math.max(0.35, cellSize * 0.45);
+		shores[i] = THREE.MathUtils.clamp(dist / soft, 0, 1);
+		if (shores[i]! < 0.15) shores[i] = 0.15; // keep slightly opaque at rim
+	}
+
 	geometry.setAttribute("aShore", new THREE.Float32BufferAttribute(shores, 1));
-	geometry.setIndex(indices);
 	geometry.computeVertexNormals();
 	geometry.computeBoundingBox();
 	geometry.computeBoundingSphere();
 	return geometry;
+}
+
+function pointInPolyXZ(x: number, z: number, poly: XZ[]): boolean {
+	let inside = false;
+	for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+		const xi = poly[i]!.x;
+		const zi = poly[i]!.z;
+		const xj = poly[j]!.x;
+		const zj = poly[j]!.z;
+		const intersect =
+			zi > z !== zj > z &&
+			x < ((xj - xi) * (z - zi)) / (zj - zi + 1e-12) + xi;
+		if (intersect) inside = !inside;
+	}
+	return inside;
+}
+
+function distToPolyEdge(x: number, z: number, poly: XZ[]): number {
+	let best = Infinity;
+	for (let i = 0; i < poly.length; i++) {
+		const a = poly[i]!;
+		const b = poly[(i + 1) % poly.length]!;
+		const abx = b.x - a.x;
+		const abz = b.z - a.z;
+		const apx = x - a.x;
+		const apz = z - a.z;
+		const ab2 = abx * abx + abz * abz || 1e-8;
+		const t = THREE.MathUtils.clamp((apx * abx + apz * abz) / ab2, 0, 1);
+		const px = a.x + abx * t;
+		const pz = a.z + abz * t;
+		best = Math.min(best, Math.hypot(x - px, z - pz));
+	}
+	return best;
 }
 
 /** Legacy cell-quad mesh (pixelated) — only used if outline smoothing fails. */
@@ -310,7 +319,7 @@ function geometryFromCellQuads(
 	width: number,
 	depth: number
 ): THREE.BufferGeometry {
-	const halfCell = cellSize * 0.56;
+	const halfCell = cellSize * 0.95;
 	const positions: number[] = [];
 	const uvs: number[] = [];
 	const shores: number[] = [];
@@ -369,10 +378,10 @@ function footprintFromCells(
 	const centerZ = (minZ + maxZ) * 0.5;
 	const spanX = Math.max(maxX - minX, cellSize);
 	const spanZ = Math.max(maxZ - minZ, cellSize);
-	// Extra pad so the soft outer rim stays inside the sim UV / AABB.
-	const softPad = Math.max(0.4, cellSize * 0.55) * 1.2;
-	const width = Math.max(spanX + cellSize + softPad * 2, 4);
-	const depth = Math.max(spanZ + cellSize + softPad * 2, 4);
+	// Extra pad: water plane is larger than the dug basin so banks bury the edge.
+	const pad = Math.max(4.5, cellSize * 4);
+	const width = Math.max(spanX + pad * 2, 4);
+	const depth = Math.max(spanZ + pad * 2, 4);
 
 	const geometry =
 		geometryFromSmoothedShore(
@@ -396,6 +405,149 @@ function footprintFromCells(
 }
 
 /**
+ * Collect wet cells strictly from brush stamps (exact painted shape).
+ * Does not flood-fill hills/flats — only grid samples under the pencil path.
+ */
+export function collectBasinFromBrushStamps(
+	target: TerrainSculptTarget,
+	stamps: Array<{ x: number; z: number; radius: number }>
+): BasinFootprint | null {
+	if (!stamps.length) return null;
+	const g = gridHelpers(target);
+	const cellMap = new Map<string, BasinCellSpec>();
+
+	for (const stamp of stamps) {
+		const r = Math.max(0.1, stamp.radius);
+		const rSq = r * r;
+		const minCol = g.toCol(stamp.x - r - g.cell);
+		const maxCol = g.toCol(stamp.x + r + g.cell);
+		const minRow = g.toRow(stamp.z - r - g.cell);
+		const maxRow = g.toRow(stamp.z + r + g.cell);
+		for (let col = minCol; col <= maxCol; col++) {
+			for (let row = minRow; row <= maxRow; row++) {
+				const w = g.worldOf(row, col);
+				const dx = w.x - stamp.x;
+				const dz = w.z - stamp.z;
+				if (dx * dx + dz * dz > rSq) continue;
+				cellMap.set(pk(w.x, w.z), { x: w.x, z: w.z });
+			}
+		}
+	}
+
+	const cells = [...cellMap.values()];
+	if (cells.length < 3) return null;
+
+	// Rim height from neighbors just outside the painted set.
+	const inSet = new Set(cells.map((c) => pk(c.x, c.z)));
+	const rimSamples: number[] = [];
+	const dirs = [
+		[1, 0],
+		[-1, 0],
+		[0, 1],
+		[0, -1],
+	] as const;
+	for (const c of cells) {
+		const col = g.toCol(c.x);
+		const row = g.toRow(c.z);
+		for (const [dr, dc] of dirs) {
+			const nr = row + dr;
+			const nc = col + dc;
+			if (nr < 0 || nc < 0 || nr > g.nrows || nc > g.ncols) continue;
+			const w = g.worldOf(nr, nc);
+			if (inSet.has(pk(w.x, w.z))) continue;
+			rimSamples.push(g.heights[g.idx(nr, nc)]);
+		}
+	}
+
+	let waterY: number;
+	if (rimSamples.length) {
+		rimSamples.sort((a, b) => a - b);
+		// Sit below the rim so expanded water width reads as a filled pool.
+		waterY = rimSamples[Math.floor(rimSamples.length * 0.5)]! - 0.32;
+	} else {
+		let maxH = -Infinity;
+		for (const c of cells) {
+			maxH = Math.max(maxH, g.heights[g.idx(g.toRow(c.z), g.toCol(c.x))]);
+		}
+		waterY = maxH - 0.2;
+	}
+
+	const wet = cells.filter((c) => {
+		const h = g.heights[g.idx(g.toRow(c.z), g.toCol(c.x))];
+		return h < waterY + 0.12;
+	});
+	const finalCells = wet.length >= 3 ? wet : cells;
+	return footprintFromCells(finalCells, waterY, g.cell);
+}
+
+/**
+ * Same as collectBasinFromBrushStamps, but one footprint per connected blob
+ * so separate lakes stay separate while overlapping strokes merge.
+ */
+export function collectBasinsFromBrushStamps(
+	target: TerrainSculptTarget,
+	stamps: Array<{ x: number; z: number; radius: number }>
+): BasinFootprint[] {
+	const combined = collectBasinFromBrushStamps(target, stamps);
+	if (!combined) return [];
+	const g = gridHelpers(target);
+	const components = splitConnectedCellGroups(combined.cells, g);
+	const out: BasinFootprint[] = [];
+	for (const group of components) {
+		if (group.length < 3) continue;
+		const fp = footprintFromCells(group, combined.waterY, g.cell);
+		if (fp) out.push(fp);
+	}
+	return out.length ? out : [combined];
+}
+
+function splitConnectedCellGroups(
+	cells: BasinCellSpec[],
+	g: GridHelpers
+): BasinCellSpec[][] {
+	const keyOf = (row: number, col: number) => `${row},${col}`;
+	const cellByKey = new Map<string, BasinCellSpec>();
+	for (const c of cells) {
+		cellByKey.set(keyOf(g.toRow(c.z), g.toCol(c.x)), c);
+	}
+	const visited = new Set<string>();
+	const groups: BasinCellSpec[][] = [];
+	const dirs = [
+		[1, 0],
+		[-1, 0],
+		[0, 1],
+		[0, -1],
+		[1, 1],
+		[1, -1],
+		[-1, 1],
+		[-1, -1],
+	] as const;
+
+	for (const [startKey, startCell] of cellByKey) {
+		if (visited.has(startKey)) continue;
+		const group: BasinCellSpec[] = [];
+		const queue = [startKey];
+		visited.add(startKey);
+		while (queue.length) {
+			const key = queue.pop()!;
+			const cell = cellByKey.get(key);
+			if (!cell) continue;
+			group.push(cell);
+			const row = g.toRow(cell.z);
+			const col = g.toCol(cell.x);
+			for (const [dr, dc] of dirs) {
+				const nk = keyOf(row + dr, col + dc);
+				if (visited.has(nk) || !cellByKey.has(nk)) continue;
+				visited.add(nk);
+				queue.push(nk);
+			}
+		}
+		groups.push(group);
+	}
+	return groups;
+}
+
+/**
  * Collect wet cells strictly inside a dig radius (after digPondBasin).
  * Never walks the whole map.
  */
@@ -407,7 +559,7 @@ export function collectBasinInsideRadius(
 	waterY: number
 ): BasinFootprint | null {
 	const g = gridHelpers(target);
-	const radius = Math.max(2, pondRadius);
+	const radius = pondRadius;
 	const radiusSq = radius * radius;
 	const cells: BasinCellSpec[] = [];
 
@@ -442,7 +594,7 @@ export function collectBasinNearClick(
 	maxRadius: number
 ): BasinFootprint | null {
 	const g = gridHelpers(target);
-	const maxR = Math.max(4, Math.min(maxRadius, 80));
+	const maxR = Math.min(maxRadius, 80);
 	const maxRSq = maxR * maxR;
 	const maxCells = Math.min(4000, Math.ceil(Math.PI * (maxR / g.cell) ** 2) + 8);
 
@@ -524,7 +676,7 @@ export function refillBasinToRim(
 	const g = gridHelpers(target);
 	const cx = spec.centerX;
 	const cz = spec.centerZ;
-	const radius = Math.max(4, maxRadius);
+	const radius = maxRadius;
 	const rimSamples: number[] = [];
 	const ring = radius * 1.05;
 	for (let i = 0; i < 32; i++) {

@@ -12,11 +12,23 @@ export const DEFAULT_DAMPING = 0.992;
 /** Default wave propagation speed. */
 export const DEFAULT_SPEED = 0.9;
 
-/** Default water colour (hex) — medium blue surface tint. */
-export const DEFAULT_WATER_COLOR = 0x3a7ab0;
+/** Default water colour (hex) — clear turquoise (threejs-water). */
+export const DEFAULT_WATER_COLOR = 0x66c8d8;
 
-/** Default pond-bottom colour — medium blue so green terrain doesn’t dominate. */
-export const DEFAULT_BOTTOM_COLOR = 0x2f6a9a;
+/**
+ * Look used by the threejs-water demo pond — apply to island + editor basins.
+ */
+export const REFERENCE_WATER_LOOK = {
+	color: 0x8fdceb as const,
+	opacity: 1 as const,
+	reflectivity: 0.22 as const,
+	damping: 0.993 as const,
+	speed: 0.85 as const,
+	clarity: 0.9 as const,
+	shoreSoftness: 0.75 as const,
+	shoreFoam: 0.5 as const,
+	brightness: 1.15 as const,
+};
 
 /** Default surface opacity. */
 export const DEFAULT_OPACITY = 1.0;
@@ -49,20 +61,19 @@ export const DEFAULT_BRIGHTNESS = 1.12;
  * Defaults merged into user {@link WaterOptions} (excluding host scene hooks).
  */
 export const DEFAULT_WATER_OPTIONS: Omit<
-  ResolvedWaterOptions,
-  'width' | 'height' | 'renderer' | 'scene' | 'camera' | 'sunDirection'
+	ResolvedWaterOptions,
+	'width' | 'height' | 'renderer' | 'scene' | 'camera' | 'sunDirection' | 'geometry'
 > = {
-  segments: DEFAULT_SEGMENTS,
-  resolution: DEFAULT_SIMULATION_RESOLUTION,
-  damping: DEFAULT_DAMPING,
-  speed: DEFAULT_SPEED,
-  color: DEFAULT_WATER_COLOR,
-  bottomColor: DEFAULT_BOTTOM_COLOR,
-  opacity: DEFAULT_OPACITY,
-  reflectivity: DEFAULT_REFLECTIVITY,
-  circular: DEFAULT_CIRCULAR,
-  clarity: DEFAULT_CLARITY,
-  shoreSoftness: DEFAULT_SHORE_SOFTNESS,
-  shoreFoam: DEFAULT_SHORE_FOAM,
-  brightness: DEFAULT_BRIGHTNESS,
+	segments: DEFAULT_SEGMENTS,
+	resolution: DEFAULT_SIMULATION_RESOLUTION,
+	damping: DEFAULT_DAMPING,
+	speed: DEFAULT_SPEED,
+	color: DEFAULT_WATER_COLOR,
+	opacity: DEFAULT_OPACITY,
+	reflectivity: DEFAULT_REFLECTIVITY,
+	circular: DEFAULT_CIRCULAR,
+	clarity: DEFAULT_CLARITY,
+	shoreSoftness: DEFAULT_SHORE_SOFTNESS,
+	shoreFoam: DEFAULT_SHORE_FOAM,
+	brightness: DEFAULT_BRIGHTNESS,
 };

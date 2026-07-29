@@ -18,7 +18,7 @@ export const ISLAND_WORLD: WorldDefinition = {
 	name: "Island",
 	kind: "island",
 	size: 200,
-	segments: 112,
+	segments: 254,
 	grassCount: 50000,
 };
 
@@ -27,7 +27,7 @@ export const VALLEY_WORLD: WorldDefinition = {
 	name: "Valley",
 	kind: "valley",
 	size: 200,
-	segments: 256,
+	segments: 254,
 	grassCount: 35000,
 };
 
@@ -35,7 +35,7 @@ export const VALLEY_WORLD: WorldDefinition = {
 export const ISLAND_GRASS_DENSITY = 50000 / (200 * 200); // 1.25
 
 /** Island terrain cell size (meters). */
-export const ISLAND_TERRAIN_CELL = 200 / 112; // ≈ 1.7857
+export const ISLAND_TERRAIN_CELL = 200 / 254; // ≈ 0.787
 
 /** Min / max custom world size in kilometers. */
 export const CUSTOM_WORLD_SIZE_KM_MIN = 0.1;
@@ -56,7 +56,7 @@ export function customWorldSizeMeters(sizeKm: number): number {
  */
 export function segmentsForWorldSize(sizeMeters: number): number {
 	const raw = Math.round(sizeMeters / ISLAND_TERRAIN_CELL);
-	return Math.min(900, Math.max(64, raw));
+	return Math.min(254, Math.max(64, raw));
 }
 
 /**

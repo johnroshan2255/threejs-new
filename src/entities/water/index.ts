@@ -7,6 +7,7 @@
  */
 
 export { Pond } from './objects/Pond';
+export { REFERENCE_WATER_LOOK } from './core/Constants';
 
 export type {
   WaterOptions,

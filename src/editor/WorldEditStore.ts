@@ -230,6 +230,24 @@ export class WorldEditStore {
 		this.emit();
 	}
 
+	/** Drop baked water fill ops (createSurface). Dig strokes remain the source of truth. */
+	stripWaterSurfaceOps(): number {
+		const before = this.document.ops.length;
+		this.document.ops = this.document.ops.filter(
+			(op) => !(op.type === "paint-water" && op.createSurface)
+		);
+		const removed = before - this.document.ops.length;
+		if (removed > 0) {
+			this.document.updatedAt = Date.now();
+			this.dirty = true;
+			// Fills were derived — rebuild undo as one step per remaining op.
+			this.undoUnits = this.document.ops.map(() => 1);
+			this.redoStack = [];
+			this.emit();
+		}
+		return removed;
+	}
+
 	subscribe(listener: () => void) {
 		this.listeners.add(listener);
 		return () => this.listeners.delete(listener);

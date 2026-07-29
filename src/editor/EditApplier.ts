@@ -1,21 +1,25 @@
 import * as THREE from "three";
 import { createTree, type TreeHandle } from "../entities/tree";
 import { placeStone, type PlacedStoneHandle } from "../entities/stone/placeStone";
-import { Pond } from "../entities/water";
+import { Pond, REFERENCE_WATER_LOOK } from "../entities/water";
 import { getWorldTerrainY, setIslandTerrain } from "../terrain/islandHeight";
 import {
 	paintTerrainMud,
 	paintTerrainMudShore,
+	paintTerrainWater,
 } from "../worlds/createProceduralTerrain";
 import type { GrassChunkField } from "../entities/grass/GrassChunkField";
 import {
 	applyTerrainBrush,
 	digPondBasin,
+	digWaterBrush,
 	smoothBasinRim,
 	type TerrainSculptTarget,
 } from "./TerrainSculpt";
 import {
 	basinSpecFromFootprint,
+	collectBasinFromBrushStamps,
+	collectBasinsFromBrushStamps,
 	collectBasinInsideRadius,
 	collectBasinNearClick,
 	footprintFromBasinSpec,
@@ -60,8 +64,14 @@ export class EditApplier {
 	private readonly entities = new Map<string, TrackedEntity>();
 	private colliderDirty = false;
 	private deferColliderRebuild = false;
+	/** When false (edit mode), dig basins only — no Pond meshes. */
+	private spawnWaterSurfaces = true;
 
 	constructor(private readonly host: EditApplierHost) {}
+
+	setSpawnWaterSurfaces(enabled: boolean) {
+		this.spawnWaterSurfaces = enabled;
+	}
 
 	hasApplied(opId: string) {
 		return this.applied.has(opId);
@@ -70,6 +80,23 @@ export class EditApplier {
 	clearApplied() {
 		this.applied.clear();
 		this.colliderDirty = false;
+	}
+
+	/** Remove Pond entities and forget their createSurface op ids so they can re-apply later. */
+	clearPonds() {
+		for (const [id, entry] of [...this.entities.entries()]) {
+			if (entry.kind !== "pond") continue;
+			this.removeEntity(id);
+			this.applied.delete(id);
+		}
+	}
+
+	forgetWaterSurfaceOps(ops: WorldEditOp[]) {
+		for (const op of ops) {
+			if (op.type === "paint-water" && op.createSurface) {
+				this.applied.delete(op.id);
+			}
+		}
 	}
 
 	/** Selectable roots tagged with userData.editEntityId. */
@@ -192,7 +219,27 @@ export class EditApplier {
 				return true;
 			}
 			case "paint-water": {
-				if (op.createSurface) {
+				// Preview dig + blue paint while stroking; Pond is spawned only when
+				// createSurface is true (stroke end / saved fill op).
+				if (!op.createSurface) {
+					const target = this.host.getSculptTarget();
+					if (target) {
+						digWaterBrush(target, op.x, op.z, op.radius);
+						setIslandTerrain(target.mesh);
+						this.colliderDirty = true;
+					}
+					const mesh = this.host.getTerrainMesh();
+					if (mesh) {
+						this.host.enableTerrainVertexColors();
+						paintTerrainWater(mesh, op.x, op.z, op.radius);
+					}
+					this.host.getGrassField()?.maskRoadCircle(op.x, op.z, op.radius);
+				} else {
+					if (!this.spawnWaterSurfaces) {
+						// Edit mode: keep basin only; fill ops applied on Save / exit play.
+						this.applied.delete(op.id);
+						return false;
+					}
 					await this.spawnPond({
 						entityId: op.id,
 						x: op.x,
@@ -200,9 +247,7 @@ export class EditApplier {
 						radius: op.radius,
 						basin: op.basin,
 					});
-					return true;
 				}
-				this.host.getGrassField()?.maskRoadCircle(op.x, op.z, op.radius);
 				return true;
 			}
 			case "paint-forest": {
@@ -263,6 +308,49 @@ export class EditApplier {
 	}
 
 	/**
+	 * Collect basin cells exactly under the water pencil path (no circular flood).
+	 */
+	collectBasinFromStamps(
+		stamps: Array<{ x: number; z: number; radius: number }>
+	): BasinSpec | null {
+		const target = this.host.getSculptTarget();
+		if (!target || !stamps.length) return null;
+		const footprint = collectBasinFromBrushStamps(target, stamps);
+		if (!footprint || footprint.cells.length < 3) return null;
+		return basinSpecFromFootprint(footprint);
+	}
+
+	/** One basin per connected painted region (overlapping strokes merge). */
+	collectBasinsFromStamps(
+		stamps: Array<{ x: number; z: number; radius: number }>
+	): BasinSpec[] {
+		const target = this.host.getSculptTarget();
+		if (!target || !stamps.length) return [];
+		return collectBasinsFromBrushStamps(target, stamps)
+			.filter((fp) => fp.cells.length >= 3)
+			.map((fp) => basinSpecFromFootprint(fp));
+	}
+
+	/**
+	 * Collect an already-dug depression (e.g. after paint-water dig strokes).
+	 * Does not dig further — used before spawning Pond on stroke end.
+	 */
+	collectExistingBasinAt(
+		x: number,
+		z: number,
+		maxRadius: number
+	): BasinSpec | null {
+		const target = this.host.getSculptTarget();
+		if (!target) return null;
+		const r = Math.max(4, maxRadius);
+		const footprint =
+			collectBasinNearClick(target, x, z, r) ??
+			collectBasinNearClick(target, x, z, Math.min(r * 1.5, 80));
+		if (!footprint || footprint.cells.length < 3) return null;
+		return basinSpecFromFootprint(footprint);
+	}
+
+	/**
 	 * Build a basin footprint for a click (authoring).
 	 * Prefer an existing hole near the click; otherwise dig a limited-radius basin.
 	 * Result is serializable into the paint-water op JSON.
@@ -274,7 +362,7 @@ export class EditApplier {
 	): BasinSpec | null {
 		const target = this.host.getSculptTarget();
 		if (!target) return null;
-		const digRadius = Math.max(4, radius);
+		const digRadius = radius;
 
 		let footprint =
 			collectBasinNearClick(target, x, z, digRadius) ??
@@ -318,6 +406,8 @@ export class EditApplier {
 
 		let footprint: BasinFootprint | null = null;
 		let basin = options.basin;
+		/** Brush-authored basins must keep their exact cell shape (no circular expand). */
+		const exactShape = Boolean(basin?.cells?.length && basin.digRadius == null);
 
 		if (!basin?.cells?.length) {
 			basin = this.prepareBasinAt(options.x, options.z, digRadius) ?? undefined;
@@ -330,44 +420,39 @@ export class EditApplier {
 		if (!basin?.cells?.length) return;
 		// Hard safety: never build a world-scale water sheet.
 		const maxCells = 4500;
-		const maxSpan = (basin.digRadius ?? digRadius) * 3;
-		if (basin.cells.length > maxCells) return;
-		if (basin.width > maxSpan * 2 || basin.depth > maxSpan * 2) {
-			basin = {
-				...basin,
-				cells: basin.cells.filter((c) => {
-					const dx = c.x - basin!.centerX;
-					const dz = c.z - basin!.centerZ;
-					return dx * dx + dz * dz <= maxSpan * maxSpan;
-				}),
-			};
+		if (basin.cells.length > maxCells) {
+			basin = { ...basin, cells: basin.cells.slice(0, maxCells) };
 		}
 
 		const pondRadius =
 			basin.digRadius ??
-			Math.max(4, Math.hypot(basin.width, basin.depth) * 0.42);
+			Math.max(2, Math.hypot(basin.width, basin.depth) * 0.42);
 
-		// Soften irregular sculpted banks when filling an existing hole.
-		if (basin.digRadius == null) {
-			smoothBasinRim(
-				target,
-				basin.centerX,
-				basin.centerZ,
-				pondRadius * 0.45,
-				pondRadius * 1.25,
-				3
-			);
-			setIslandTerrain(target.mesh);
-			this.colliderDirty = true;
+		if (exactShape) {
+			// Keep water mesh = painted cells only.
+			footprint = footprintFromBasinSpec(basin, cellSize);
+		} else {
+			// Soften irregular sculpted banks when filling an existing hole.
+			if (basin.digRadius == null) {
+				smoothBasinRim(
+					target,
+					basin.centerX,
+					basin.centerZ,
+					pondRadius * 0.45,
+					pondRadius * 1.25,
+					3
+				);
+				setIslandTerrain(target.mesh);
+				this.colliderDirty = true;
+			}
+			// Raise / expand water to the rim (legacy / digRadius ponds only).
+			footprint =
+				refillBasinToRim(target, basin, pondRadius) ??
+				footprintFromBasinSpec(basin, cellSize);
 		}
-
-		// Raise / expand water to the rim so banks aren't left dry (incl. old saves).
-		footprint =
-			refillBasinToRim(target, basin, pondRadius) ??
-			footprintFromBasinSpec(basin, cellSize);
 		if (!footprint || footprint.cells.length < 3) return;
 
-		// Clear grass over the basin AABB (water shape still comes from JSON cells).
+		// Clear grass over the basin footprint (circle around AABB is fine for mask).
 		const grassR = Math.max(footprint.width, footprint.depth) * 0.55 + 1;
 		this.host.getGrassField()?.maskRoadCircle(
 			footprint.centerX,
@@ -375,39 +460,55 @@ export class EditApplier {
 			grassR
 		);
 
-		// Green → muddy bank → water (floor + shore ring).
+		// Shore paint: for exact brush shapes, tint only near the footprint center
+		// at a radius matching the painted extent — not a huge circle beyond it.
 		const mesh = this.host.getTerrainMesh();
 		if (mesh) {
 			this.host.enableTerrainVertexColors();
-			const waterR = Math.max(
-				Math.max(footprint.width, footprint.depth) * 0.42,
-				pondRadius * 0.85
-			);
-			paintTerrainMudShore(
-				mesh,
-				footprint.centerX,
-				footprint.centerZ,
-				waterR,
-				grassR + 2.5
-			);
+			if (exactShape) {
+				const shoreR = Math.max(footprint.width, footprint.depth) * 0.5 + cellSize;
+				paintTerrainMudShore(
+					mesh,
+					footprint.centerX,
+					footprint.centerZ,
+					Math.max(1, shoreR * 0.55),
+					shoreR + 1.5
+				);
+			} else {
+				const waterR = Math.max(
+					Math.max(footprint.width, footprint.depth) * 0.42,
+					pondRadius * 0.85
+				);
+				paintTerrainMudShore(
+					mesh,
+					footprint.centerX,
+					footprint.centerZ,
+					waterR,
+					grassR + 2.5
+				);
+			}
 		}
 
 		const pond = new Pond({
 			width: Math.max(footprint.width, 4),
 			height: Math.max(footprint.depth, 4),
+			segments: 96,
+			resolution: 256,
 			circular: false,
 			geometry: footprint.geometry,
-			color: 0x3a7ab0,
-			bottomColor: 0x2f6a9a,
-			brightness: 1.14,
-			clarity: 0.72,
-			shoreFoam: 0.35,
+			...REFERENCE_WATER_LOOK,
+			shoreSoftness: 0.55,
 			renderer: this.host.renderer,
 			scene: this.host.scene,
 			camera: this.host.playCamera,
-			sunDirection: new THREE.Vector3(1, 1, 1).normalize(),
+			sunDirection: { x: 12, y: 22, z: 8 },
 		});
-		pond.mesh.position.set(footprint.centerX, footprint.waterY, footprint.centerZ);
+		// A touch lower than baked waterY so expanded width sits inside the banks.
+		pond.mesh.position.set(
+			footprint.centerX,
+			footprint.waterY - 0.06,
+			footprint.centerZ
+		);
 		pond.mesh.renderOrder = 1;
 		pond.mesh.userData.waterRadius = pondRadius;
 		pond.mesh.userData.waterHalfW = footprint.width * 0.5;

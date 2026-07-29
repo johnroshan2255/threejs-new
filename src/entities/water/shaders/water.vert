@@ -6,12 +6,12 @@ varying vec4 vScreenPos;
 varying float vHeight;
 varying float vShore;
 
+attribute float aShore;
+
 uniform sampler2D uHeightMap;
 uniform float uHasHeightMap;
 uniform float uHeightScale;
 uniform mat4 uTextureMatrix;
-
-attribute float aShore;
 
 void main() {
   vUv = uv;

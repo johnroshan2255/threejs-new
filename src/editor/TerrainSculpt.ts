@@ -96,7 +96,7 @@ export function applyTerrainBrush(
 	mesh.updateMatrixWorld(true);
 }
 
-/** Soft water basin for brush painting (shallower than a full pond dig). */
+/** Soft water basin for brush painting (~0.8 m deep, wide gentle banks). */
 export function digWaterBrush(
 	target: TerrainSculptTarget,
 	worldX: number,
@@ -107,18 +107,26 @@ export function digWaterBrush(
 	const geometry = mesh.geometry as THREE.BufferGeometry;
 	const positions = geometry.attributes.position as THREE.BufferAttribute;
 	const half = size * 0.5;
-	const outer = radius + 2;
+	const depth = 0.8;
+	// Wide bank so cliff faces tilt up (less “open shell” look from outside).
+	const inner = radius * 0.55;
+	const outer = radius * 2.1;
+
+	const smootherstep = (t: number) => {
+		const x = THREE.MathUtils.clamp(t, 0, 1);
+		return x * x * x * (x * (x * 6 - 15) + 10);
+	};
 
 	const applyAt = (x: number, z: number, y: number) => {
 		const dist = Math.hypot(x - worldX, z - worldZ);
-		if (dist > outer) return y;
-		if (dist <= radius) {
-			const norm = dist / Math.max(radius, 0.0001);
-			const dip = -2.2 + 1.7 * (norm * norm);
-			return Math.min(y, y * 0.15 + (y + dip) * 0.85);
+		if (dist >= outer) return y;
+		if (dist <= inner) {
+			const floorT = smootherstep(dist / Math.max(inner, 0.0001));
+			const dip = -depth + depth * 0.12 * floorT;
+			return Math.min(y, y + dip);
 		}
-		const t = (dist - radius) / (outer - radius);
-		const dip = -0.35 * (1 - t);
+		const bankT = smootherstep((dist - inner) / Math.max(outer - inner, 0.0001));
+		const dip = -depth * (1 - bankT);
 		return Math.min(y, y + dip);
 	};
 
@@ -147,9 +155,9 @@ export function digPondBasin(
 	worldZ: number,
 	pondRadius: number
 ) {
-	const inner = Math.max(2, pondRadius * 0.55);
+	const inner = pondRadius * 0.55;
 	const outer = pondRadius * 1.65;
-	const depth = Math.min(5.2, 2.8 + pondRadius * 0.18);
+	const depth = Math.max(0.3, Math.min(5.2, pondRadius * 0.4));
 	const { mesh, heights, nrows, ncols, size } = target;
 	const geometry = mesh.geometry as THREE.BufferGeometry;
 	const positions = geometry.attributes.position as THREE.BufferAttribute;
