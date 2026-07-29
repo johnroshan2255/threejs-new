@@ -17,6 +17,7 @@ export {
 export {
 	createProceduralTerrain,
 	paintTerrainMud,
+	paintTerrainMudShore,
 	paintTerrainWater,
 	type ProceduralTerrainResult,
 } from "./createProceduralTerrain";

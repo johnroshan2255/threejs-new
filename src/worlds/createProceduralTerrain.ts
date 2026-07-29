@@ -220,3 +220,72 @@ export function paintTerrainMud(
 	}
 	colors.needsUpdate = true;
 }
+
+/**
+ * Green → muddy bank → water. Paints wet floor + a soft muddy shore ring.
+ * `innerRadius` ≈ water edge; `outerRadius` ≈ where grass resumes.
+ */
+export function paintTerrainMudShore(
+	mesh: THREE.Mesh,
+	worldX: number,
+	worldZ: number,
+	innerRadius: number,
+	outerRadius: number
+) {
+	const geometry = mesh.geometry as THREE.BufferGeometry;
+	const positions = geometry.attributes.position as THREE.BufferAttribute;
+	const grass = new THREE.Color("#5e875e");
+	const mud = new THREE.Color("#9a8060");
+	const wetMud = new THREE.Color("#7a6848");
+
+	if (!geometry.attributes.color) {
+		const arr = new Float32Array(positions.count * 3);
+		for (let i = 0; i < positions.count; i++) {
+			arr[i * 3] = grass.r;
+			arr[i * 3 + 1] = grass.g;
+			arr[i * 3 + 2] = grass.b;
+		}
+		geometry.setAttribute("color", new THREE.BufferAttribute(arr, 3));
+	}
+	const colors = geometry.attributes.color as THREE.BufferAttribute;
+	const inner = Math.max(1, innerRadius);
+	const outer = Math.max(inner + 1.5, outerRadius);
+	const band = Math.max(0.001, outer - inner);
+	const outerSq = outer * outer;
+	const origin = mesh.position;
+
+	for (let i = 0; i < positions.count; i++) {
+		const x = positions.getX(i) + origin.x;
+		const z = positions.getZ(i) + origin.z;
+		const dx = x - worldX;
+		const dz = z - worldZ;
+		const d2 = dx * dx + dz * dz;
+		if (d2 > outerSq) continue;
+
+		const r = Math.sqrt(d2);
+		let target: THREE.Color;
+		let w: number;
+
+		if (r <= inner) {
+			// Under / at the waterline — wetter mud (hides green basin floor).
+			const floorT = 1 - r / Math.max(inner, 0.0001);
+			w = 0.75 + 0.2 * floorT;
+			target = wetMud;
+		} else {
+			// Shore band: strongest mud near water, fades to green outward.
+			const t = 1 - (r - inner) / band;
+			const shore = t * t * (3 - 2 * t);
+			w = shore * 0.95;
+			target = mud;
+		}
+
+		if (w < 0.02) continue;
+		colors.setXYZ(
+			i,
+			THREE.MathUtils.lerp(colors.getX(i), target.r, w),
+			THREE.MathUtils.lerp(colors.getY(i), target.g, w),
+			THREE.MathUtils.lerp(colors.getZ(i), target.b, w)
+		);
+	}
+	colors.needsUpdate = true;
+}

@@ -50,6 +50,7 @@ import {
 	ISLAND_GRASS_DENSITY,
 	ISLAND_TERRAIN_CELL,
 	ISLAND_WORLD,
+	paintTerrainMudShore,
 	VALLEY_WORLD,
 	type WorldDefinition,
 } from "./worlds";
@@ -152,6 +153,8 @@ export class FluffyGrass {
 	private lastSettingsSync = 0;
 	private lastRippleInjection = 0;
 	private lastEditorRippleInjection = 0;
+	/** Next time (ms) to drop a soft ambient ripple on some pond. */
+	private nextAmbientRippleAt = 0;
 	private editorWaterDeltaAccumulator = 0;
 	private editorWaterFrameCounter = 0;
 	private readonly viewFrustum = new THREE.Frustum();
@@ -1203,8 +1206,11 @@ export class FluffyGrass {
 			width: 20,
 			height: 20,
 			circular: true,
-			color: this.sceneProps.terrainColor,
-			bottomColor: this.sceneProps.terrainColor,
+			// Medium blue surface + bottom so green basin terrain doesn’t read through.
+			color: 0x3a7ab0,
+			bottomColor: 0x2f6a9a,
+			brightness: 1.14,
+			clarity: 0.72,
 			renderer: this.renderer,
 			scene: this.scene,
 			camera: this.camera,
@@ -1215,6 +1221,12 @@ export class FluffyGrass {
 		this.pond.mesh.renderOrder = 1; // Force water to draw AFTER grass!
 		this.worldGroup.add(this.pond.mesh);
 		this.resizePondTargets();
+
+		// Green → muddy shore → water on the island pond basin.
+		this.terrainMat.vertexColors = true;
+		this.terrainMat.color.setHex(0xffffff);
+		this.terrainMat.needsUpdate = true;
+		paintTerrainMudShore(mesh, -20, 5, 10, 16);
 
 		if (!this.grassGeometry.hasAttribute("position")) {
 			const grassScene = await this.loadGltf("/grassLODs.glb");
@@ -1775,6 +1787,8 @@ export class FluffyGrass {
 			updateFoliageWind(dt);
 			this.updateEditorPonds(dt);
 		}
+
+		this.maybeInjectAmbientWaterRipples(now);
 
 		if (!this.isGameActive) {
 			for (const mixer of this.lobbyMixers) {
@@ -2368,6 +2382,84 @@ export class FluffyGrass {
 		}
 
 		this.injectEditorPondRipples();
+	}
+
+	/**
+	 * Soft natural ripples at random intervals so still water doesn’t feel dead.
+	 * Picks a visible pond and drops 1–3 light disturbances.
+	 */
+	private maybeInjectAmbientWaterRipples(now: number) {
+		if (this.nextAmbientRippleAt === 0) {
+			this.nextAmbientRippleAt = now + 800 + Math.random() * 1600;
+			return;
+		}
+		if (now < this.nextAmbientRippleAt) return;
+		// Next event in ~1.5–5.5 s (occasional, not constant chop).
+		this.nextAmbientRippleAt = now + 1500 + Math.random() * 4000;
+
+		const candidates: Pond[] = [];
+		if (
+			this.pond &&
+			this.pond.mesh.visible &&
+			this.currentWorld === "island" &&
+			this.worldGroup.visible
+		) {
+			candidates.push(this.pond);
+		}
+		for (const pond of this.editorPonds) {
+			if (pond.mesh.visible) candidates.push(pond);
+		}
+		if (candidates.length === 0) return;
+
+		const pond = candidates[Math.floor(Math.random() * candidates.length)]!;
+		this.spawnNaturalRipples(pond);
+	}
+
+	/** 1–3 soft drips / wind puffs somewhere on the pond surface. */
+	private spawnNaturalRipples(pond: Pond) {
+		const halfW =
+			Number(pond.mesh.userData.waterHalfW) ||
+			Number(pond.mesh.userData.waterRadius) ||
+			10;
+		const halfD = Number(pond.mesh.userData.waterHalfD) || halfW;
+		const cx = pond.mesh.position.x;
+		const cz = pond.mesh.position.z;
+		const circular =
+			Boolean(pond.mesh.userData.waterRadius) &&
+			pond.mesh.userData.waterHalfW == null;
+		// Island pond is circular 20×20 with no userData — treat as circle of r≈9.
+		const useCircle = circular || (halfW === halfD && !pond.mesh.userData.waterHalfW);
+
+		const drops = Math.random() < 0.4 ? 2 + Math.floor(Math.random() * 2) : 1;
+		const baseX = useCircle
+			? cx + (Math.random() * 2 - 1) * halfW * 0.55
+			: cx + (Math.random() * 2 - 1) * halfW * 0.7;
+		const baseZ = useCircle
+			? cz + (Math.random() * 2 - 1) * halfW * 0.55
+			: cz + (Math.random() * 2 - 1) * halfD * 0.7;
+
+		for (let i = 0; i < drops; i++) {
+			const jitter = i === 0 ? 0 : 0.4 + Math.random() * 1.2;
+			const ang = Math.random() * Math.PI * 2;
+			let x = baseX + Math.cos(ang) * jitter;
+			let z = baseZ + Math.sin(ang) * jitter;
+			if (useCircle) {
+				const dx = x - cx;
+				const dz = z - cz;
+				const maxR = halfW * 0.78;
+				const d = Math.hypot(dx, dz);
+				if (d > maxR && d > 1e-6) {
+					const s = maxR / d;
+					x = cx + dx * s;
+					z = cz + dz * s;
+				}
+			}
+			pond.createRipple({
+				position: { x, z },
+				strength: 0.05 + Math.random() * 0.09,
+				radius: 0.55 + Math.random() * 1.0,
+			});
+		}
 	}
 
 	/** Same car / human / bomb ripples as the island pond (own throttle). */

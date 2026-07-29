@@ -12,11 +12,11 @@ export const DEFAULT_DAMPING = 0.992;
 /** Default wave propagation speed. */
 export const DEFAULT_SPEED = 0.9;
 
-/** Default water colour (hex) — matches island terrain. */
-export const DEFAULT_WATER_COLOR = 0x5e875e;
+/** Default water colour (hex) — medium blue surface tint. */
+export const DEFAULT_WATER_COLOR = 0x3a7ab0;
 
-/** Default pond-bottom colour — matches the island terrain. */
-export const DEFAULT_BOTTOM_COLOR = 0x5e875e;
+/** Default pond-bottom colour — medium blue so green terrain doesn’t dominate. */
+export const DEFAULT_BOTTOM_COLOR = 0x2f6a9a;
 
 /** Default surface opacity. */
 export const DEFAULT_OPACITY = 1.0;

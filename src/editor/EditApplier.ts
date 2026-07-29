@@ -5,6 +5,7 @@ import { Pond } from "../entities/water";
 import { getWorldTerrainY, setIslandTerrain } from "../terrain/islandHeight";
 import {
 	paintTerrainMud,
+	paintTerrainMudShore,
 } from "../worlds/createProceduralTerrain";
 import type { GrassChunkField } from "../entities/grass/GrassChunkField";
 import {
@@ -367,21 +368,40 @@ export class EditApplier {
 		if (!footprint || footprint.cells.length < 3) return;
 
 		// Clear grass over the basin AABB (water shape still comes from JSON cells).
+		const grassR = Math.max(footprint.width, footprint.depth) * 0.55 + 1;
 		this.host.getGrassField()?.maskRoadCircle(
 			footprint.centerX,
 			footprint.centerZ,
-			Math.max(footprint.width, footprint.depth) * 0.55 + 1
+			grassR
 		);
 
-		const terrainColor = this.host.getScenePropsTerrainColor();
-		// Water mesh follows basin JSON cells exactly — same shader Pond, not a circle clip.
+		// Green → muddy bank → water (floor + shore ring).
+		const mesh = this.host.getTerrainMesh();
+		if (mesh) {
+			this.host.enableTerrainVertexColors();
+			const waterR = Math.max(
+				Math.max(footprint.width, footprint.depth) * 0.42,
+				pondRadius * 0.85
+			);
+			paintTerrainMudShore(
+				mesh,
+				footprint.centerX,
+				footprint.centerZ,
+				waterR,
+				grassR + 2.5
+			);
+		}
+
 		const pond = new Pond({
 			width: Math.max(footprint.width, 4),
 			height: Math.max(footprint.depth, 4),
 			circular: false,
 			geometry: footprint.geometry,
-			color: terrainColor,
-			bottomColor: terrainColor,
+			color: 0x3a7ab0,
+			bottomColor: 0x2f6a9a,
+			brightness: 1.14,
+			clarity: 0.72,
+			shoreFoam: 0.35,
 			renderer: this.host.renderer,
 			scene: this.host.scene,
 			camera: this.host.playCamera,

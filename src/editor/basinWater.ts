@@ -62,6 +62,291 @@ function gridHelpers(target: TerrainSculptTarget): GridHelpers {
 	};
 }
 
+type XZ = { x: number; z: number };
+
+function pk(x: number, z: number): string {
+	return `${Math.round(x * 1000)},${Math.round(z * 1000)}`;
+}
+
+function ek(a: XZ, b: XZ): string {
+	const ka = pk(a.x, a.z);
+	const kb = pk(b.x, b.z);
+	return ka < kb ? `${ka}|${kb}` : `${kb}|${ka}`;
+}
+
+/** Signed area on XZ (positive ≈ CCW when viewed from +Y). */
+function ringArea(pts: XZ[]): number {
+	let a = 0;
+	for (let i = 0; i < pts.length; i++) {
+		const p = pts[i]!;
+		const q = pts[(i + 1) % pts.length]!;
+		a += p.x * q.z - q.x * p.z;
+	}
+	return a * 0.5;
+}
+
+function chaikinClosed(pts: XZ[], iterations: number): XZ[] {
+	let cur = pts;
+	for (let n = 0; n < iterations; n++) {
+		if (cur.length < 3) break;
+		const next: XZ[] = [];
+		for (let i = 0; i < cur.length; i++) {
+			const p0 = cur[i]!;
+			const p1 = cur[(i + 1) % cur.length]!;
+			next.push({
+				x: p0.x * 0.75 + p1.x * 0.25,
+				z: p0.z * 0.75 + p1.z * 0.25,
+			});
+			next.push({
+				x: p0.x * 0.25 + p1.x * 0.75,
+				z: p0.z * 0.25 + p1.z * 0.75,
+			});
+		}
+		cur = next;
+	}
+	return cur;
+}
+
+/** Offset polygon along averaged edge normals. Positive dist = inward for CCW rings. */
+function offsetRing(pts: XZ[], dist: number): XZ[] {
+	const n = pts.length;
+	if (n < 3) return pts.slice();
+	const out: XZ[] = [];
+	for (let i = 0; i < n; i++) {
+		const prev = pts[(i - 1 + n) % n]!;
+		const curr = pts[i]!;
+		const next = pts[(i + 1) % n]!;
+		const e1x = curr.x - prev.x;
+		const e1z = curr.z - prev.z;
+		const e2x = next.x - curr.x;
+		const e2z = next.z - curr.z;
+		const l1 = Math.hypot(e1x, e1z) || 1;
+		const l2 = Math.hypot(e2x, e2z) || 1;
+		// Left normals of CCW edges point inward.
+		let nx = -e1z / l1 - e2z / l2;
+		let nz = e1x / l1 + e2x / l2;
+		const nl = Math.hypot(nx, nz) || 1;
+		nx /= nl;
+		nz /= nl;
+		out.push({ x: curr.x + nx * dist, z: curr.z + nz * dist });
+	}
+	return out;
+}
+
+function stitchBoundaryLoops(
+	edges: Array<{ a: XZ; b: XZ }>
+): XZ[][] {
+	const adj = new Map<string, XZ[]>();
+	const pts = new Map<string, XZ>();
+	const link = (p: XZ, q: XZ) => {
+		const k = pk(p.x, p.z);
+		pts.set(k, p);
+		let list = adj.get(k);
+		if (!list) {
+			list = [];
+			adj.set(k, list);
+		}
+		list.push(q);
+	};
+	for (const e of edges) {
+		link(e.a, e.b);
+		link(e.b, e.a);
+	}
+
+	const used = new Set<string>();
+	const loops: XZ[][] = [];
+
+	for (const start of pts.values()) {
+		const startN = adj.get(pk(start.x, start.z)) ?? [];
+		for (const first of startN) {
+			if (used.has(ek(start, first))) continue;
+			const loop: XZ[] = [start];
+			let prev = start;
+			let curr = first;
+			used.add(ek(prev, curr));
+			let guard = 0;
+			while (guard++ < edges.length + 4) {
+				if (pk(curr.x, curr.z) === pk(start.x, start.z)) break;
+				loop.push(curr);
+				const nexts = adj.get(pk(curr.x, curr.z)) ?? [];
+				let next: XZ | null = null;
+				for (const cand of nexts) {
+					if (pk(cand.x, cand.z) === pk(prev.x, prev.z)) continue;
+					if (used.has(ek(curr, cand))) continue;
+					next = cand;
+					break;
+				}
+				if (!next) break;
+				used.add(ek(curr, next));
+				prev = curr;
+				curr = next;
+			}
+			if (loop.length >= 3) loops.push(loop);
+		}
+	}
+	return loops;
+}
+
+/**
+ * Smooth shoreline mesh: Chaikin-rounded outline + soft alpha rim (no grid stairs).
+ * Falls back to cell quads if outline extraction fails.
+ */
+function geometryFromSmoothedShore(
+	cells: BasinCellSpec[],
+	cellSize: number,
+	centerX: number,
+	centerZ: number,
+	width: number,
+	depth: number
+): THREE.BufferGeometry | null {
+	const half = cellSize * 0.5;
+	const edgeCount = new Map<string, { a: XZ; b: XZ; n: number }>();
+	const addEdge = (x0: number, z0: number, x1: number, z1: number) => {
+		const a = { x: x0, z: z0 };
+		const b = { x: x1, z: z1 };
+		const k = ek(a, b);
+		const e = edgeCount.get(k);
+		if (e) e.n += 1;
+		else edgeCount.set(k, { a, b, n: 1 });
+	};
+
+	for (const c of cells) {
+		const x0 = c.x - half;
+		const x1 = c.x + half;
+		const z0 = c.z - half;
+		const z1 = c.z + half;
+		addEdge(x0, z0, x0, z1);
+		addEdge(x0, z1, x1, z1);
+		addEdge(x1, z1, x1, z0);
+		addEdge(x1, z0, x0, z0);
+	}
+
+	const boundary: Array<{ a: XZ; b: XZ }> = [];
+	for (const e of edgeCount.values()) {
+		if (e.n === 1) boundary.push({ a: e.a, b: e.b });
+	}
+	if (boundary.length < 3) return null;
+
+	const loops = stitchBoundaryLoops(boundary);
+	if (!loops.length) return null;
+	loops.sort((a, b) => Math.abs(ringArea(b)) - Math.abs(ringArea(a)));
+	let ring = loops[0]!;
+	if (ring.length < 3) return null;
+	if (ringArea(ring) < 0) ring = ring.slice().reverse();
+
+	// Round off stair-steps, then build a soft fade band into the mud.
+	const smoothed = chaikinClosed(ring, 3);
+	const soft = Math.max(0.4, cellSize * 0.55);
+	const outer = offsetRing(smoothed, -soft * 0.45);
+	const inner = offsetRing(smoothed, soft * 0.7);
+	if (outer.length < 3 || inner.length < 3) return null;
+	if (ringArea(inner) < 0) return null;
+
+	const positions: number[] = [];
+	const uvs: number[] = [];
+	const shores: number[] = [];
+	const indices: number[] = [];
+
+	const pushVert = (p: XZ, shore: number) => {
+		const lx = p.x - centerX;
+		const lz = p.z - centerZ;
+		positions.push(lx, 0, lz);
+		uvs.push(lx / width + 0.5, 0.5 - lz / depth);
+		shores.push(shore);
+		return shores.length - 1;
+	};
+
+	const innerIdx: number[] = [];
+	for (const p of inner) innerIdx.push(pushVert(p, 1));
+	const outerIdx: number[] = [];
+	for (const p of outer) outerIdx.push(pushVert(p, 0));
+
+	const contour = inner.map((p) => new THREE.Vector2(p.x - centerX, p.z - centerZ));
+	let faces: number[][];
+	try {
+		faces = THREE.ShapeUtils.triangulateShape(contour, []);
+	} catch {
+		return null;
+	}
+	if (!faces.length) return null;
+	for (const face of faces) {
+		const a = face[0]!;
+		const b = face[1]!;
+		const c = face[2]!;
+		// ShapeUtils winding in XY → map to XZ with +Y up.
+		indices.push(innerIdx[a]!, innerIdx[c]!, innerIdx[b]!);
+	}
+
+	const n = Math.min(innerIdx.length, outerIdx.length);
+	for (let i = 0; i < n; i++) {
+		const i0 = innerIdx[i]!;
+		const i1 = innerIdx[(i + 1) % n]!;
+		const o0 = outerIdx[i]!;
+		const o1 = outerIdx[(i + 1) % n]!;
+		indices.push(i0, o0, o1);
+		indices.push(i0, o1, i1);
+	}
+
+	const geometry = new THREE.BufferGeometry();
+	geometry.setAttribute(
+		"position",
+		new THREE.Float32BufferAttribute(positions, 3)
+	);
+	geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+	geometry.setAttribute("aShore", new THREE.Float32BufferAttribute(shores, 1));
+	geometry.setIndex(indices);
+	geometry.computeVertexNormals();
+	geometry.computeBoundingBox();
+	geometry.computeBoundingSphere();
+	return geometry;
+}
+
+/** Legacy cell-quad mesh (pixelated) — only used if outline smoothing fails. */
+function geometryFromCellQuads(
+	cells: BasinCellSpec[],
+	cellSize: number,
+	centerX: number,
+	centerZ: number,
+	width: number,
+	depth: number
+): THREE.BufferGeometry {
+	const halfCell = cellSize * 0.56;
+	const positions: number[] = [];
+	const uvs: number[] = [];
+	const shores: number[] = [];
+	const indices: number[] = [];
+	let vert = 0;
+
+	for (const c of cells) {
+		const x0 = c.x - halfCell - centerX;
+		const x1 = c.x + halfCell - centerX;
+		const z0 = c.z - halfCell - centerZ;
+		const z1 = c.z + halfCell - centerZ;
+		positions.push(x0, 0, z0, x0, 0, z1, x1, 0, z1, x1, 0, z0);
+		const u0 = x0 / width + 0.5;
+		const u1 = x1 / width + 0.5;
+		const v0 = 0.5 - z0 / depth;
+		const v1 = 0.5 - z1 / depth;
+		uvs.push(u0, v0, u0, v1, u1, v1, u1, v0);
+		shores.push(1, 1, 1, 1);
+		indices.push(vert, vert + 1, vert + 2, vert, vert + 2, vert + 3);
+		vert += 4;
+	}
+
+	const geometry = new THREE.BufferGeometry();
+	geometry.setAttribute(
+		"position",
+		new THREE.Float32BufferAttribute(positions, 3)
+	);
+	geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
+	geometry.setAttribute("aShore", new THREE.Float32BufferAttribute(shores, 1));
+	geometry.setIndex(indices);
+	geometry.computeVertexNormals();
+	geometry.computeBoundingBox();
+	geometry.computeBoundingSphere();
+	return geometry;
+}
+
 function footprintFromCells(
 	cells: BasinCellSpec[],
 	waterY: number,
@@ -82,48 +367,22 @@ function footprintFromCells(
 
 	const centerX = (minX + maxX) * 0.5;
 	const centerZ = (minZ + maxZ) * 0.5;
-	// Slight overlap so the basin fill has no grid gaps.
-	const halfCell = cellSize * 0.56;
 	const spanX = Math.max(maxX - minX, cellSize);
 	const spanZ = Math.max(maxZ - minZ, cellSize);
+	// Extra pad so the soft outer rim stays inside the sim UV / AABB.
+	const softPad = Math.max(0.4, cellSize * 0.55) * 1.2;
+	const width = Math.max(spanX + cellSize + softPad * 2, 4);
+	const depth = Math.max(spanZ + cellSize + softPad * 2, 4);
 
-	const positions: number[] = [];
-	const uvs: number[] = [];
-	const indices: number[] = [];
-	let vert = 0;
-
-	const width = Math.max(spanX + cellSize, 4);
-	const depth = Math.max(spanZ + cellSize, 4);
-
-	for (const c of cells) {
-		const x0 = c.x - halfCell - centerX;
-		const x1 = c.x + halfCell - centerX;
-		const z0 = c.z - halfCell - centerZ;
-		const z1 = c.z + halfCell - centerZ;
-		// Quad on XZ with +Y normals (CCW when viewed from above).
-		positions.push(x0, 0, z0, x0, 0, z1, x1, 0, z1, x1, 0, z0);
-
-		// Match PlaneGeometry + rotateX(-PI/2) UVs used by RippleSimulation.worldToUv.
-		const u0 = x0 / width + 0.5;
-		const u1 = x1 / width + 0.5;
-		const v0 = 0.5 - z0 / depth;
-		const v1 = 0.5 - z1 / depth;
-		uvs.push(u0, v0, u0, v1, u1, v1, u1, v0);
-
-		indices.push(vert, vert + 1, vert + 2, vert, vert + 2, vert + 3);
-		vert += 4;
-	}
-
-	const geometry = new THREE.BufferGeometry();
-	geometry.setAttribute(
-		"position",
-		new THREE.Float32BufferAttribute(positions, 3)
-	);
-	geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2));
-	geometry.setIndex(indices);
-	geometry.computeVertexNormals();
-	geometry.computeBoundingBox();
-	geometry.computeBoundingSphere();
+	const geometry =
+		geometryFromSmoothedShore(
+			cells,
+			cellSize,
+			centerX,
+			centerZ,
+			width,
+			depth
+		) ?? geometryFromCellQuads(cells, cellSize, centerX, centerZ, width, depth);
 
 	return {
 		geometry,

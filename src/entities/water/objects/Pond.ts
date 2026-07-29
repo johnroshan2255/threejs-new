@@ -1,4 +1,4 @@
-import { Mesh, PlaneGeometry, type BufferGeometry, type Texture, Vector3 } from 'three';
+import { Mesh, PlaneGeometry, Float32BufferAttribute, type BufferGeometry, type Texture, Vector3 } from 'three';
 import { DEFAULT_WATER_OPTIONS } from '../core/Constants';
 import { WaterMaterial } from '../materials/WaterMaterial';
 import { WaterRenderer } from '../rendering/WaterRenderer';
@@ -84,6 +84,15 @@ export class Pond {
     if (geometry.boundingSphere) {
       geometry.boundingSphere.radius =
         Math.hypot(this.options.width, this.options.height) * 0.5 + 10;
+    }
+
+    // Soft basin rim uses aShore; default plane ponds stay fully opaque.
+    if (!geometry.getAttribute('aShore')) {
+      const count = geometry.getAttribute('position').count;
+      geometry.setAttribute(
+        'aShore',
+        new Float32BufferAttribute(new Float32Array(count).fill(1), 1),
+      );
     }
 
     this.mesh = new Mesh(geometry, material);

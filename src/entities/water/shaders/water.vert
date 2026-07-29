@@ -4,14 +4,18 @@ varying vec3 vViewPosition;
 varying vec4 vReflectCoord;
 varying vec4 vScreenPos;
 varying float vHeight;
+varying float vShore;
 
 uniform sampler2D uHeightMap;
 uniform float uHasHeightMap;
 uniform float uHeightScale;
 uniform mat4 uTextureMatrix;
 
+attribute float aShore;
+
 void main() {
   vUv = uv;
+  vShore = aShore;
 
   // Sample height for shading varyings; keep geometry mostly flat (stable VTF-less look)
   // with a light vertex offset for larger waves.

@@ -30,6 +30,7 @@ varying vec3 vViewPosition;
 varying vec4 vReflectCoord;
 varying vec4 vScreenPos;
 varying float vHeight;
+varying float vShore;
 
 vec3 normalFromHeightMap(vec2 uv) {
   float hL = texture2D(uHeightMap, uv - vec2(uTexelSize.x, 0.0)).r;
@@ -132,10 +133,10 @@ void main() {
     ? smoothstep(0.04, 0.14, abs(vHeight) + length(normal.xz) * 0.08)
     : 0.0;
 
-  float shoreFoam = shoreMask * uShoreFoam;
+  float shoreFoam = max(shoreMask, (1.0 - vShore) * 0.9) * uShoreFoam;
   color = mix(color, vec3(0.92, 0.97, 1.0), max(foam * 0.22, shoreFoam));
 
-  // Soft alpha falloff at the circular rim (blends into grass).
-  float alpha = mix(0.97, 1.0, mixFactor) * shore;
+  // Soft alpha falloff at circular rim / irregular basin edge (blends into mud).
+  float alpha = mix(0.97, 1.0, mixFactor) * shore * vShore;
   gl_FragColor = vec4(color, alpha);
 }
