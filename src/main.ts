@@ -40,6 +40,7 @@ import {
 	createPondStones,
 	type PondStoneHandle,
 } from "./entities/stone";
+import { GrassChunkField } from "./entities/grass";
 import {
 	createDayNightCycle,
 	type DayNightCycle,
@@ -119,7 +120,8 @@ export class FluffyGrass {
 	private grassMaterial: GrassMaterial;
 	private grassCount = 30000;
 	private grassDensity = 100;
-	private grassMeshes = new Set<THREE.InstancedMesh>();
+	private islandGrassField: GrassChunkField | null = null;
+	private valleyGrassField: GrassChunkField | null = null;
 	private graphicsQuality: GraphicsQuality = "High";
 	private waterUpdateInterval = 1;
 	private waterFrameCounter = 0;
@@ -937,13 +939,7 @@ export class FluffyGrass {
 		isNewWorld: boolean = false
 	) {
 		const sampler = new MeshSurfaceSampler(surfaceMesh).build();
-
-		const grassInstancedMesh = new THREE.InstancedMesh(
-			grassGeometry,
-			this.grassMaterial.material,
-			this.grassCount
-		);
-		grassInstancedMesh.receiveShadow = true;
+		const matrices: THREE.Matrix4[] = [];
 
 		const position = new THREE.Vector3();
 		const quaternion = new THREE.Quaternion();
@@ -1011,22 +1007,20 @@ export class FluffyGrass {
 			quaternion.multiply(randomQuaternion);
 			matrix.compose(position, quaternion, scale);
 
-			grassInstancedMesh.setMatrixAt(instanceIndex, matrix);
+			matrices.push(matrix.clone());
 			instanceIndex++;
 		}
 
-		grassInstancedMesh.instanceMatrix.needsUpdate = true;
-		grassInstancedMesh.count = Math.floor(instanceIndex * (this.grassDensity / 100));
-		grassInstancedMesh.userData.maxGrassCount = instanceIndex;
-		grassInstancedMesh.computeBoundingBox();
-		grassInstancedMesh.computeBoundingSphere();
-		grassInstancedMesh.frustumCulled = true;
-		grassInstancedMesh.name = "Grass";
-		grassInstancedMesh.layers.set(0);
-		grassInstancedMesh.position.copy(surfaceMesh.position);
-		targetGroup.add(grassInstancedMesh);
-		this.grassMeshes.add(grassInstancedMesh);
-		return grassInstancedMesh;
+		const field = new GrassChunkField({
+			matrices,
+			geometry: grassGeometry,
+			material: this.grassMaterial.material,
+			origin: surfaceMesh.position,
+			chunkSize: 20,
+			density: this.grassDensity,
+		});
+		targetGroup.add(field.group);
+		return field;
 	}
 
 	private loadGltf(url: string): Promise<THREE.Group> {
@@ -1086,7 +1080,7 @@ export class FluffyGrass {
 			}
 		}
 
-		this.addGrass(mesh, this.grassGeometry, this.worldGroup);
+		this.islandGrassField = this.addGrass(mesh, this.grassGeometry, this.worldGroup);
 
 		console.log(
 			`[FluffyGrass] terrain ${TERRAIN_CONFIG.size}×${TERRAIN_CONFIG.size}, grass=${this.grassCount}`
@@ -2129,10 +2123,8 @@ export class FluffyGrass {
 
 	private setGrassDensity(percent: number) {
 		this.grassDensity = THREE.MathUtils.clamp(percent, 0, 100);
-		for (const mesh of this.grassMeshes) {
-			const maximum = mesh.userData.maxGrassCount as number;
-			mesh.count = Math.floor(maximum * (this.grassDensity / 100));
-		}
+		this.islandGrassField?.setDensity(this.grassDensity);
+		this.valleyGrassField?.setDensity(this.grassDensity);
 	}
 
 	private setupInteractionUI() {
@@ -2378,6 +2370,8 @@ export class FluffyGrass {
 
 		this.pondStones?.dispose();
 		this.pondStones = null;
+		this.islandGrassField?.dispose();
+		this.islandGrassField = null;
 
 		for (const tree of this.trees) tree.dispose();
 		this.trees = [];
@@ -2395,6 +2389,8 @@ export class FluffyGrass {
 	}
 
 	private disposeValleyWorld() {
+		this.valleyGrassField?.dispose();
+		this.valleyGrassField = null;
 		if (this.valleyTerrainBody) {
 			getWorld().removeRigidBody(this.valleyTerrainBody);
 			this.valleyTerrainBody = null;
@@ -2405,9 +2401,11 @@ export class FluffyGrass {
 	private disposeWorldGroup(group: THREE.Group) {
 		group.traverse((object) => {
 			if (!(object instanceof THREE.Mesh || object instanceof THREE.Points)) return;
-			if (object instanceof THREE.InstancedMesh && object.name === "Grass") {
+			if (
+				object instanceof THREE.InstancedMesh &&
+				(object.name === "Grass" || object.name === "GrassChunk")
+			) {
 				object.dispose();
-				this.grassMeshes.delete(object);
 				return;
 			}
 
@@ -2564,7 +2562,7 @@ export class FluffyGrass {
 		this.valleySpawn.set(centerX, bridgeEndHeight + 4, bridgeEndZ + 5);
 
 		// Add grass to the new world! (shorter grass: 0.3x height, clustered)
-		this.addGrass(
+		this.valleyGrassField = this.addGrass(
 			newTerrain,
 			this.grassGeometry,
 			this.newWorldGroup,
