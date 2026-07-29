@@ -16,6 +16,10 @@ export class SmokeTrailSystem {
 	private count: number;
 	private activeParticles: Particle[] = [];
 	private maxLife = 0.5; // Half second trail
+	private readonly dummy = new THREE.Object3D();
+	private readonly colorWhite = new THREE.Color(0xffffff);
+	private readonly colorGrey = new THREE.Color(0x999999);
+	private readonly particleColor = new THREE.Color();
 
 	constructor(maxParticles = 500) {
 		this.count = maxParticles;
@@ -59,11 +63,6 @@ export class SmokeTrailSystem {
 	}
 
 	update(dt: number) {
-		const dummy = new THREE.Object3D();
-		
-		const colorWhite = new THREE.Color(0xffffff);
-		const colorGrey = new THREE.Color(0x999999);
-		
 		let writeIdx = 0;
 		for (let i = 0; i < this.activeParticles.length; i++) {
 			const p = this.activeParticles[i];
@@ -75,7 +74,7 @@ export class SmokeTrailSystem {
 				
 				// Rotate particle
 				p.rotationAngle += p.rotationSpeed * dt;
-				dummy.quaternion.setFromAxisAngle(p.rotationAxis, p.rotationAngle);
+				this.dummy.quaternion.setFromAxisAngle(p.rotationAxis, p.rotationAngle);
 				
 				// Scale shrinks over time
 				const lifeRatio = p.life / p.maxLife; // 1 to 0
@@ -87,15 +86,19 @@ export class SmokeTrailSystem {
 					p.scale = THREE.MathUtils.lerp(0.0, 1.2, lifeRatio / 0.8);
 				}
 				
-				dummy.position.copy(p.position);
-				dummy.scale.setScalar(p.scale);
-				dummy.updateMatrix();
+				this.dummy.position.copy(p.position);
+				this.dummy.scale.setScalar(p.scale);
+				this.dummy.updateMatrix();
 				
 				// Color darkens to grey as it fades
-				const c = new THREE.Color().lerpColors(colorGrey, colorWhite, lifeRatio);
+				this.particleColor.lerpColors(
+					this.colorGrey,
+					this.colorWhite,
+					lifeRatio
+				);
 				
-				this.mesh.setMatrixAt(writeIdx, dummy.matrix);
-				this.mesh.setColorAt(writeIdx, c);
+				this.mesh.setMatrixAt(writeIdx, this.dummy.matrix);
+				this.mesh.setColorAt(writeIdx, this.particleColor);
 				writeIdx++;
 			}
 		}

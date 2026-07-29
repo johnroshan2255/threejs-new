@@ -1,14 +1,16 @@
 import * as THREE from "three";
 import Stats from "stats-gl";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
-import * as dat from "dat.gui";
 import RAPIER from "@dimforge/rapier3d-compat";
-import { io, Socket } from "socket.io-client";
+import type { Socket } from "socket.io-client";
 
 import { MeshSurfaceSampler } from "three/addons/math/MeshSurfaceSampler.js";
 import { GrassMaterial } from "./GrassMaterial";
 import { initPhysics, getWorld } from "./physics/world";
-import { createTerrainHeightfieldCollider } from "./physics/terrainCollider";
+import {
+	createTerrainHeightfieldCollider,
+	type TerrainColliderHandle,
+} from "./physics/terrainCollider";
 import { setIslandTerrain, getWorldTerrainY } from "./terrain/islandHeight";
 import { createLargeTerrain, TERRAIN_CONFIG } from "./terrain/createLargeTerrain";
 import { Pond } from "./entities/water";
@@ -35,6 +37,10 @@ import {
 	type TreeHandle,
 } from "./entities/tree";
 import {
+	createPondStones,
+	type PondStoneHandle,
+} from "./entities/stone";
+import {
 	createDayNightCycle,
 	type DayNightCycle,
 	type DayPeriod,
@@ -48,6 +54,15 @@ import { HornSound } from "./audio/HornSound";
 import { ProceduralBridge } from "./environment/ProceduralBridge";
 import { createMobileControls, type MobileControls } from "./ui/mobileControls";
 import { createOrientationGate, type OrientationGate } from "./ui/orientationGate";
+import { AuthService, type AuthUser } from "./auth/AuthService";
+import { GameNavigation } from "./ui/GameNavigation";
+import { LoadingScreenController } from "./ui/LoadingScreenController";
+import {
+	GameSettings,
+	type GameWorldId,
+	type GraphicsQuality,
+} from "./ui/GameSettings";
+import { WorldLoadingOverlay } from "./ui/WorldLoadingOverlay";
 
 type RemotePlayer = {
 	loaded: boolean;
@@ -80,8 +95,6 @@ export class FluffyGrass {
 	private scene: THREE.Scene;
 	private canvas: HTMLCanvasElement;
 	private stats: Stats;
-	private gui: dat.GUI;
-	private sceneGUI: dat.GUI;
 	private sceneProps = {
 		fogColor: "#eeeeee",
 		terrainColor: "#5e875e",
@@ -105,6 +118,18 @@ export class FluffyGrass {
 	private grassGeometry = new THREE.BufferGeometry();
 	private grassMaterial: GrassMaterial;
 	private grassCount = 30000;
+	private grassDensity = 100;
+	private grassMeshes = new Set<THREE.InstancedMesh>();
+	private graphicsQuality: GraphicsQuality = "High";
+	private waterUpdateInterval = 1;
+	private waterFrameCounter = 0;
+	private waterDeltaAccumulator = 0;
+	private renderFrameCounter = 0;
+	private lastGpuPanelUpdate = 0;
+	private lastSettingsSync = 0;
+	private lastRippleInjection = 0;
+	private readonly viewFrustum = new THREE.Frustum();
+	private readonly viewProjectionMatrix = new THREE.Matrix4();
 
 	private car: CarEntity | null = null;
 	private carInput: CarInput | null = null;
@@ -124,7 +149,10 @@ export class FluffyGrass {
 	private socket: Socket | null = null;
 	private roomCode = "";
 
-	private userData: any = null;
+	private userData: AuthUser | null = null;
+	private readonly authService = new AuthService(SERVER_URL);
+	private gameNavigation: GameNavigation | null = null;
+	private loadingScreenController: LoadingScreenController | null = null;
 	private mySlotIndex = 0;
 
 	private isBeingCarriedBy: string | null = null;
@@ -133,6 +161,7 @@ export class FluffyGrass {
 	private remotePlayers: Map<string, RemotePlayer> = new Map();
 
 	private trees: TreeHandle[] = [];
+	private pondStones: PondStoneHandle | null = null;
 	private dayNight: DayNightCycle | null = null;
 	private fireflies: Fireflies | null = null;
 	private proceduralBridge: ProceduralBridge | null = null;
@@ -149,7 +178,14 @@ export class FluffyGrass {
 	};
 	private worldGroup = new THREE.Group();
 	private newWorldGroup = new THREE.Group();
-	private hasStartedLoadingNewWorld = false;
+	private currentWorld: GameWorldId = "island";
+	private isWorldSwitching = false;
+	private settings!: GameSettings;
+	private worldLoading!: WorldLoadingOverlay;
+	private islandTerrainHandle: TerrainColliderHandle | null = null;
+	private valleyTerrainBody: RAPIER.RigidBody | null = null;
+	private valleySpawn = new THREE.Vector3(0, 4, 5);
+	private initializationPromise: Promise<void>;
 	private currentFogRadius = 65;
 	private volumetricFog: VolumetricFogSystem | null = null;
 	private lastFrameTime = performance.now();
@@ -175,11 +211,6 @@ export class FluffyGrass {
 		};
 		this.textureLoader = new THREE.TextureLoader(this.loadingManager);
 
-		this.gui = new dat.GUI({ hideable: false });
-		this.gui.hide(); // Hide until login
-		this.sceneGUI = new dat.GUI({ hideable: false });
-		this.sceneGUI.hide(); // Hide until login
-
 		this.gltfLoader = new GLTFLoader(this.loadingManager);
 
 		this.canvas = _canvas;
@@ -201,6 +232,7 @@ export class FluffyGrass {
 		this.scene.add(this.camera);
 		this.scene.add(this.worldGroup);
 		this.scene.add(this.newWorldGroup);
+		this.newWorldGroup.visible = false;
 
 		this.audioListener = new THREE.AudioListener();
 		this.camera.add(this.audioListener);
@@ -233,7 +265,6 @@ export class FluffyGrass {
 			flatShading: true
 		});
 
-		this.setupGUI();
 		this.setupStats();
 		this.setupTextures();
 		this.setupEventListeners();
@@ -241,8 +272,9 @@ export class FluffyGrass {
 		this.orientationGate = createOrientationGate();
 		this.dayNight = createDayNightCycle(this.scene, { shadowExtent: 90 });
 		this.dayNight.auto = this.dayNightGui.auto;
+		this.worldLoading = new WorldLoadingOverlay();
+		this.setupSettings();
 
-		this.createBombs();
 		this.dayNight.speed = this.dayNightGui.speed;
 
 		this.smokeSystem = new SmokeTrailSystem();
@@ -251,20 +283,15 @@ export class FluffyGrass {
 		this.explosionSystem = new ExplosionSystem();
 		this.scene.add(this.explosionSystem.mesh);
 
-		(async () => {
+		this.initializationPromise = (async () => {
 			await initPhysics();
-			await this.loadModels();
-			await this.setupTrees();
+			await this.buildIslandWorld();
 			await this.setupCar();
 			await this.setupHuman();
 
 			// Initialize Volumetric Fog
 			this.volumetricFog = new VolumetricFogSystem(300);
 			this.scene.add(this.volumetricFog.group);
-
-			// Initialize Bridge at the edge of the map (z = 60), max generation up to Z = 200
-			this.proceduralBridge = new ProceduralBridge(getWorld(), new THREE.Vector3(0, -1.0, 60), 8, 2, 200);
-			this.scene.add(this.proceduralBridge.group);
 
 			await this.createLobbyModels();
 		})();
@@ -277,294 +304,73 @@ export class FluffyGrass {
 		};
 
 		try {
-			mark("ready");
+			mark("loading");
 			this.render();
+			await this.initializationPromise;
+			mark("ready");
 
 			const loadingText = document.getElementById("loading-text");
-			const playButton = document.getElementById("play-button") as HTMLButtonElement;
-			const hostButton = document.getElementById("host-button") as HTMLButtonElement;
 			if (loadingText) loadingText.textContent = "Ready to play!";
 
-			let loginAction: "play" | "host" | "join" = "play";
-			let joinRoomCode = "";
-
-			const proceed = (action: "play" | "host" | "join", user: any) => {
+			const proceed = (_action: "play", user: AuthUser | null) => {
 				this.userData = user;
-				if (action === "play") {
-					this.isGameActive = true;
-					this.gui.show();
-					this.sceneGUI.show();
-					if (this.carInput) this.carInput.isEnabled = true;
-					if (this.humanInput) this.humanInput.isEnabled = true;
-					const gameTopNav = document.getElementById("game-top-nav");
-					if (gameTopNav) gameTopNav.style.display = "flex";
-					const settingsToggle = document.getElementById("settings-toggle");
-					if (settingsToggle) settingsToggle.style.display = "flex";
-					const loadingScreen = document.getElementById("loading-screen");
-					loadingScreen!.style.opacity = "0";
-					setTimeout(() => { loadingScreen!.style.display = "none"; }, 500);
+				this.isGameActive = true;
+				this.settings.show();
+				if (this.carInput) this.carInput.isEnabled = true;
+				if (this.humanInput) this.humanInput.isEnabled = true;
+				this.gameNavigation?.show();
+				const settingsToggle = document.getElementById("settings-toggle");
+				if (settingsToggle) settingsToggle.style.display = "flex";
+				this.loadingScreenController?.hide();
 
-					if (this.engineSound) this.engineSound.init();
+				if (this.engineSound) this.engineSound.init();
 
-					for (const model of this.lobbyModels) {
-						model.visible = false;
-					}
+				for (const model of this.lobbyModels) {
+					model.visible = false;
+				}
 
-					// Spawn based on slot index to avoid overlapping cars
-					const spawnX = this.mySlotIndex * 8;
-					if (this.car && this.car.body) {
-						const currPos = this.car.body.translation();
-						const spawnY = getWorldTerrainY(spawnX, currPos.z) + 2.0;
-						this.car.body.setTranslation({ x: spawnX, y: spawnY, z: currPos.z }, true);
+				// Spawn based on slot index to avoid overlapping cars
+				const spawnX = this.mySlotIndex * 8;
+				if (this.car && this.car.body) {
+					const currPos = this.car.body.translation();
+					const spawnY = getWorldTerrainY(spawnX, currPos.z) + 2.0;
+					this.car.body.setTranslation({ x: spawnX, y: spawnY, z: currPos.z }, true);
+				}
+				// Also shift human (even if they are at -100 underground, shift X)
+				if (this.human && this.human.body) {
+					const currPos = this.human.body.translation();
+					if (currPos.y > -50) {
+						// Human is active and above ground, keep them on the terrain next to car
+						const humanSpawnY = getWorldTerrainY(spawnX + 3, currPos.z) + 3.0;
+						this.human.body.setTranslation({ x: spawnX + 3, y: humanSpawnY, z: currPos.z }, true);
+					} else {
+						// Human is hidden underground, just shift X
+						this.human.body.setTranslation({ x: spawnX, y: currPos.y, z: currPos.z }, true);
 					}
-					// Also shift human (even if they are at -100 underground, shift X)
-					if (this.human && this.human.body) {
-						const currPos = this.human.body.translation();
-						if (currPos.y > -50) {
-							// Human is active and above ground, keep them on the terrain next to car
-							const humanSpawnY = getWorldTerrainY(spawnX + 3, currPos.z) + 3.0;
-							this.human.body.setTranslation({ x: spawnX + 3, y: humanSpawnY, z: currPos.z }, true);
-						} else {
-							// Human is hidden underground, just shift X
-							this.human.body.setTranslation({ x: spawnX, y: currPos.y, z: currPos.z }, true);
-						}
-					}
-				} else if (action === "host") {
-					this.connectSocket("host");
-				} else if (action === "join") {
-					this.connectSocket("join", joinRoomCode);
 				}
 			};
 			(window as any).proceedPlayFn = proceed;
 
-			const checkTokenAndProceed = async (action: "play" | "host" | "join") => {
-				loginAction = action;
-				const loadingScreen = document.getElementById("loading-screen");
-				const token = localStorage.getItem("authToken");
+			this.gameNavigation = new GameNavigation({
+				auth: this.authService,
+				onUserChanged: (user) => {
+					this.userData = user;
+				},
+				onHost: () => this.connectSocket("host"),
+				onJoin: () => this.fetchRooms(),
+				onLogout: () => this.disconnectMultiplayer(),
+			});
+			this.gameNavigation.initialize();
 
-				if (token) {
-					if (loadingText) loadingText.textContent = "Authenticating...";
-					try {
-						const res = await fetch(`${SERVER_URL}/api/auth/validate`, {
-							headers: { "Authorization": `Bearer ${token}` }
-						});
-						const data = await res.json();
-						if (res.ok) {
-							proceed(action, data.user);
-							return;
-						} else {
-							localStorage.removeItem("authToken");
-							if (loadingText) loadingText.textContent = "Session expired. Please login.";
-						}
-					} catch (e) {
-						console.error(e);
-						if (loadingText) loadingText.textContent = "Authentication failed. Please login.";
-					}
-				}
-				loadingScreen?.classList.remove("show-account");
-				loadingScreen?.classList.add("show-login");
-			};
+			const restoredUser = await this.authService.restoreSession();
+			this.userData = restoredUser;
+			this.gameNavigation.setUser(restoredUser);
 
-			if (playButton) {
-				playButton.textContent = "Play";
-				playButton.disabled = false;
-				playButton.classList.add("ready");
-				playButton.addEventListener("click", () => checkTokenAndProceed("play"));
-			}
-
-			if (hostButton) {
-				hostButton.disabled = false;
-				hostButton.classList.add("ready");
-				hostButton.style.display = "block";
-				hostButton.addEventListener("click", () => checkTokenAndProceed("host"));
-			}
-
-			const joinButton = document.getElementById("join-button") as HTMLButtonElement;
-			if (joinButton) {
-				joinButton.disabled = false;
-				joinButton.classList.add("ready");
-				joinButton.style.display = "block";
-				joinButton.addEventListener("click", () => {
-					this.fetchRooms();
-				});
-			}
-
-			// Setup Join Room Panel
-			const submitJoinBtn = document.getElementById("submit-join-btn");
-			const closeJoinBtn = document.getElementById("close-join-btn");
-			const joinRoomCodeInput = document.getElementById("join-room-code") as HTMLInputElement;
-
-			if (submitJoinBtn) {
-				submitJoinBtn.addEventListener("click", () => {
-					joinRoomCode = joinRoomCodeInput.value.trim().toUpperCase();
-					if (joinRoomCode.length > 0) {
-						checkTokenAndProceed("join");
-					}
-				});
-			}
-			if (closeJoinBtn) {
-				closeJoinBtn.addEventListener("click", () => {
-					document.getElementById("loading-screen")?.classList.remove("show-join");
-				});
-			}
-
-			// Setup Account Split Panel
-			const createAccountBtn = document.getElementById("create-account-btn");
-			const loadingScreen = document.getElementById("loading-screen");
-			const closeAccountBtn = document.getElementById("close-account-btn");
-			const submitAccountBtn = document.getElementById("submit-account-btn");
-			const accountSuccessMsg = document.getElementById("account-success-msg");
-
-			if (createAccountBtn && loadingScreen) {
-				createAccountBtn.addEventListener("click", () => {
-					loadingScreen.classList.remove("show-login");
-					loadingScreen.classList.add("show-account");
-				});
-			}
-			if (closeAccountBtn && loadingScreen) {
-				closeAccountBtn.addEventListener("click", () => {
-					loadingScreen.classList.remove("show-account");
-				});
-			}
-			if (submitAccountBtn && accountSuccessMsg && loadingScreen) {
-				submitAccountBtn.addEventListener("click", async () => {
-					const usernameInput = document.getElementById("username") as HTMLInputElement;
-					const emailInput = document.getElementById("email") as HTMLInputElement;
-					const username = usernameInput?.value;
-					const email = emailInput?.value;
-
-					if (!username || !email) {
-						accountSuccessMsg.textContent = "Please fill in all fields.";
-						accountSuccessMsg.style.color = "#ff6b6b";
-						accountSuccessMsg.style.display = "block";
-						return;
-					}
-
-					try {
-						const res = await fetch(`${SERVER_URL}/api/auth/register`, {
-							method: "POST",
-							headers: { "Content-Type": "application/json" },
-							body: JSON.stringify({ username, email })
-						});
-
-						const data = await res.json();
-						if (res.ok) {
-							accountSuccessMsg.textContent = "Account created successfully!";
-							accountSuccessMsg.style.color = "#a3d977";
-							accountSuccessMsg.style.display = "block";
-							setTimeout(() => {
-								loadingScreen.classList.remove("show-account");
-								accountSuccessMsg.style.display = "none";
-								usernameInput.value = "";
-								emailInput.value = "";
-							}, 1500);
-						} else {
-							accountSuccessMsg.textContent = data.error || "Failed to create account.";
-							accountSuccessMsg.style.color = "#ff6b6b";
-							accountSuccessMsg.style.display = "block";
-						}
-					} catch (err) {
-						accountSuccessMsg.textContent = "Error connecting to server. Is it running?";
-						accountSuccessMsg.style.color = "#ff6b6b";
-						accountSuccessMsg.style.display = "block";
-					}
-				});
-			}
-
-			// Setup Login Panel
-			const closeLoginBtn = document.getElementById("close-login-btn");
-			const submitLoginBtn = document.getElementById("submit-login-btn");
-			const loginErrorMsg = document.getElementById("login-error-msg");
-
-			if (closeLoginBtn && loadingScreen) {
-				closeLoginBtn.addEventListener("click", () => {
-					loadingScreen.classList.remove("show-login");
-				});
-			}
-
-			if (submitLoginBtn && loginErrorMsg && loadingScreen) {
-				submitLoginBtn.addEventListener("click", async () => {
-					const emailInput = document.getElementById("login-email") as HTMLInputElement;
-					const email = emailInput?.value;
-
-					if (!email) {
-						loginErrorMsg.textContent = "Please provide an email.";
-						loginErrorMsg.style.display = "block";
-						return;
-					}
-
-					try {
-						const res = await fetch(`${SERVER_URL}/api/auth/login`, {
-							method: "POST",
-							headers: { "Content-Type": "application/json" },
-							body: JSON.stringify({ email })
-						});
-
-						const data = await res.json();
-						if (res.ok) {
-							// Store token in local storage if backend provided it
-							if (data.token) {
-								localStorage.setItem("authToken", data.token);
-							}
-
-							// LOGIN SUCCESS: Route to the correct action (play, host, join)
-							proceed(loginAction, data.user);
-						} else {
-							loginErrorMsg.textContent = data.error || "Login failed.";
-							loginErrorMsg.style.display = "block";
-						}
-					} catch (err) {
-						loginErrorMsg.textContent = "Server is not running!";
-						loginErrorMsg.style.display = "block";
-					}
-				});
-			}
-
-			// Setup Logout Modal
-			const logoutBtn = document.getElementById("logout-btn");
-			const logoutModal = document.getElementById("logout-confirm-modal");
-			const confirmLogoutBtn = document.getElementById("confirm-logout-btn");
-			const cancelLogoutBtn = document.getElementById("cancel-logout-btn");
-
-			if (logoutBtn && logoutModal && confirmLogoutBtn && cancelLogoutBtn) {
-				logoutBtn.addEventListener("click", () => {
-					logoutModal.style.display = "flex";
-				});
-				cancelLogoutBtn.addEventListener("click", () => {
-					logoutModal.style.display = "none";
-				});
-				confirmLogoutBtn.addEventListener("click", () => {
-					localStorage.removeItem("authToken");
-					window.location.reload();
-				});
-			}
-
-			// Setup In-Game Host
-			const inGameHostBtn = document.getElementById("in-game-host-btn");
-			const hostConfirmModal = document.getElementById("host-confirm-modal");
-			const confirmHostBtn = document.getElementById("confirm-host-btn");
-			const cancelHostBtn = document.getElementById("cancel-host-btn");
-
-			if (inGameHostBtn && hostConfirmModal && confirmHostBtn && cancelHostBtn) {
-				inGameHostBtn.addEventListener("click", () => {
-					hostConfirmModal.style.display = "flex";
-				});
-				cancelHostBtn.addEventListener("click", () => {
-					hostConfirmModal.style.display = "none";
-				});
-				confirmHostBtn.addEventListener("click", () => {
-					hostConfirmModal.style.display = "none";
-					this.connectSocket("host");
-				});
-			}
-
-			// Setup In-Game Join
-			const inGameJoinBtn = document.getElementById("in-game-join-btn");
-			if (inGameJoinBtn) {
-				inGameJoinBtn.addEventListener("click", () => {
-					this.fetchRooms();
-				});
-			}
+			this.loadingScreenController = new LoadingScreenController({
+				auth: this.authService,
+				onPlay: () => proceed("play", this.userData),
+			});
+			this.loadingScreenController.initialize();
 
 			// Setup Room List Panel Buttons
 			const closeRoomListBtn = document.getElementById("close-room-list-btn");
@@ -577,8 +383,7 @@ export class FluffyGrass {
 
 					// If they were in-game, bring back the top nav
 					if (this.isGameActive) {
-						const gameTopNav = document.getElementById("game-top-nav");
-						if (gameTopNav) gameTopNav.style.display = "flex";
+						this.gameNavigation?.show();
 					}
 				});
 			}
@@ -595,17 +400,8 @@ export class FluffyGrass {
 
 			if (leaveLobbyBtn) {
 				leaveLobbyBtn.addEventListener("click", () => {
-					if (this.socket) {
-						this.socket.disconnect();
-						this.socket = null; // Clear socket so we can reconnect later
-					}
-
-					if (this.userData || localStorage.getItem("authToken")) {
-						document.getElementById("lobby-panel")!.style.display = "none";
-						proceed("play", this.userData);
-					} else {
-						window.location.reload();
-					}
+					this.disconnectMultiplayer();
+					proceed("play", this.userData);
 				});
 			}
 			if (startGameBtn) {
@@ -625,9 +421,11 @@ export class FluffyGrass {
 		}
 	}
 
-	private ensureSocket() {
-		if (!this.socket) {
-			this.socket = io(SERVER_URL);
+	private async ensureSocket() {
+		if (this.socket) return;
+		const { io } = await import("socket.io-client");
+		if (this.socket) return;
+		this.socket = io(SERVER_URL);
 
 			this.socket.on("room-updated", (players: any[]) => {
 				for (let i = 0; i < 4; i++) {
@@ -955,16 +753,14 @@ export class FluffyGrass {
 				}
 				this.remotePlayers.delete(socketId);
 			});
-		}
 	}
 
-	private connectSocket(action: "host" | "join", roomCodeToJoin?: string) {
-		this.ensureSocket();
+	private async connectSocket(action: "host" | "join", roomCodeToJoin?: string) {
+		await this.ensureSocket();
 
 		const loadingScreen = document.getElementById("loading-screen");
 		const lobbyPanel = document.getElementById("lobby-panel");
 		const startBtn = document.getElementById("start-game-btn");
-		const joinPanel = document.getElementById("join-panel");
 		const settingsToggle = document.getElementById("settings-toggle");
 
 		if (action === "host") {
@@ -976,10 +772,8 @@ export class FluffyGrass {
 					if (startBtn) startBtn.style.display = "block";
 					if (loadingScreen) loadingScreen.style.display = "none";
 					if (settingsToggle) settingsToggle.style.display = "none";
-					const gameTopNav = document.getElementById("game-top-nav");
-					if (gameTopNav) gameTopNav.style.display = "none";
-					this.gui.hide();
-					this.sceneGUI.hide();
+					this.gameNavigation?.hide();
+					this.settings.hide();
 				}
 			});
 		} else if (action === "join" && roomCodeToJoin) {
@@ -990,46 +784,47 @@ export class FluffyGrass {
 					if (lobbyPanel) lobbyPanel.style.display = "flex";
 					if (startBtn) startBtn.style.display = "none";
 					if (loadingScreen) loadingScreen.style.display = "none";
-					if (joinPanel) joinPanel.parentElement!.classList.remove("show-join");
 					if (settingsToggle) settingsToggle.style.display = "none";
-					const gameTopNav = document.getElementById("game-top-nav");
-					if (gameTopNav) gameTopNav.style.display = "none";
-					const joinConfirmModal = document.getElementById("join-confirm-modal");
-					if (joinConfirmModal) joinConfirmModal.style.display = "none";
-					this.gui.hide();
-					this.sceneGUI.hide();
+					this.gameNavigation?.hide();
+					this.settings.hide();
 				} else {
-					const errorMsg = document.getElementById("join-error-msg");
-					if (errorMsg && errorMsg.offsetParent !== null) {
-						errorMsg.textContent = res.error || "Failed to join room";
-						errorMsg.style.display = "block";
-					}
-					const inGameErrorMsg = document.getElementById("in-game-join-error");
-					if (inGameErrorMsg) {
-						inGameErrorMsg.textContent = res.error || "Failed to join room";
-						inGameErrorMsg.style.display = "block";
-					}
+					console.error(res.error || "Failed to join room");
 				}
 			});
 		}
 	}
 
-	private fetchRooms() {
+	private disconnectMultiplayer() {
+		this.socket?.disconnect();
+		this.socket = null;
+		this.roomCode = "";
+
+		for (const remotePlayer of this.remotePlayers.values()) {
+			if (remotePlayer.carGroup) this.scene.remove(remotePlayer.carGroup);
+			if (remotePlayer.humanGroup) this.scene.remove(remotePlayer.humanGroup);
+			if (remotePlayer.carBody) getWorld().removeRigidBody(remotePlayer.carBody);
+			if (remotePlayer.humanBody) getWorld().removeRigidBody(remotePlayer.humanBody);
+			remotePlayer.engineSound?.dispose();
+			remotePlayer.hornSound?.stop();
+		}
+		this.remotePlayers.clear();
+
+		const lobbyPanel = document.getElementById("lobby-panel");
+		const roomListPanel = document.getElementById("room-list-panel");
+		if (lobbyPanel) lobbyPanel.style.display = "none";
+		if (roomListPanel) roomListPanel.style.display = "none";
+		if (this.isGameActive) this.gameNavigation?.show();
+	}
+
+	private async fetchRooms() {
 		// Ensure socket is connected and listeners are attached
-		this.ensureSocket();
+		await this.ensureSocket();
 
 		const roomListPanel = document.getElementById("room-list-panel");
 		const roomListContainer = document.getElementById("room-list-container");
-		const gameTopNav = document.getElementById("game-top-nav");
-		const loadingScreen = document.getElementById("loading-screen");
-		const joinConfirmModal = document.getElementById("join-confirm-modal");
 
 		if (roomListPanel) roomListPanel.style.display = "flex";
-		if (gameTopNav) gameTopNav.style.display = "none";
-		if (joinConfirmModal) joinConfirmModal.style.display = "none";
-		if (loadingScreen && loadingScreen.classList.contains("show-join")) {
-			loadingScreen.classList.remove("show-join");
-		}
+		this.gameNavigation?.hide();
 
 		if (roomListContainer) {
 			roomListContainer.innerHTML = `<div style="color: white; text-align: center; padding: 20px;">Fetching rooms...</div>`;
@@ -1221,13 +1016,17 @@ export class FluffyGrass {
 		}
 
 		grassInstancedMesh.instanceMatrix.needsUpdate = true;
-		grassInstancedMesh.frustumCulled = false;
-		grassInstancedMesh.name = 'Grass';
-		// Grass is restored to layer 0 (default) since we use visibility toggling now
+		grassInstancedMesh.count = Math.floor(instanceIndex * (this.grassDensity / 100));
+		grassInstancedMesh.userData.maxGrassCount = instanceIndex;
+		grassInstancedMesh.computeBoundingBox();
+		grassInstancedMesh.computeBoundingSphere();
+		grassInstancedMesh.frustumCulled = true;
+		grassInstancedMesh.name = "Grass";
 		grassInstancedMesh.layers.set(0);
-		// Copy position from surfaceMesh so grass aligns with offset terrains
 		grassInstancedMesh.position.copy(surfaceMesh.position);
 		targetGroup.add(grassInstancedMesh);
+		this.grassMeshes.add(grassInstancedMesh);
+		return grassInstancedMesh;
 	}
 
 	private loadGltf(url: string): Promise<THREE.Group> {
@@ -1248,23 +1047,19 @@ export class FluffyGrass {
 	}
 
 	private async loadModels() {
-		this.sceneGUI
-			.addColor(this.sceneProps, "terrainColor")
-			.onChange((value) => {
-				this.terrainMat.color.set(value);
-			});
-
 		const { mesh, heights, nrows, ncols } = createLargeTerrain(this.terrainMat);
 		this.worldGroup.add(mesh);
 
 		mesh.updateMatrixWorld(true);
 		setIslandTerrain(mesh);
-		createTerrainHeightfieldCollider(heights, nrows, ncols);
+		this.islandTerrainHandle = createTerrainHeightfieldCollider(heights, nrows, ncols);
 
 		this.pond = new Pond({
 			width: 20,
 			height: 20,
 			circular: true,
+			color: this.sceneProps.terrainColor,
+			bottomColor: this.sceneProps.terrainColor,
 			renderer: this.renderer,
 			scene: this.scene,
 			camera: this.camera,
@@ -1274,18 +1069,21 @@ export class FluffyGrass {
 		this.pond.mesh.position.set(-20, -0.5, 5);
 		this.pond.mesh.renderOrder = 1; // Force water to draw AFTER grass!
 		this.worldGroup.add(this.pond.mesh);
+		this.resizePondTargets();
 
-		const grassScene = await this.loadGltf("/grassLODs.glb");
-		let foundGrass = false;
-		grassScene.traverse((child) => {
-			if (child instanceof THREE.Mesh && child.name.includes("LOD00")) {
-				child.geometry.scale(5, 2, 5);
-				this.grassGeometry = child.geometry;
-				foundGrass = true;
+		if (!this.grassGeometry.hasAttribute("position")) {
+			const grassScene = await this.loadGltf("/grassLODs.glb");
+			let foundGrass = false;
+			grassScene.traverse((child) => {
+				if (child instanceof THREE.Mesh && child.name.includes("LOD00")) {
+					child.geometry.scale(5, 1, 5);
+					this.grassGeometry = child.geometry;
+					foundGrass = true;
+				}
+			});
+			if (!foundGrass) {
+				throw new Error("grassLODs.glb: GrassLOD00 mesh not found");
 			}
-		});
-		if (!foundGrass) {
-			throw new Error("grassLODs.glb: GrassLOD00 mesh not found");
 		}
 
 		this.addGrass(mesh, this.grassGeometry, this.worldGroup);
@@ -1293,6 +1091,31 @@ export class FluffyGrass {
 		console.log(
 			`[FluffyGrass] terrain ${TERRAIN_CONFIG.size}×${TERRAIN_CONFIG.size}, grass=${this.grassCount}`
 		);
+	}
+
+	private async buildIslandWorld() {
+		await this.loadModels();
+		await this.setupPondStones();
+		await this.setupTrees();
+		await this.createBombs();
+		this.proceduralBridge = new ProceduralBridge(
+			getWorld(),
+			new THREE.Vector3(0, -1.0, 60),
+			8,
+			2,
+			200
+		);
+		this.scene.add(this.proceduralBridge.group);
+	}
+
+	private async setupPondStones() {
+		this.pondStones?.dispose();
+		this.pondStones = await createPondStones({
+			center: new THREE.Vector3(-20, 0, 5),
+			pondRadius: 10,
+			manager: this.loadingManager,
+		});
+		this.worldGroup.add(this.pondStones.group);
 	}
 
 	private async setupTrees() {
@@ -1675,128 +1498,96 @@ export class FluffyGrass {
 		this.lastFrameTime = now;
 		if (frameDt <= 0 || isNaN(frameDt)) frameDt = 1 / 60;
 		const dt = Math.min(Math.max(frameDt, 0.001), 0.033);
+		this.renderFrameCounter++;
+		if (
+			this.graphicsQuality === "Medium" &&
+			this.renderFrameCounter % 6 === 0
+		) {
+			this.renderer.shadowMap.needsUpdate = true;
+		}
 
 		this.Uniforms.uTime.value += this.clock.getDelta();
 
 		if (this.car) {
-			let fogCenter: THREE.Vector3 | undefined = undefined;
-			if (this.car.mesh.position.z > 130) {
-				fogCenter = this.car.mesh.position;
+			const fogCenter = this.currentWorld === "valley" ? this.car.mesh.position : undefined;
+			const fogUpdateInterval = this.graphicsQuality === "High" ? 2 : 3;
+			if (
+				this.volumetricFog?.group.visible &&
+				this.renderFrameCounter % fogUpdateInterval === 0
+			) {
+				this.volumetricFog.update(
+					this.car.mesh.position,
+					this.camera,
+					this.currentFogRadius,
+					fogCenter
+				);
 			}
-			this.volumetricFog?.update(this.car.mesh.position, this.camera, this.currentFogRadius, fogCenter);
-			this.proceduralBridge?.update(this.car.mesh.position);
-
-			// World Unloading Logic
-			// The bridge starts at Z = 60. By Z = 90, we are fully in the fog.
-			if (this.car.mesh.position.z > 90) {
-				this.worldGroup.visible = false;
-			} else {
-				this.worldGroup.visible = true;
-			}
-			// Hide the pond earlier (at bridge start) so it's not visible through bridge gaps
-			if (this.pond && this.car.mesh.position.z > 55) {
-				this.pond.mesh.visible = false;
-			}
-
-			// New world loading logic
-			if (this.car.mesh.position.z > 130) {
-				if (!this.hasStartedLoadingNewWorld) {
-					this.hasStartedLoadingNewWorld = true;
-
-					if (this.dayNight) {
-						(this.dayNight as any).overrideColors = true;
-						const skyDome = this.scene.getObjectByName("sky-dome");
-						if (skyDome) skyDome.visible = false;
-					}
-
-					const finalHeight = this.proceduralBridge?.getFinalHeight() ?? 0;
-					const finalZ = this.proceduralBridge?.getLastGeneratedZ() ?? 215;
-					const finalX = this.proceduralBridge?.getLastGeneratedX() ?? 0;
-					this.createValleyTerrain(finalX, finalHeight, finalZ);
-				}
-
-				// Transition fog and background to dark moody teal
-				const targetColor = new THREE.Color(0x1e2b2f);
-				// Make volumetric fog softly blend with the sky but slightly lighter
-				const targetVolumetricColor = new THREE.Color(0x2c3f44);
-				const lerpFactor = dt * 0.5;
-				if (this.scene.fog instanceof THREE.FogExp2) {
-					this.scene.fog.color.lerp(targetColor, lerpFactor);
-					// Push global fog out enough to see the world, but thick enough to hide the terrain edges
-					this.scene.fog.density = THREE.MathUtils.lerp(this.scene.fog.density, 0.005, lerpFactor);
-				}
-				if (this.scene.background instanceof THREE.Color) {
-					this.scene.background.lerp(targetColor, lerpFactor);
-				}
-				if (this.volumetricFog) {
-					// Also lerp volumetric fog color
-					const mat = (this.volumetricFog.group.children[0] as THREE.InstancedMesh).material as THREE.MeshBasicMaterial;
-					mat.color.lerp(targetVolumetricColor, lerpFactor);
-				}
-				if (this.grassMaterial) {
-					this.grassMaterial.uniforms.baseColor.value.lerp(new THREE.Color(0x3e524e), lerpFactor);
-					this.grassMaterial.uniforms.tipColor1.value.lerp(new THREE.Color(0x799894), lerpFactor);
-					this.grassMaterial.uniforms.tipColor2.value.lerp(new THREE.Color(0x56726e), lerpFactor);
-				}
-
-				// Push volumetric fog radius out to form a ring around the new world
-				this.currentFogRadius = THREE.MathUtils.lerp(this.currentFogRadius, 250, lerpFactor);
+			if (this.currentWorld === "island") {
+				this.proceduralBridge?.update(this.car.mesh.position);
 			}
 		}
 
-		if (this.worldGroup.visible) {
+		if (this.currentWorld === "island" && this.worldGroup.visible) {
 			this.grassMaterial.update(this.Uniforms.uTime.value);
 			updateFoliageWind(dt);
 			if (this.pond) {
-				this.pond.update(dt);
-
-				// --- WATER RIPPLES PHYSICS INTERACTION ---
-				const waterY = this.pond.mesh.position.y;
-
-				// 1. Car Ripples (4 wheels)
-				if (this.car && this.car.body) {
-					// Check if car is near water level
-					if (Math.abs(this.car.mesh.position.y - waterY) < 2.0) {
-						const speed = this.car.body.linvel();
-						const velocity = Math.hypot(speed.x, speed.z);
-						if (velocity > 1.0) {
-							// Inject a ripple under the car
-							this.pond.createRipple({
-								position: this.car.mesh.position,
-								strength: Math.min(0.5, velocity * 0.05),
-								radius: 1.5
-							});
-						}
+				const pondVisible = this.isObjectVisible(this.pond.mesh);
+				if (pondVisible) {
+					this.waterDeltaAccumulator = Math.min(
+						0.1,
+						this.waterDeltaAccumulator + dt
+					);
+					this.waterFrameCounter++;
+					if (this.waterFrameCounter >= this.waterUpdateInterval) {
+						this.pond.update(this.waterDeltaAccumulator);
+						this.waterFrameCounter = 0;
+						this.waterDeltaAccumulator = 0;
 					}
 				}
 
-				// 2. Human Ripples
-				if (this.human && this.human.body) {
-					if (Math.abs(this.human.mesh.position.y - waterY) < 1.0) {
-						const speed = this.human.body.linvel();
-						const velocity = Math.hypot(speed.x, speed.z);
-						if (velocity > 0.5) {
-							// Inject a ripple under the player
-							this.pond.createRipple({
-								position: this.human.mesh.position,
-								strength: 0.1,
-								radius: 0.8
-							});
+				if (pondVisible && now - this.lastRippleInjection >= 100) {
+					this.lastRippleInjection = now;
+					const waterY = this.pond.mesh.position.y;
+
+					if (this.car?.body) {
+						if (Math.abs(this.car.mesh.position.y - waterY) < 2.0) {
+							const speed = this.car.body.linvel();
+							const velocity = Math.hypot(speed.x, speed.z);
+							if (velocity > 1.0) {
+								this.pond.createRipple({
+									position: this.car.mesh.position,
+									strength: Math.min(0.5, velocity * 0.05),
+									radius: 1.5
+								});
+							}
 						}
 					}
-				}
 
-				// 3. Bomb Ripples
-				for (const bomb of this.bombs) {
-					if (bomb.body && Math.abs(bomb.mesh.position.y - waterY) < 0.5) {
-						const speed = bomb.body.linvel();
-						const velocity = Math.hypot(speed.x, speed.z);
-						if (velocity > 0.5) {
-							this.pond.createRipple({
-								position: bomb.mesh.position,
-								strength: 0.05,
-								radius: 0.5
-							});
+					if (this.human?.body) {
+						if (Math.abs(this.human.mesh.position.y - waterY) < 1.0) {
+							const speed = this.human.body.linvel();
+							const velocity = Math.hypot(speed.x, speed.z);
+							if (velocity > 0.5) {
+								this.pond.createRipple({
+									position: this.human.mesh.position,
+									strength: 0.1,
+									radius: 0.8
+								});
+							}
+						}
+					}
+
+					for (const bomb of this.bombs) {
+						if (bomb.body && Math.abs(bomb.mesh.position.y - waterY) < 0.5) {
+							const speed = bomb.body.linvel();
+							const velocity = Math.hypot(speed.x, speed.z);
+							if (velocity > 0.5) {
+								this.pond.createRipple({
+									position: bomb.mesh.position,
+									strength: 0.05,
+									radius: 0.5
+								});
+							}
 						}
 					}
 				}
@@ -1814,6 +1605,12 @@ export class FluffyGrass {
 			this.dayNightGui.hour = this.dayNight.hour;
 			this.dayNightGui.period = this.dayNight.period;
 			this.dayNightGui.auto = this.dayNight.auto;
+			if (now - this.lastSettingsSync >= 200) {
+				this.lastSettingsSync = now;
+				this.settings.setHour(this.dayNight.hour);
+				this.settings.setPeriod(this.dayNight.period);
+				this.settings.setAutoDayNight(this.dayNight.auto);
+			}
 
 			const grassLight = this.dayNight.getGrassLight();
 			this.grassMaterial.uniforms.uGrassLightIntensity.value = grassLight;
@@ -1832,7 +1629,7 @@ export class FluffyGrass {
 			this.frameHeadAmount = headAmount;
 		}
 
-		if (this.isGameActive && this.car && this.carInput && this.chaseCameraInput && this.human && this.humanInput) {
+		if (!this.isWorldSwitching && this.isGameActive && this.car && this.carInput && this.chaseCameraInput && this.human && this.humanInput) {
 			const playAllowed = this.orientationGate?.isPlayAllowed() ?? true;
 			const world = getWorld();
 			world.timestep = dt;
@@ -2213,9 +2010,12 @@ export class FluffyGrass {
 		this.renderer.render(this.scene, this.camera);
 		this.stats.update();
 
-		const gpuPanel = document.getElementById("custom-gpu-panel");
-		if (gpuPanel) {
-			gpuPanel.innerHTML = `GPU LOAD<br/>Calls: ${this.renderer.info.render.calls}<br/>Tris: ${this.renderer.info.render.triangles}`;
+		if (now - this.lastGpuPanelUpdate >= 250) {
+			this.lastGpuPanelUpdate = now;
+			const gpuPanel = document.getElementById("custom-gpu-panel");
+			if (gpuPanel) {
+				gpuPanel.innerHTML = `GPU LOAD<br/>Calls: ${this.renderer.info.render.calls}<br/>Tris: ${this.renderer.info.render.triangles}`;
+			}
 		}
 	};
 
@@ -2233,103 +2033,106 @@ export class FluffyGrass {
 		);
 	}
 
-	private setupGUI() {
-		this.gui.close();
-		this.gui.domElement.classList.add("fg-settings");
-		const guiContainer = this.gui.domElement.parentElement as HTMLDivElement;
-		guiContainer.style.zIndex = "9999";
-		guiContainer.style.position = "fixed";
-		guiContainer.style.top = "0";
-		guiContainer.style.left = "0";
-		guiContainer.style.right = "auto";
-		guiContainer.style.display = "block";
-
-		const toggle = document.getElementById("settings-toggle");
-		const syncToggle = () => {
-			const open = !this.gui.closed;
-			this.gui.domElement.classList.toggle("fg-hidden", !open);
-			toggle?.classList.toggle("is-open", open);
-			toggle?.setAttribute(
-				"aria-label",
-				open ? "Close settings" : "Open settings"
-			);
-		};
-		syncToggle();
-		toggle?.addEventListener("click", () => {
-			if (this.gui.closed) this.gui.open();
-			else this.gui.close();
-			syncToggle();
-		});
-
-		this.sceneGUI = this.gui.addFolder("Scene");
-		this.sceneGUI
-			.add(this.sceneProps, "fogDensity", 0, 0.05, 0.001)
-			.name("Fog Density")
-			.onChange((value) => {
-				if (this.scene.fog instanceof THREE.FogExp2) {
-					this.scene.fog.density = value;
-				}
-			});
-
-		const humanFolder = this.gui.addFolder("Human");
-		humanFolder
-			.add(this.sceneProps, "humanScale", 0.001, 2.0, 0.001)
-			.name("Model Scale")
-			.onChange((value) => {
-				if (this.human) {
-					this.human.mesh.scale.setScalar(value);
-				}
-			});
-		humanFolder.open();
-		this.sceneGUI
-			.addColor(this.sceneProps, "fogColor")
-			.name("Fog color")
-			.onChange((value) => {
-				this.scene.fog?.color.set(value);
-				this.scene.background = new THREE.Color(value);
-			});
-
-		this.grassMaterial.setupGUI(this.sceneGUI);
-
-		const skyFolder = this.gui.addFolder("Day / Night");
-		skyFolder
-			.add(this.dayNightGui, "period", [
-				"morning",
-				"noon",
-				"evening",
-				"sunset",
-				"night",
-			])
-			.name("Period")
-			.onChange((value: DayPeriod) => {
-				this.dayNight?.setPeriod(value);
+	private setupSettings() {
+		this.settings = new GameSettings({
+			quality: "High",
+			period: this.dayNightGui.period,
+			autoDayNight: this.dayNightGui.auto,
+			hour: this.dayNightGui.hour,
+			grassDensity: this.grassDensity,
+			carPower: CAR_CONFIG.drive.engineForce,
+			world: this.currentWorld,
+			onQualityChange: (quality) => this.applyGraphicsQuality(quality),
+			onPeriodChange: (period) => {
+				this.dayNight?.setPeriod(period);
+				this.dayNightGui.period = period;
 				this.dayNightGui.auto = false;
-				this.dayNightGui.hour = this.dayNight?.hour ?? this.dayNightGui.hour;
-			});
-		skyFolder
-			.add(this.dayNightGui, "auto")
-			.name("Auto cycle")
-			.onChange((value: boolean) => {
-				if (this.dayNight) this.dayNight.auto = value;
-			});
-		skyFolder
-			.add(this.dayNightGui, "speed", 0.02, 0.5, 0.01)
-			.name("Cycle speed")
-			.onChange((value: number) => {
-				if (this.dayNight) this.dayNight.speed = value;
-			});
-		skyFolder
-			.add(this.dayNightGui, "hour", 0, 24, 0.1)
-			.name("Hour")
-			.listen()
-			.onChange((value: number) => {
-				this.dayNight?.setHour(value);
+				this.settings.setAutoDayNight(false);
+			},
+			onAutoDayNightChange: (enabled) => {
+				this.dayNightGui.auto = enabled;
+				if (this.dayNight) this.dayNight.auto = enabled;
+			},
+			onHourChange: (hour) => {
+				this.dayNightGui.hour = hour;
+				this.dayNightGui.auto = false;
+				this.dayNight?.setHour(hour);
 				if (this.dayNight) this.dayNight.auto = false;
-				this.dayNightGui.auto = false;
-			});
-		skyFolder.open();
+				this.settings.setAutoDayNight(false);
+			},
+			onGrassDensityChange: (percent) => this.setGrassDensity(percent),
+			onCarPowerChange: (power) => {
+				CAR_CONFIG.drive.engineForce = power;
+			},
+			onWorldChange: (world) => this.switchWorld(world),
+		});
+		this.applyGraphicsQuality(this.graphicsQuality);
+	}
 
-		this.sceneGUI.open();
+	private applyGraphicsQuality(quality: GraphicsQuality) {
+		this.graphicsQuality = quality;
+		const pixelRatio =
+			quality === "Low" ? 0.75 : quality === "Medium" ? 1 : 2;
+		const shadowsEnabled = quality !== "Low";
+		this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, pixelRatio));
+		this.renderer.shadowMap.enabled = shadowsEnabled;
+		this.renderer.shadowMap.autoUpdate = quality === "High";
+		if (shadowsEnabled) this.renderer.shadowMap.needsUpdate = true;
+		this.grassMaterial.updateGrassGraphicsChange(quality === "High");
+		this.waterUpdateInterval =
+			quality === "Low" ? 4 : quality === "Medium" ? 3 : 2;
+		this.waterFrameCounter = 0;
+		this.waterDeltaAccumulator = 0;
+		this.resizePondTargets();
+		if (this.volumetricFog) {
+			this.volumetricFog.group.visible = quality !== "Low";
+		}
+	}
+
+	private resizePondTargets() {
+		if (!this.pond) return;
+		const targetScale =
+			this.graphicsQuality === "Low"
+				? 0.4
+				: this.graphicsQuality === "Medium"
+					? 0.7
+					: 1;
+		const pixelRatio = this.renderer.getPixelRatio();
+		const maxDimension =
+			this.graphicsQuality === "Low"
+				? 512
+				: this.graphicsQuality === "Medium"
+					? 768
+					: 1024;
+		this.pond.setSize(
+			Math.min(
+				maxDimension,
+				Math.max(1, Math.floor(window.innerWidth * pixelRatio * targetScale))
+			),
+			Math.min(
+				maxDimension,
+				Math.max(1, Math.floor(window.innerHeight * pixelRatio * targetScale))
+			)
+		);
+	}
+
+	private isObjectVisible(object: THREE.Object3D) {
+		this.camera.updateMatrixWorld();
+		object.updateWorldMatrix(true, false);
+		this.viewProjectionMatrix.multiplyMatrices(
+			this.camera.projectionMatrix,
+			this.camera.matrixWorldInverse
+		);
+		this.viewFrustum.setFromProjectionMatrix(this.viewProjectionMatrix);
+		return this.viewFrustum.intersectsObject(object);
+	}
+
+	private setGrassDensity(percent: number) {
+		this.grassDensity = THREE.MathUtils.clamp(percent, 0, 100);
+		for (const mesh of this.grassMeshes) {
+			const maximum = mesh.userData.maxGrassCount as number;
+			mesh.count = Math.floor(maximum * (this.grassDensity / 100));
+		}
 	}
 
 	private setupInteractionUI() {
@@ -2450,6 +2253,201 @@ export class FluffyGrass {
 		}
 	}
 
+	private async switchWorld(target: GameWorldId) {
+		if (target === this.currentWorld || this.isWorldSwitching) return;
+
+		const previous = this.currentWorld;
+		const targetName = target === "island" ? "Island" : "Valley";
+		this.isWorldSwitching = true;
+		this.worldLoading.show(targetName);
+
+		try {
+			this.worldLoading.setProgress(15, "Generating terrain and physics...");
+			await this.nextFrame();
+
+			if (target === "island") {
+				await this.buildIslandWorld();
+				this.worldGroup.visible = true;
+			} else {
+				this.createValleyTerrain(0, 0, 0);
+				this.newWorldGroup.visible = true;
+			}
+			if (previous === "island") {
+				this.worldGroup.visible = false;
+			} else {
+				this.newWorldGroup.visible = false;
+			}
+
+			this.worldLoading.setProgress(65, "Compiling world graphics...");
+			await this.renderer.compileAsync(this.scene, this.camera);
+			await this.nextFrame();
+
+			this.worldLoading.setProgress(82, "Placing player safely...");
+			this.teleportPlayerToCurrentTerrain(target);
+
+			this.currentWorld = target;
+			this.worldGroup.visible = target === "island";
+			this.newWorldGroup.visible = target === "valley";
+			this.applyWorldEnvironment(target);
+
+			this.worldLoading.setProgress(92, "Unloading previous world...");
+			await this.nextFrame();
+			if (previous === "island") {
+				this.disposeIslandWorld();
+			} else {
+				this.disposeValleyWorld();
+			}
+			this.renderer.renderLists.dispose();
+
+			this.settings.setWorld(target);
+			this.worldLoading.setProgress(100, "Ready");
+			await this.nextFrame();
+			this.worldLoading.hide();
+		} catch (error) {
+			if (target === "island") this.disposeIslandWorld();
+			else this.disposeValleyWorld();
+
+			this.currentWorld = previous;
+			this.worldGroup.visible = previous === "island";
+			this.newWorldGroup.visible = previous === "valley";
+			this.settings.setWorld(previous);
+			const message = error instanceof Error ? error.message : "Unable to load world.";
+			this.worldLoading.showError(message);
+			throw error;
+		} finally {
+			this.isWorldSwitching = false;
+		}
+	}
+
+	private teleportPlayerToCurrentTerrain(target: GameWorldId) {
+		const x = 0;
+		const z = target === "island" ? 0 : this.valleySpawn.z;
+		const groundY = getWorldTerrainY(x, z);
+
+		if (this.car) {
+			this.car.body.setTranslation(
+				{ x, y: groundY + CAR_CONFIG.spawn.clearance, z },
+				true
+			);
+			this.car.body.setRotation({ x: 0, y: 0, z: 0, w: 1 }, true);
+			this.car.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+			this.car.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+			this.carController?.resetDriveState();
+		}
+
+		if (this.human) {
+			this.human.body.setTranslation({ x: x + 3, y: groundY + 3, z }, true);
+			this.human.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+		}
+	}
+
+	private applyWorldEnvironment(world: GameWorldId) {
+		const sky = this.scene.getObjectByName("sky-dome");
+		if (world === "island") {
+			this.grassMaterial.setTerrainSize(TERRAIN_CONFIG.size);
+			if (this.dayNight) {
+				this.dayNight.overrideColors = false;
+				this.dayNight.setHour(this.dayNightGui.hour);
+			}
+			if (sky) sky.visible = true;
+			this.currentFogRadius = 65;
+			this.grassMaterial.uniforms.baseColor.value.set("#313f1b");
+			this.grassMaterial.uniforms.tipColor1.value.set("#5e875e");
+			this.grassMaterial.uniforms.tipColor2.value.set("#1f352a");
+		} else {
+			this.grassMaterial.setTerrainSize(150);
+			if (this.dayNight) this.dayNight.overrideColors = true;
+			if (sky) sky.visible = false;
+			const color = new THREE.Color(0x1e2b2f);
+			this.scene.background = color.clone();
+			if (this.scene.fog instanceof THREE.FogExp2) {
+				this.scene.fog.color.copy(color);
+				this.scene.fog.density = 0.005;
+			}
+			this.currentFogRadius = 250;
+			this.grassMaterial.uniforms.baseColor.value.set(0x3e524e);
+			this.grassMaterial.uniforms.tipColor1.value.set(0x799894);
+			this.grassMaterial.uniforms.tipColor2.value.set(0x56726e);
+		}
+	}
+
+	private disposeIslandWorld() {
+		this.pond?.mesh.removeFromParent();
+		this.pond?.dispose();
+		this.pond = undefined;
+
+		this.pondStones?.dispose();
+		this.pondStones = null;
+
+		for (const tree of this.trees) tree.dispose();
+		this.trees = [];
+		this.fireflies?.dispose();
+		this.fireflies = null;
+		this.disposeBombs();
+
+		this.islandTerrainHandle?.dispose();
+		this.islandTerrainHandle = null;
+		this.proceduralBridge?.dispose();
+		this.proceduralBridge?.group.removeFromParent();
+		this.proceduralBridge = null;
+
+		this.disposeWorldGroup(this.worldGroup);
+	}
+
+	private disposeValleyWorld() {
+		if (this.valleyTerrainBody) {
+			getWorld().removeRigidBody(this.valleyTerrainBody);
+			this.valleyTerrainBody = null;
+		}
+		this.disposeWorldGroup(this.newWorldGroup);
+	}
+
+	private disposeWorldGroup(group: THREE.Group) {
+		group.traverse((object) => {
+			if (!(object instanceof THREE.Mesh || object instanceof THREE.Points)) return;
+			if (object instanceof THREE.InstancedMesh && object.name === "Grass") {
+				object.dispose();
+				this.grassMeshes.delete(object);
+				return;
+			}
+
+			if (object.geometry !== this.grassGeometry) object.geometry.dispose();
+			const materials = Array.isArray(object.material)
+				? object.material
+				: [object.material];
+			for (const material of materials) {
+				if (material !== this.grassMaterial.material && material !== this.terrainMat) {
+					material.dispose();
+				}
+			}
+		});
+		group.clear();
+	}
+
+	private disposeBombs() {
+		const geometries = new Set<THREE.BufferGeometry>();
+		const materials = new Set<THREE.Material>();
+		for (const bomb of this.bombs) {
+			if (bomb.body) getWorld().removeRigidBody(bomb.body);
+			bomb.mesh.removeFromParent();
+			bomb.mesh.traverse((object) => {
+				if (!(object instanceof THREE.Mesh)) return;
+				geometries.add(object.geometry);
+				const meshMaterials = Array.isArray(object.material)
+					? object.material
+					: [object.material];
+				for (const material of meshMaterials) materials.add(material);
+			});
+		}
+		for (const geometry of geometries) geometry.dispose();
+		for (const material of materials) material.dispose();
+		this.bombs = [];
+	}
+
+	private nextFrame(): Promise<void> {
+		return new Promise((resolve) => window.setTimeout(resolve, 0));
+	}
+
 	private createValleyTerrain(bridgeEndX: number, bridgeEndHeight: number, bridgeEndZ: number) {
 		const width = 150;
 		const depth = 150;
@@ -2561,9 +2559,19 @@ export class FluffyGrass {
 		newTerrain.position.set(centerX, 0, centerZ);
 		newTerrain.receiveShadow = true;
 		this.newWorldGroup.add(newTerrain);
+		newTerrain.updateMatrixWorld(true);
+		setIslandTerrain(newTerrain);
+		this.valleySpawn.set(centerX, bridgeEndHeight + 4, bridgeEndZ + 5);
 
 		// Add grass to the new world! (shorter grass: 0.3x height, clustered)
-		this.addGrass(newTerrain, this.grassGeometry, this.newWorldGroup, new THREE.Vector2(0, 0), 0.3, true);
+		this.addGrass(
+			newTerrain,
+			this.grassGeometry,
+			this.newWorldGroup,
+			new THREE.Vector2(0, 0),
+			0.3,
+			true
+		);
 
 		// Physics Heightfield
 		const heights = new Float32Array((resolution + 1) * (resolution + 1));
@@ -2575,6 +2583,7 @@ export class FluffyGrass {
 
 		const bodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(centerX, 0, centerZ);
 		const body = getWorld().createRigidBody(bodyDesc);
+		this.valleyTerrainBody = body;
 		const colliderDesc = RAPIER.ColliderDesc.heightfield(
 			resolution, resolution, heights,
 			{ x: width, y: 1.0, z: depth }
@@ -2600,6 +2609,7 @@ export class FluffyGrass {
 		this.camera.aspect = window.innerWidth / window.innerHeight;
 		this.camera.updateProjectionMatrix();
 		this.renderer.setSize(window.innerWidth, window.innerHeight);
+		this.resizePondTargets();
 	}
 }
 

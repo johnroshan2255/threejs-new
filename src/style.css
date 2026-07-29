@@ -581,6 +581,58 @@ body.orientation-portrait-lock .dg.ac {
 	pointer-events: none !important;
 }
 
+/* World transition loading */
+.world-loading-overlay {
+	position: fixed;
+	inset: 0;
+	z-index: 25000;
+	display: none;
+	align-items: center;
+	justify-content: center;
+	padding: 24px;
+	background: rgba(6, 10, 8, 0.92);
+	backdrop-filter: blur(16px);
+	-webkit-backdrop-filter: blur(16px);
+}
+
+.world-loading-overlay.is-visible {
+	display: flex;
+}
+
+.world-loading-card {
+	width: min(420px, 90vw);
+	color: #f1f7ed;
+	text-align: center;
+	font-family: "Sora", system-ui, sans-serif;
+}
+
+.world-loading-card h2 {
+	margin-bottom: 10px;
+	font-size: 1.6rem;
+}
+
+.world-loading-card p {
+	min-height: 22px;
+	margin-bottom: 18px;
+	color: rgba(225, 238, 216, 0.72);
+	font-size: 0.9rem;
+}
+
+.world-loading-track {
+	height: 7px;
+	overflow: hidden;
+	border-radius: 999px;
+	background: rgba(255, 255, 255, 0.1);
+}
+
+.world-loading-progress {
+	width: 0;
+	height: 100%;
+	border-radius: inherit;
+	background: #a3d977;
+	transition: width 0.2s ease;
+}
+
 /* Loading Screen */
 .loading-screen {
   position: fixed;
@@ -809,14 +861,8 @@ body.orientation-portrait-lock .dg.ac {
   opacity: 1;
 }
 
-.loading-screen.show-login #login-panel {
-  width: 50%;
-  opacity: 1;
-}
-
 @media (max-width: 768px) {
-  .loading-screen.show-account #account-panel,
-  .loading-screen.show-login #login-panel {
+  .loading-screen.show-account #account-panel {
     width: 100%;
   }
 }
@@ -997,8 +1043,7 @@ body.orientation-portrait-lock .dg.ac {
   transition-delay: 0.1s;
 }
 
-.loading-screen.show-account #account-panel .account-panel-content,
-.loading-screen.show-login #login-panel .account-panel-content {
+.loading-screen.show-account #account-panel .account-panel-content {
   opacity: 1;
   transform: translateX(0);
 }
@@ -1158,6 +1203,29 @@ body.orientation-portrait-lock .dg.ac {
   margin-bottom: 25px;
 }
 
+.modal-input {
+  width: 100%;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+  border: 1px solid rgba(190, 220, 170, 0.25);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.3);
+  color: #fff;
+  font: inherit;
+}
+
+.modal-input:focus {
+  outline: none;
+  border-color: #a3d977;
+  box-shadow: 0 0 0 3px rgba(163, 217, 119, 0.16);
+}
+
+.modal-error {
+  color: #e3a35b !important;
+  margin: 0 0 14px !important;
+  font-size: 0.9rem !important;
+}
+
 .logout-buttons {
   display: flex;
   gap: 15px;
@@ -1196,12 +1264,6 @@ body.orientation-portrait-lock .dg.ac {
 
 .cancel-btn:hover {
   background: rgba(255, 255, 255, 0.15);
-}
-
-/* Join Panel */
-.show-join #join-panel {
-  width: 400px;
-  opacity: 1;
 }
 
 /* Lobby UI */

@@ -48,6 +48,7 @@ export class HumanInput {
     private cameraFwd = new THREE.Vector3();
     private cameraRight = new THREE.Vector3();
     private targetRotation = new THREE.Quaternion();
+    private readonly upAxis = new THREE.Vector3(0, 1, 0);
     private isSwimming = false;
 
     private isLeftMouseDown = false;
@@ -330,7 +331,7 @@ export class HumanInput {
         this.cameraFwd.y = 0;
         this.cameraFwd.normalize();
         
-        this.cameraRight.crossVectors(this.cameraFwd, new THREE.Vector3(0, 1, 0)).normalize();
+        this.cameraRight.crossVectors(this.cameraFwd, this.upAxis).normalize();
 
         // Calculate world movement direction
         this.moveDir.set(0, 0, 0);
@@ -349,7 +350,7 @@ export class HumanInput {
 
             // Rotate visual mesh to face movement direction
             const angle = Math.atan2(this.moveDir.x, this.moveDir.z);
-            this.targetRotation.setFromAxisAngle(new THREE.Vector3(0, 1, 0), angle);
+            this.targetRotation.setFromAxisAngle(this.upAxis, angle);
             
             // Smoothly interpolate current rotation to target rotation
             this.human.mesh.quaternion.slerp(this.targetRotation, dt * this.rotationSmoothness);

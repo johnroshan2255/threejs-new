@@ -12,8 +12,11 @@ export const DEFAULT_DAMPING = 0.992;
 /** Default wave propagation speed. */
 export const DEFAULT_SPEED = 0.9;
 
-/** Default water colour (hex) — clear turquoise. */
-export const DEFAULT_WATER_COLOR = 0x66c8d8;
+/** Default water colour (hex) — matches island terrain. */
+export const DEFAULT_WATER_COLOR = 0x5e875e;
+
+/** Default pond-bottom colour — matches the island terrain. */
+export const DEFAULT_BOTTOM_COLOR = 0x5e875e;
 
 /** Default surface opacity. */
 export const DEFAULT_OPACITY = 1.0;
@@ -54,6 +57,7 @@ export const DEFAULT_WATER_OPTIONS: Omit<
   damping: DEFAULT_DAMPING,
   speed: DEFAULT_SPEED,
   color: DEFAULT_WATER_COLOR,
+  bottomColor: DEFAULT_BOTTOM_COLOR,
   opacity: DEFAULT_OPACITY,
   reflectivity: DEFAULT_REFLECTIVITY,
   circular: DEFAULT_CIRCULAR,

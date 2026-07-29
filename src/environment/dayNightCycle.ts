@@ -139,6 +139,38 @@ const PERIOD_ORDER: DayPeriod[] = [
 	"night",
 ];
 
+type PeriodNode = PeriodKey & { id: DayPeriod; hour: number };
+
+const PERIOD_KEYS: PeriodNode[] = PERIOD_ORDER.map((id) => ({
+	id,
+	...DAY_PERIODS[id],
+}));
+
+const PERIOD_TIMELINE: PeriodNode[] = [
+	{
+		...DAY_PERIODS.night,
+		id: "night",
+		hour: DAY_PERIODS.night.hour - 24,
+	},
+	...PERIOD_KEYS,
+	{
+		...DAY_PERIODS.morning,
+		id: "morning",
+		hour: DAY_PERIODS.morning.hour + 24,
+	},
+];
+
+const COLOR_CACHE = new Map<string, THREE.Color>();
+
+function getColor(value: string): THREE.Color {
+	let color = COLOR_CACHE.get(value);
+	if (!color) {
+		color = new THREE.Color(value);
+		COLOR_CACHE.set(value, color);
+	}
+	return color;
+}
+
 type Sampled = {
 	zenith: THREE.Color;
 	horizon: THREE.Color;
@@ -169,24 +201,19 @@ function smoothstep(t: number) {
 }
 
 function sampleAtHour(hour: number, out: Sampled): Sampled {
-	const keys = PERIOD_ORDER.map((id) => ({ id, ...DAY_PERIODS[id] }));
 	const h = ((hour % 24) + 24) % 24;
 
-	type Node = PeriodKey & { id: DayPeriod; hour: number };
-	const timeline: Node[] = [
-		{ ...DAY_PERIODS.night, id: "night", hour: DAY_PERIODS.night.hour - 24 },
-		...keys,
-		{ ...DAY_PERIODS.morning, id: "morning", hour: DAY_PERIODS.morning.hour + 24 },
-	];
+	const probe = h < PERIOD_KEYS[0].hour ? h + 24 : h;
 
-	const probe = h < keys[0].hour ? h + 24 : h;
-
-	let from = timeline[0];
-	let to = timeline[1];
-	for (let i = 0; i < timeline.length - 1; i++) {
-		if (probe >= timeline[i].hour && probe <= timeline[i + 1].hour) {
-			from = timeline[i];
-			to = timeline[i + 1];
+	let from = PERIOD_TIMELINE[0];
+	let to = PERIOD_TIMELINE[1];
+	for (let i = 0; i < PERIOD_TIMELINE.length - 1; i++) {
+		if (
+			probe >= PERIOD_TIMELINE[i].hour &&
+			probe <= PERIOD_TIMELINE[i + 1].hour
+		) {
+			from = PERIOD_TIMELINE[i];
+			to = PERIOD_TIMELINE[i + 1];
 			break;
 		}
 	}
@@ -199,23 +226,27 @@ function sampleAtHour(hour: number, out: Sampled): Sampled {
 		)
 	);
 
-	out.zenith.set(from.zenith).lerp(new THREE.Color(to.zenith), t);
-	out.horizon.set(from.horizon).lerp(new THREE.Color(to.horizon), t);
-	out.fog.set(from.fog).lerp(new THREE.Color(to.fog), t);
+	out.zenith.copy(getColor(from.zenith)).lerp(getColor(to.zenith), t);
+	out.horizon.copy(getColor(from.horizon)).lerp(getColor(to.horizon), t);
+	out.fog.copy(getColor(from.fog)).lerp(getColor(to.fog), t);
 	out.fogDensity = THREE.MathUtils.lerp(from.fogDensity, to.fogDensity, t);
-	out.ambient.set(from.ambientColor).lerp(new THREE.Color(to.ambientColor), t);
+	out.ambient
+		.copy(getColor(from.ambientColor))
+		.lerp(getColor(to.ambientColor), t);
 	out.ambientIntensity = THREE.MathUtils.lerp(
 		from.ambientIntensity,
 		to.ambientIntensity,
 		t
 	);
-	out.hemiSky.set(from.hemiSky).lerp(new THREE.Color(to.hemiSky), t);
-	out.hemiGround.set(from.hemiGround).lerp(new THREE.Color(to.hemiGround), t);
+	out.hemiSky.copy(getColor(from.hemiSky)).lerp(getColor(to.hemiSky), t);
+	out.hemiGround
+		.copy(getColor(from.hemiGround))
+		.lerp(getColor(to.hemiGround), t);
 	out.hemiIntensity = THREE.MathUtils.lerp(from.hemiIntensity, to.hemiIntensity, t);
-	out.sun.set(from.sunColor).lerp(new THREE.Color(to.sunColor), t);
+	out.sun.copy(getColor(from.sunColor)).lerp(getColor(to.sunColor), t);
 	out.sunIntensity = THREE.MathUtils.lerp(from.sunIntensity, to.sunIntensity, t);
 	out.sunGlow = THREE.MathUtils.lerp(from.sunGlow, to.sunGlow, t);
-	out.moon.set(from.moonColor).lerp(new THREE.Color(to.moonColor), t);
+	out.moon.copy(getColor(from.moonColor)).lerp(getColor(to.moonColor), t);
 	out.moonIntensity = THREE.MathUtils.lerp(from.moonIntensity, to.moonIntensity, t);
 	out.fireflies = THREE.MathUtils.lerp(from.fireflies, to.fireflies, t);
 	out.grassLight = THREE.MathUtils.lerp(from.grassLight, to.grassLight, t);
@@ -412,7 +443,11 @@ export function createDayNightCycle(
 		sampleAtHour(hour, sample);
 
 		if (!overrideColors) {
-			scene.background = sample.zenith.clone();
+			if (scene.background instanceof THREE.Color) {
+				scene.background.copy(sample.zenith);
+			} else {
+				scene.background = sample.zenith.clone();
+			}
 			if (scene.fog instanceof THREE.FogExp2) {
 				scene.fog.color.copy(sample.fog);
 				scene.fog.density = sample.fogDensity;

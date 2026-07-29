@@ -59,6 +59,7 @@ export function updateChaseCamera(
 
 const _humanPos = new THREE.Vector3();
 const _humanTargetCam = new THREE.Vector3();
+const _humanEuler = new THREE.Euler();
 export function updateHumanCamera(
 	camera: PerspectiveCamera,
 	human: HumanEntity,
@@ -73,8 +74,8 @@ export function updateHumanCamera(
 		const speed = Math.hypot(v.x, v.z);
 		if (speed > 0.5) {
 			// Human yaw is derived from its quaternion
-			const euler = new THREE.Euler().setFromQuaternion(human.mesh.quaternion, "YXZ");
-			const humanYaw = euler.y;
+			_humanEuler.setFromQuaternion(human.mesh.quaternion, "YXZ");
+			const humanYaw = _humanEuler.y;
 			
 			// We want input.yaw to approach (humanYaw - Math.PI)
 			// Need to handle wrap-around for shortest path interpolation

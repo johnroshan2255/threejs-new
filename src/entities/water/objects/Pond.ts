@@ -77,12 +77,13 @@ export class Pond {
     geometry.computeBoundingBox();
     geometry.computeBoundingSphere();
     if (geometry.boundingSphere) {
-      geometry.boundingSphere.radius = 10000;
+      geometry.boundingSphere.radius =
+        Math.hypot(this.options.width, this.options.height) * 0.5 + 10;
     }
 
     this.mesh = new Mesh(geometry, material);
     this.mesh.name = 'Pond';
-    this.mesh.frustumCulled = false;
+    this.mesh.frustumCulled = true;
   }
 
   /** Latest heightfield texture (for custom effects / debug). */

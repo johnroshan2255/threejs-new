@@ -10,6 +10,7 @@ import {
 } from 'three';
 import { UniformManager } from '../core/UniformManager';
 import {
+  DEFAULT_BOTTOM_COLOR,
   DEFAULT_BRIGHTNESS,
   DEFAULT_CLARITY,
   DEFAULT_OPACITY,
@@ -24,6 +25,7 @@ import waterVert from '../shaders/water.vert?raw';
 
 export interface WaterMaterialOptions {
   color?: ColorRepresentation;
+  bottomColor?: ColorRepresentation;
   opacity?: number;
   reflectivity?: number;
   resolution?: number;
@@ -50,6 +52,7 @@ export class WaterMaterial {
     this.simResolution = options.resolution ?? 256;
 
     this.uniforms.set('uColor', new Color(options.color ?? DEFAULT_WATER_COLOR));
+    this.uniforms.set('uBottomColor', new Color(options.bottomColor ?? DEFAULT_BOTTOM_COLOR));
     this.uniforms.set('uOpacity', options.opacity ?? DEFAULT_OPACITY);
     this.uniforms.set('uReflectivity', options.reflectivity ?? DEFAULT_REFLECTIVITY);
     this.uniforms.set('uTime', 0);

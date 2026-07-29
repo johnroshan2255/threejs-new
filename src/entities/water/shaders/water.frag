@@ -1,4 +1,5 @@
 uniform vec3 uColor;
+uniform vec3 uBottomColor;
 uniform float uOpacity;
 uniform float uReflectivity;
 uniform float uTime;
@@ -84,10 +85,9 @@ void main() {
   screenUv += distortion * 0.85;
   screenUv = clamp(screenUv, vec2(0.002), vec2(0.998));
 
-  vec3 underwater = vec3(0.55, 0.5, 0.35);
-  if (uHasRefractionMap > 0.5) {
-    underwater = texture2D(uRefractionMap, screenUv).rgb;
-  }
+  // Keep the pond floor clean and terrain-coloured. Sampling the refracted
+  // scene here exposed grass cards as a leaf-like pattern below the surface.
+  vec3 underwater = uBottomColor;
 
   float waterDepth = 1.2;
   if (uHasDepthMap > 0.5) {

@@ -21,6 +21,7 @@ interface BridgeChunkDef {
 export class ProceduralBridge {
     public group: THREE.Group;
     private material: THREE.MeshStandardMaterial;
+    private geometry = new THREE.BoxGeometry(1, 1, 1);
     
     // Path generation state
     private points: THREE.Vector3[] = [];
@@ -208,17 +209,27 @@ export class ProceduralBridge {
             const distance = Math.min(Math.abs(chunk.zMin - carPosition.z), Math.abs(chunk.zMax - carPosition.z));
             
             if (distance < this.loadDistance && !chunk.isInstantiated) {
-                // Instantiate
-                for (const item of chunk.items) {
-                    const geo = new THREE.BoxGeometry(item.width, item.height, item.length);
-                    const mesh = new THREE.Mesh(geo, this.material);
-                    mesh.position.copy(item.pos);
-                    mesh.quaternion.copy(item.quat);
-                    mesh.castShadow = true;
-                    mesh.receiveShadow = true;
-                    this.group.add(mesh);
-                    chunk.meshes.push(mesh);
-            
+                // Every bridge piece uses the same box geometry and material, so a
+                // whole streamed chunk can be rendered in one draw call.
+                const mesh = new THREE.InstancedMesh(
+                    this.geometry,
+                    this.material,
+                    chunk.items.length
+                );
+                const dummy = new THREE.Object3D();
+                mesh.name = "ProceduralBridgeChunk";
+                mesh.instanceMatrix.setUsage(THREE.StaticDrawUsage);
+                mesh.castShadow = true;
+                mesh.receiveShadow = true;
+
+                for (let i = 0; i < chunk.items.length; i++) {
+                    const item = chunk.items[i];
+                    dummy.position.copy(item.pos);
+                    dummy.quaternion.copy(item.quat);
+                    dummy.scale.set(item.width, item.height, item.length);
+                    dummy.updateMatrix();
+                    mesh.setMatrixAt(i, dummy.matrix);
+
                     const worldPos = item.pos.clone().add(this.group.position);
                     const bodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(worldPos.x, worldPos.y, worldPos.z);
                     const body = this.world.createRigidBody(bodyDesc);
@@ -228,12 +239,17 @@ export class ProceduralBridge {
                     chunk.bodies.push(body);
                     chunk.colliders.push(col);
                 }
+
+                mesh.instanceMatrix.needsUpdate = true;
+                mesh.computeBoundingBox();
+                mesh.computeBoundingSphere();
+                this.group.add(mesh);
+                chunk.meshes.push(mesh);
                 chunk.isInstantiated = true;
             } else if (distance > this.loadDistance + 50 && chunk.isInstantiated) {
                 // Destroy (cull)
                 for (const mesh of chunk.meshes) {
                     this.group.remove(mesh);
-                    if (mesh.geometry) mesh.geometry.dispose();
                 }
                 chunk.meshes = [];
                 for (const body of chunk.bodies) {
@@ -250,13 +266,23 @@ export class ProceduralBridge {
         for (const chunk of this.chunks) {
             for (const mesh of chunk.meshes) {
                 this.group.remove(mesh);
-                if (mesh.geometry) mesh.geometry.dispose();
             }
             for (const body of chunk.bodies) {
                 this.world.removeRigidBody(body);
             }
         }
         this.chunks = [];
+        for (const texture of [
+            this.material.map,
+            this.material.normalMap,
+            this.material.roughnessMap,
+            this.material.aoMap
+        ]) {
+            texture?.dispose();
+        }
+        this.geometry.dispose();
+        this.material.dispose();
+        this.group.removeFromParent();
     }
 
     public getLastGeneratedZ(): number {

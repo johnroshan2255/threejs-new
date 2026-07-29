@@ -7,6 +7,7 @@ interface GrassUniformsInterface {
 	uShadowDarkness?: { value: number };
 	uGrassLightIntensity?: { value: number };
 	uNoiseScale?: { value: number };
+	uTerrainSize?: { value: number };
 	uPlayerPosition?: { value: THREE.Vector3 };
 	baseColor?: { value: THREE.Color };
 	tipColor1?: { value: THREE.Color };
@@ -21,7 +22,7 @@ export class GrassMaterial {
 
 	private grassColorProps = {
 		baseColor: "#313f1b",
-		tipColor1: "#9bd38d",
+		tipColor1: "#5e875e",
 		tipColor2: "#1f352a",
 	};
 
@@ -31,6 +32,7 @@ export class GrassMaterial {
 		uShadowDarkness: { value: 0.5 },
 		uGrassLightIntensity: { value: 1 },
 		uNoiseScale: { value: 1.5 },
+		uTerrainSize: { value: 140 },
 		uPlayerPosition: { value: new THREE.Vector3() },
 		baseColor: { value: new THREE.Color(this.grassColorProps.baseColor) },
 		tipColor1: { value: new THREE.Color(this.grassColorProps.tipColor1) },
@@ -84,6 +86,7 @@ export class GrassMaterial {
 				uShadowDarkness: this.uniforms.uShadowDarkness,
 				uGrassLightIntensity: this.uniforms.uGrassLightIntensity,
 				uNoiseScale: this.uniforms.uNoiseScale,
+				uTerrainSize: this.uniforms.uTerrainSize,
 				uNoiseTexture: this.uniforms.noiseTexture,
 				uGrassAlphaTexture: this.uniforms.grassAlphaTexture,
 				fogColor2: this.uniforms.fogColor2,
@@ -98,6 +101,7 @@ export class GrassMaterial {
       #include <shadowmap_pars_vertex>
       uniform sampler2D uNoiseTexture;
       uniform float uNoiseScale;
+      uniform float uTerrainSize;
       uniform float uTime;
       
       varying vec3 vColor;
@@ -133,7 +137,7 @@ export class GrassMaterial {
         vec2 windDirection = normalize(uWindDirection); // Normalize the wind direction
         vec4 modelPosition = modelMatrix * instanceMatrix * vec4(position, 1.0);
 
-        float terrainSize = 140.;
+        float terrainSize = uTerrainSize;
         vGlobalUV = (terrainSize-vec2(modelPosition.xz))/terrainSize;
 
         vec4 noise = texture2D(uNoiseTexture,vGlobalUV+uTime*uNoiseSpeed);
@@ -280,6 +284,10 @@ export class GrassMaterial {
 	setupTextures(grassAlphaTexture: THREE.Texture, noiseTexture: THREE.Texture) {
 		this.uniforms.grassAlphaTexture.value = grassAlphaTexture;
 		this.uniforms.noiseTexture.value = noiseTexture;
+	}
+
+	setTerrainSize(size: number) {
+		this.uniforms.uTerrainSize.value = size;
 	}
 
 	setupGUI(gui: GUI) {

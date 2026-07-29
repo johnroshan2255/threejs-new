@@ -2,6 +2,12 @@ import RAPIER from "@dimforge/rapier3d-compat";
 import { getWorld } from "./world";
 import { TERRAIN_CONFIG } from "../terrain/createLargeTerrain";
 
+export type TerrainColliderHandle = {
+	body: RAPIER.RigidBody;
+	collider: RAPIER.Collider;
+	dispose: () => void;
+};
+
 /**
  * Efficient heightfield collider for the procedural terrain.
  */
@@ -9,7 +15,7 @@ export function createTerrainHeightfieldCollider(
 	heights: Float32Array,
 	nrows: number,
 	ncols: number
-): RAPIER.Collider {
+): TerrainColliderHandle {
 	const world = getWorld();
 	const { size } = TERRAIN_CONFIG;
 
@@ -27,5 +33,11 @@ export function createTerrainHeightfieldCollider(
 		body
 	);
 
-	return collider;
+	return {
+		body,
+		collider,
+		dispose: () => {
+			world.removeRigidBody(body);
+		},
+	};
 }

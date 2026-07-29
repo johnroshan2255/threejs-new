@@ -32,8 +32,6 @@
         <p id="loading-text">Loading... 0%</p>
         <div class="main-action-buttons" style="display: flex; gap: 12px; justify-content: center; align-items: stretch; margin-bottom: 15px; flex-direction: column; width: 250px; margin-left: auto; margin-right: auto;">
           <button id="play-button" class="play-button" disabled>Loading...</button>
-          <button id="host-button" class="play-button host-btn" disabled style="background: linear-gradient(135deg, #e3a35b, #d97777); display: none;">Host Game</button>
-          <button id="join-button" class="play-button join-btn" disabled style="background: linear-gradient(135deg, #5ba3e3, #77d9c4); display: none;">Join Game</button>
         </div>
       </div>
     </div>
@@ -54,33 +52,6 @@
       </div>
     </div>
 
-    <!-- Right panel (Login Form) -->
-    <div id="login-panel" class="account-panel login-panel">
-      <div class="account-panel-content">
-        <h2>Login to Play</h2>
-        <input type="email" id="login-email" placeholder="Email Address" />
-        <div class="account-buttons">
-          <button id="submit-login-btn" class="submit-btn">Login</button>
-          <button id="close-login-btn" class="close-btn">Cancel</button>
-        </div>
-        <p id="login-error-msg" style="display: none; color: #e3a35b; margin-top: 10px;"></p>
-      </div>
-    </div>
-
-    <!-- Right panel (Join Game Form) -->
-    <div id="join-panel" class="account-panel login-panel">
-      <div class="account-panel-content">
-        <h2>Join Game</h2>
-        <input type="text" id="join-room-code" placeholder="Enter 5-Letter Room Code" style="text-transform: uppercase;" maxlength="5" />
-        <div class="account-buttons">
-          <button id="submit-join-btn" class="submit-btn" style="background: linear-gradient(135deg, #5ba3e3, #77d9c4);">Join Room</button>
-          <button id="close-join-btn" class="close-btn">Cancel</button>
-        </div>
-        <p id="join-error-msg" style="display: none; color: #e3a35b; margin-top: 10px;"></p>
-      </div>
-    </div>
-
-    </div>
   </div>
 
   <!-- Multiplayer Lobby Overlay -->
@@ -126,9 +97,23 @@
     <p>WASD drive · Space brake · R reset · Drag orbit · Scroll zoom · Mobile: pads + drag canvas to look · pinch zoom</p>
   </div>
   <div id="game-top-nav" class="game-top-nav" style="display: none;">
+    <button id="login-btn" class="game-nav-btn">Login</button>
     <button id="in-game-host-btn" class="game-nav-btn" style="background: linear-gradient(135deg, #e3a35b, #d97777); border: none;">Host Game</button>
     <button id="in-game-join-btn" class="game-nav-btn" style="background: linear-gradient(135deg, #5ba3e3, #77d9c4); border: none;">Join Game</button>
     <button id="logout-btn" class="game-nav-btn logout-btn-style">Logout</button>
+  </div>
+
+  <div id="game-login-modal" class="logout-modal" style="display: none;">
+    <div class="logout-modal-content">
+      <h3>Login for Multiplayer</h3>
+      <p>Single-player remains available without an account.</p>
+      <input type="email" id="game-login-email" class="modal-input" placeholder="Email Address" autocomplete="email" />
+      <p id="game-login-error" class="modal-error" style="display: none;"></p>
+      <div class="logout-buttons">
+        <button id="submit-game-login-btn" class="submit-btn">Login</button>
+        <button id="close-game-login-btn" class="cancel-btn">Cancel</button>
+      </div>
+    </div>
   </div>
   
   <div id="logout-confirm-modal" class="logout-modal" style="display: none;">
@@ -149,18 +134,6 @@
       <div class="logout-buttons">
         <button id="confirm-host-btn" class="confirm-btn" style="background: linear-gradient(135deg, #e3a35b, #d97777);">Yes, Host Game</button>
         <button id="cancel-host-btn" class="cancel-btn">Cancel</button>
-      </div>
-    </div>
-  </div>
-
-  <div id="join-confirm-modal" class="logout-modal" style="display: none;">
-    <div class="logout-modal-content">
-      <h3>Join Game</h3>
-      <input type="text" id="in-game-join-code" placeholder="Enter 5-Letter Code" style="text-transform: uppercase; width: 100%; padding: 10px; border-radius: 8px; border: 1px solid rgba(190, 220, 170, 0.3); background: rgba(0,0,0,0.3); color: #fff; margin-bottom: 20px; font-family: 'Sora';" maxlength="5" />
-      <p id="in-game-join-error" style="color: #e3a35b; display: none; margin-top: -10px; margin-bottom: 15px; font-size: 0.9rem;"></p>
-      <div class="logout-buttons">
-        <button id="confirm-join-btn" class="confirm-btn" style="background: linear-gradient(135deg, #5ba3e3, #77d9c4);">Join Room</button>
-        <button id="cancel-join-btn" class="cancel-btn">Cancel</button>
       </div>
     </div>
   </div>

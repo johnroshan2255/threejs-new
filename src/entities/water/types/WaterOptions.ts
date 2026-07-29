@@ -27,6 +27,9 @@ export interface WaterOptions {
   /** Base water colour. */
   color?: ColorRepresentation;
 
+  /** Solid pond-bottom colour shown beneath the water. */
+  bottomColor?: ColorRepresentation;
+
   /** Surface opacity (0–1). */
   opacity?: number;
 
