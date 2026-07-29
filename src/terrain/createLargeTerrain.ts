@@ -2,19 +2,19 @@ import * as THREE from "three";
 
 export const TERRAIN_CONFIG = {
 	/** World size on X/Z (units). */
-	size: 140,
+	size: 200,
 	/** Grid resolution — higher = smoother hills, heavier collider. */
-	segments: 96,
+	segments: 112,
 	/** Peak hill height. */
 	maxHeight: 7,
 	/** How strong mid-frequency hills are. */
 	hillStrength: 1,
 	/** Big driveable hill. */
 	mainHill: {
-		x: 28,
-		z: -18,
-		height: 16,
-		radius: 32,
+		x: 36,
+		z: -24,
+		height: 18,
+		radius: 40,
 	},
 };
 

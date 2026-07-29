@@ -118,7 +118,7 @@ export class FluffyGrass {
 	private pond?: Pond;
 	private grassGeometry = new THREE.BufferGeometry();
 	private grassMaterial: GrassMaterial;
-	private grassCount = 30000;
+	private grassCount = 50000;
 	private grassDensity = 100;
 	private islandGrassField: GrassChunkField | null = null;
 	private valleyGrassField: GrassChunkField | null = null;
@@ -1523,6 +1523,9 @@ export class FluffyGrass {
 
 		if (this.currentWorld === "island" && this.worldGroup.visible) {
 			this.grassMaterial.update(this.Uniforms.uTime.value);
+			if (this.renderFrameCounter % 2 === 0) {
+				this.islandGrassField?.updateDistanceCulling(this.camera.position);
+			}
 			updateFoliageWind(dt);
 			if (this.pond) {
 				const pondVisible = this.isObjectVisible(this.pond.mesh);
@@ -1585,6 +1588,13 @@ export class FluffyGrass {
 						}
 					}
 				}
+			}
+		}
+
+		if (this.currentWorld === "valley" && this.newWorldGroup.visible) {
+			this.grassMaterial.update(this.Uniforms.uTime.value);
+			if (this.renderFrameCounter % 2 === 0) {
+				this.valleyGrassField?.updateDistanceCulling(this.camera.position);
 			}
 		}
 
@@ -2347,7 +2357,7 @@ export class FluffyGrass {
 			this.grassMaterial.uniforms.tipColor1.value.set("#5e875e");
 			this.grassMaterial.uniforms.tipColor2.value.set("#1f352a");
 		} else {
-			this.grassMaterial.setTerrainSize(150);
+			this.grassMaterial.setTerrainSize(200);
 			if (this.dayNight) this.dayNight.overrideColors = true;
 			if (sky) sky.visible = false;
 			const color = new THREE.Color(0x1e2b2f);
@@ -2447,8 +2457,8 @@ export class FluffyGrass {
 	}
 
 	private createValleyTerrain(bridgeEndX: number, bridgeEndHeight: number, bridgeEndZ: number) {
-		const width = 150;
-		const depth = 150;
+		const width = 200;
+		const depth = 200;
 		const resolution = 256;
 		const geometry = new THREE.PlaneGeometry(width, depth, resolution, resolution);
 		geometry.rotateX(-Math.PI / 2); // Flat on the ground
