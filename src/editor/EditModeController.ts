@@ -1,0 +1,1197 @@
+import * as THREE from "three";
+import type { Socket } from "socket.io-client";
+import type { TreeHandle } from "../entities/tree";
+import type { PlacedStoneHandle } from "../entities/stone/placeStone";
+import type { Pond } from "../entities/water";
+import type { GrassChunkField } from "../entities/grass/GrassChunkField";
+import { setIslandTerrain } from "../terrain/islandHeight";
+import type { TerrainSculptTarget } from "./TerrainSculpt";
+import {
+	EditModeUI,
+	type EditTool,
+	type EditViewMode,
+	type RoadStyle,
+	type SculptType,
+} from "../ui/EditModeUI";
+import type { EditMeshId } from "./meshCatalog";
+import type { TerrainColliderHandle } from "../physics/terrainCollider";
+import { createTerrainHeightfieldCollider } from "../physics/terrainCollider";
+import { WorldEditStore } from "./WorldEditStore";
+import { WorldEditPersistence } from "./WorldEditPersistence";
+import { WorldEditApi } from "./WorldEditApi";
+import { EditApplier } from "./EditApplier";
+import { EditSyncTransport } from "../net/EditSyncTransport";
+import type { WorldEditDocument, WorldEditOp } from "./types";
+import type { WorldDefinition } from "../worlds/worldTypes";
+
+export type EditModeHost = {
+	scene: THREE.Scene;
+	renderer: THREE.WebGLRenderer;
+	playCamera: THREE.PerspectiveCamera;
+	canvas: HTMLCanvasElement;
+	getEditWorldGroup: () => THREE.Group;
+	getTerrainMesh: () => THREE.Mesh | null;
+	getTerrainHeights: () => Float32Array | null;
+	getTerrainHandle: () => TerrainColliderHandle | null;
+	setTerrainHandle: (handle: TerrainColliderHandle | null) => void;
+	getGrassField: () => GrassChunkField | null;
+	getActiveWorldDefinition: () => WorldDefinition;
+	/** Resolve any known world def (island / valley / custom catalog). */
+	getWorldDefinitionById: (worldId: string) => WorldDefinition | null;
+	/** Ensure a custom def exists locally (e.g. after fetching a shared world). */
+	ensureWorldDefinition: (definition: WorldDefinition) => void;
+	enableTerrainVertexColors: () => void;
+	setMapMode: (enabled: boolean) => void;
+	addEditorTree: (tree: TreeHandle) => void;
+	addEditorStone: (stone: PlacedStoneHandle) => void;
+	addEditorPond: (pond: Pond) => void;
+	removeEditorTree: (tree: TreeHandle) => void;
+	removeEditorStone: (stone: PlacedStoneHandle) => void;
+	removeEditorPond: (pond: Pond) => void;
+	getScenePropsTerrainColor: () => THREE.ColorRepresentation;
+	isGameActive: () => boolean;
+	getRoomCode: () => string;
+	createNewLargeWorld: (sizeKm: number) => Promise<void>;
+	/** Switch active world (used when joining a room bound to a worldId). */
+	switchToWorldId: (worldId: string) => Promise<void>;
+	/** Rebuild fluffy grass from the current terrain (used after undo/redo). */
+	rebuildEditGrass: () => void;
+	getAuthToken: () => string | null;
+	getAuthUser: () => { id?: string; username?: string } | null;
+	getServerUrl: () => string;
+};
+
+const PAINT_MIN_INTERVAL_MS = 40;
+const AUTOSAVE_MS = 800;
+
+/**
+ * Edit mode: Camera navigate, sculpt, light-mud roads, meshes, water → Pond.
+ * Save writes world-edit JSON to localStorage (API later for logged-in users).
+ */
+export class EditModeController {
+	readonly ui: EditModeUI;
+	readonly store: WorldEditStore;
+	readonly persistence: WorldEditPersistence;
+
+	private readonly ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.5, 5000);
+	private readonly orbitCam = new THREE.PerspectiveCamera(55, 1, 0.5, 8000);
+	private readonly raycaster = new THREE.Raycaster();
+	private readonly pointer = new THREE.Vector2();
+	private readonly hitPoint = new THREE.Vector3();
+	private readonly brushHelper: THREE.Mesh;
+	private readonly applier: EditApplier;
+	private readonly sync: EditSyncTransport;
+	private readonly keys = new Set<string>();
+
+	private enabled = false;
+	private viewMode: EditViewMode = "top";
+	private tool: EditTool = "camera";
+	private sculpt: SculptType = "raise";
+	private meshId: EditMeshId = "tree";
+	private roadStyle: RoadStyle = "mud";
+	private brushRadius = 3;
+	private brushStrength = 0.35;
+	private frustumSize = 120;
+	private target = new THREE.Vector3(0, 0, 0);
+	private orbitYaw = 0.7;
+	private orbitPitch = 0.55;
+	private orbitDistance = 160;
+
+	private painting = false;
+	private panning = false;
+	private orbiting = false;
+	private lastPan = new THREE.Vector2();
+	private pointerDownPos = new THREE.Vector2();
+	private cameraClickFocus = false;
+	private placeBusy = false;
+	private historyBusy = false;
+	private terrainBaselineHeights: Float32Array | null = null;
+	private terrainBaselineColors: Float32Array | null = null;
+	private terrainHadVertexColors = false;
+	private lastPaintAt = 0;
+	private selectedEntityId: string | null = null;
+	private selectionHelper: THREE.BoxHelper | null = null;
+	private autosaveTimer: number | null = null;
+	private applyingRemote = false;
+	private remoteColliderTimer: number | null = null;
+
+	constructor(private readonly host: EditModeHost) {
+		const def = host.getActiveWorldDefinition();
+		this.store = new WorldEditStore({
+			worldId: def.id,
+			worldName: def.name,
+			terrainSize: def.size,
+			segments: def.segments,
+		});
+		this.persistence = new WorldEditPersistence(this.store, {
+			api: new WorldEditApi({
+				serverUrl: host.getServerUrl(),
+				getToken: () => host.getAuthToken(),
+			}),
+			getWorldDefinition: (worldId) => host.getWorldDefinitionById(worldId),
+			getOwner: () => {
+				const user = host.getAuthUser();
+				if (!user) return null;
+				return { id: user.id, name: user.username };
+			},
+			getVisibility: () => "unlisted",
+		});
+
+		this.applier = new EditApplier({
+			get worldGroup() {
+				return host.getEditWorldGroup();
+			},
+			renderer: host.renderer,
+			scene: host.scene,
+			playCamera: host.playCamera,
+			getSculptTarget: () => this.getSculptTarget(),
+			getTerrainMesh: () => host.getTerrainMesh(),
+			getGrassField: () => host.getGrassField(),
+			rebuildCollider: () => this.rebuildCollider(),
+			enableTerrainVertexColors: () => host.enableTerrainVertexColors(),
+			addEditorTree: (tree) => host.addEditorTree(tree),
+			addEditorStone: (stone) => host.addEditorStone(stone),
+			addEditorPond: (pond) => host.addEditorPond(pond),
+			removeEditorTree: (tree) => host.removeEditorTree(tree),
+			removeEditorStone: (stone) => host.removeEditorStone(stone),
+			removeEditorPond: (pond) => host.removeEditorPond(pond),
+			getScenePropsTerrainColor: () => host.getScenePropsTerrainColor(),
+		});
+
+		this.sync = new EditSyncTransport({
+			getRoomCode: () => host.getRoomCode(),
+			getClientId: () => this.store.authorId,
+			onRemoteOp: (op) => {
+				void this.applyIncomingOp(op);
+			},
+			onRemoteSnapshot: (doc) => {
+				void this.applyIncomingSnapshot(doc);
+			},
+			onRequestSnapshot: () => {
+				if (this.store.opCount > 0) {
+					this.sync.broadcastSnapshot(this.store.toJSON());
+				}
+			},
+		});
+
+		const user = host.getAuthUser();
+		if (user?.id) this.store.setAuthorId(user.id);
+
+		this.ortho.up.set(0, 0, -1);
+		this.ortho.position.set(0, 400, 0);
+		this.ortho.lookAt(0, 0, 0);
+		this.orbitCam.position.set(120, 90, 120);
+		this.orbitCam.lookAt(0, 0, 0);
+
+		const ring = new THREE.RingGeometry(0.92, 1, 48);
+		ring.rotateX(-Math.PI / 2);
+		this.brushHelper = new THREE.Mesh(
+			ring,
+			new THREE.MeshBasicMaterial({
+				color: 0xc8e6a0,
+				transparent: true,
+				opacity: 0.85,
+				depthTest: false,
+			})
+		);
+		this.brushHelper.visible = false;
+		this.brushHelper.renderOrder = 10;
+		this.host.scene.add(this.brushHelper);
+
+		this.ui = new EditModeUI({
+			onToggleEdit: (on) => this.setEnabled(on),
+			onToolChange: (tool) => {
+				this.tool = tool;
+				this.brushHelper.visible = this.enabled && this.isBrushTool(tool);
+				this.updateBrushColor();
+				if (tool !== "select") this.clearSelection();
+				if (tool === "paint-water" && this.brushRadius < 8) {
+					this.brushRadius = 10;
+					this.brushHelper.scale.setScalar(this.brushRadius);
+				}
+				if (tool === "camera" && this.viewMode === "orbit") {
+					this.syncOrbit();
+				}
+			},
+			onSculptChange: (sculpt) => {
+				this.sculpt = sculpt;
+			},
+			onBrushChange: (radius, strength) => {
+				this.brushRadius = radius;
+				this.brushStrength = strength;
+				this.brushHelper.scale.setScalar(radius);
+			},
+			onViewModeChange: (mode) => {
+				this.viewMode = mode;
+				if (mode === "orbit") {
+					const def = this.host.getActiveWorldDefinition();
+					this.orbitDistance = Math.max(80, def.size * 0.18);
+					this.syncOrbit();
+				} else {
+					this.syncOrtho();
+				}
+			},
+			onMeshChange: (meshId) => {
+				this.meshId = meshId;
+			},
+			onRoadStyleChange: (style) => {
+				this.roadStyle = style;
+				this.updateBrushColor();
+			},
+			onSave: () => this.saveEdits(),
+			onCreateWorld: (sizeKm) => {
+				void this.host.createNewLargeWorld(sizeKm);
+			},
+			onDeleteSelected: () => {
+				void this.deleteSelected();
+			},
+			onUndo: () => {
+				void this.undo();
+			},
+			onRedo: () => {
+				void this.redo();
+			},
+		});
+		this.ui.setVisible(false);
+		this.store.subscribe(() => this.refreshStatus());
+		this.refreshStatus();
+
+		this.bindPointer();
+		this.bindKeys();
+		window.addEventListener("resize", () => {
+			if (this.enabled) this.syncOrtho();
+		});
+	}
+
+	get isEnabled() {
+		return this.enabled;
+	}
+
+	get activeCamera(): THREE.Camera {
+		if (!this.enabled) return this.host.playCamera;
+		return this.viewMode === "orbit" ? this.orbitCam : this.ortho;
+	}
+
+	attachSocket(socket: Socket | null) {
+		this.sync.attachSocket(socket);
+		this.refreshStatus();
+		if (socket?.connected && this.host.getRoomCode()) {
+			this.sync.requestSnapshot();
+		}
+	}
+
+	onGameActiveChanged(active: boolean) {
+		const user = this.host.getAuthUser();
+		this.store.setAuthorId(user?.id ?? null);
+		this.ui.setVisible(active);
+		if (!active && this.enabled) this.setEnabled(false);
+		if (active) this.bindStoreToActiveWorld();
+		this.refreshStatus();
+	}
+
+	/** Call after switching island / valley / custom world. */
+	onActiveWorldChanged() {
+		this.bindStoreToActiveWorld();
+		this.refreshStatus();
+		this.syncBrushToWorld();
+		if (this.enabled) {
+			this.recenterCameraOnTerrain();
+		}
+	}
+
+	onRoomJoined() {
+		this.sync.requestSnapshot();
+		if (this.store.opCount > 0) {
+			this.sync.broadcastSnapshot(this.store.toJSON());
+		}
+		this.refreshStatus();
+	}
+
+	setEnabled(enabled: boolean) {
+		if (this.enabled === enabled) return;
+		this.enabled = enabled;
+		this.host.setMapMode(enabled);
+		this.painting = false;
+		this.panning = false;
+		this.orbiting = false;
+		this.keys.clear();
+		this.clearSelection();
+		this.brushHelper.visible = enabled && this.isBrushTool(this.tool);
+
+		if (enabled) {
+			this.recenterCameraOnTerrain();
+			this.syncBrushToWorld();
+			if (!this.terrainBaselineHeights) this.captureTerrainBaseline();
+		} else {
+			this.commitRebuildCollider();
+		}
+		this.refreshStatus();
+	}
+
+	/** Frame the active terrain and reset orbit/top like opening a Blender scene. */
+	private recenterCameraOnTerrain() {
+		const mesh = this.host.getTerrainMesh();
+		const def = this.host.getActiveWorldDefinition();
+		if (mesh) {
+			const box = new THREE.Box3().setFromObject(mesh);
+			box.getCenter(this.target);
+			// Keep surface height so orbiting a hill pivots around the land, not y=0.
+			const hitY = this.sampleTerrainY(this.target.x, this.target.z);
+			if (hitY != null) this.target.y = hitY;
+		} else {
+			this.target.set(0, 0, 0);
+		}
+		this.frustumSize = Math.max(90, def.size * 0.45);
+		this.orbitDistance = Math.max(80, def.size * 0.18);
+		this.syncOrtho();
+		this.syncOrbit();
+	}
+
+	/** Brush radius must cover several heightfield cells or paint looks like a no-op. */
+	private syncBrushToWorld() {
+		const def = this.host.getActiveWorldDefinition();
+		const cell = def.size / Math.max(1, def.segments);
+		const minR = Math.max(2, cell * 1.5);
+		const maxR = Math.max(24, cell * 12);
+		const defaultR = Math.max(this.brushRadius, minR * 1.4);
+		this.brushRadius = THREE.MathUtils.clamp(defaultR, minR, maxR);
+		this.ui.setBrushLimits(minR, maxR, this.brushRadius);
+		this.brushHelper.scale.setScalar(this.brushRadius);
+	}
+
+	private sampleTerrainY(x: number, z: number): number | null {
+		const mesh = this.host.getTerrainMesh();
+		const heights = this.host.getTerrainHeights();
+		const def = this.host.getActiveWorldDefinition();
+		if (!mesh || !heights) return null;
+		const half = def.size * 0.5;
+		const col = THREE.MathUtils.clamp(
+			Math.round(((x + half) / def.size) * def.segments),
+			0,
+			def.segments
+		);
+		const row = THREE.MathUtils.clamp(
+			Math.round(((z + half) / def.size) * def.segments),
+			0,
+			def.segments
+		);
+		return heights[row + col * (def.segments + 1)] ?? null;
+	}
+
+	update() {
+		if (!this.enabled) return;
+		this.updateCameraKeys();
+		if (this.viewMode === "top") this.syncOrtho();
+		else this.syncOrbit();
+		if (this.selectionHelper && this.selectedEntityId) {
+			const obj = this.applier.getEntityObject(this.selectedEntityId);
+			if (obj) this.selectionHelper.setFromObject(obj);
+		}
+	}
+
+	async saveEdits() {
+		this.ui.setSaveState("saving");
+		const result = await this.persistence.save({ download: false });
+		this.ui.setSaveState("saved", result.message);
+		this.refreshStatus();
+	}
+
+	async reapplyStoredEdits() {
+		const doc = this.store.toJSON();
+		this.clearSelection();
+		this.applier.clearEntities();
+		this.applier.clearApplied();
+		if (!doc.ops.length) return;
+		this.applyingRemote = true;
+		try {
+			await this.applier.applyMany(doc.ops);
+		} finally {
+			this.applyingRemote = false;
+		}
+		this.refreshStatus();
+	}
+
+	private bindStoreToActiveWorld() {
+		const def = this.host.getActiveWorldDefinition();
+		const existing = WorldEditStore.loadDocForWorld(def.id);
+		this.store.switchWorld(
+			{
+				worldId: def.id,
+				worldName: def.name,
+				terrainSize: def.size,
+				segments: def.segments,
+			},
+			existing
+		);
+		this.clearSelection();
+		this.applier.clearEntities();
+		this.applier.clearApplied();
+		// Baseline = pristine terrain before any edit ops.
+		this.captureTerrainBaseline();
+		if (existing?.ops.length) {
+			void this.applier.applyMany(existing.ops).then(() => {
+				this.rebuildCollider();
+				this.refreshStatus();
+			});
+		} else {
+			this.refreshStatus();
+		}
+	}
+
+	private isBrushTool(tool: EditTool) {
+		return tool === "sculpt" || tool === "paint-road" || tool === "paint-water";
+	}
+
+	private updateBrushColor() {
+		const mat = this.brushHelper.material as THREE.MeshBasicMaterial;
+		if (this.tool === "paint-road") mat.color.setHex(0xa8906e);
+		else if (this.tool === "paint-water") mat.color.setHex(0x7eb8e8);
+		else mat.color.setHex(0xc8e6a0);
+	}
+
+	private refreshStatus() {
+		const room = this.host.getRoomCode();
+		const def = this.host.getActiveWorldDefinition();
+		this.ui.setSyncStatus({
+			opCount: this.store.opCount,
+			dirty: this.store.isDirty,
+			live: Boolean(room) || typeof BroadcastChannel !== "undefined",
+			roomCode: room || null,
+			worldName: def.name,
+		});
+		this.ui.setUndoRedoState(this.store.canUndo, this.store.canRedo);
+	}
+
+	private captureTerrainBaseline() {
+		const heights = this.host.getTerrainHeights();
+		this.terrainBaselineHeights = heights ? heights.slice() : null;
+		const mesh = this.host.getTerrainMesh();
+		const geo = mesh?.geometry as THREE.BufferGeometry | undefined;
+		const colorAttr = geo?.getAttribute("color") as THREE.BufferAttribute | undefined;
+		this.terrainBaselineColors = colorAttr
+			? Float32Array.from(colorAttr.array as ArrayLike<number>)
+			: null;
+		const mat = mesh?.material as THREE.MeshPhongMaterial | undefined;
+		this.terrainHadVertexColors = Boolean(mat?.vertexColors);
+	}
+
+	private restoreTerrainBaseline() {
+		const heights = this.host.getTerrainHeights();
+		const mesh = this.host.getTerrainMesh();
+		if (!heights || !mesh || !this.terrainBaselineHeights) return;
+		if (heights.length !== this.terrainBaselineHeights.length) return;
+
+		heights.set(this.terrainBaselineHeights);
+		const geo = mesh.geometry as THREE.BufferGeometry;
+		const positions = geo.attributes.position as THREE.BufferAttribute;
+		const def = this.host.getActiveWorldDefinition();
+		const half = def.size * 0.5;
+		const segs = def.segments;
+
+		for (let i = 0; i < positions.count; i++) {
+			const x = positions.getX(i);
+			const z = positions.getZ(i);
+			const col = THREE.MathUtils.clamp(
+				Math.round(((x + half) / def.size) * segs),
+				0,
+				segs
+			);
+			const row = THREE.MathUtils.clamp(
+				Math.round(((z + half) / def.size) * segs),
+				0,
+				segs
+			);
+			positions.setY(i, heights[row + col * (segs + 1)]!);
+		}
+		positions.needsUpdate = true;
+		geo.computeVertexNormals();
+		geo.computeBoundingBox();
+		geo.computeBoundingSphere();
+		mesh.updateMatrixWorld(true);
+
+		if (this.terrainBaselineColors) {
+			let colorAttr = geo.getAttribute("color") as THREE.BufferAttribute | undefined;
+			if (!colorAttr || colorAttr.array.length !== this.terrainBaselineColors.length) {
+				colorAttr = new THREE.BufferAttribute(
+					this.terrainBaselineColors.slice(),
+					3
+				);
+				geo.setAttribute("color", colorAttr);
+			} else {
+				(colorAttr.array as Float32Array).set(this.terrainBaselineColors);
+				colorAttr.needsUpdate = true;
+			}
+			const mat = mesh.material as THREE.MeshPhongMaterial;
+			mat.vertexColors = true;
+			mat.color.setHex(0xffffff);
+			mat.needsUpdate = true;
+		} else {
+			if (geo.getAttribute("color")) geo.deleteAttribute("color");
+			const mat = mesh.material as THREE.MeshPhongMaterial;
+			mat.vertexColors = this.terrainHadVertexColors;
+			if (!mat.vertexColors) {
+				mat.color.set(this.host.getScenePropsTerrainColor());
+			}
+			mat.needsUpdate = true;
+		}
+
+		setIslandTerrain(mesh);
+		this.host.rebuildEditGrass();
+	}
+
+	private async rebuildFromOps() {
+		this.clearSelection();
+		this.applier.clearEntities();
+		this.applier.clearApplied();
+		this.restoreTerrainBaseline();
+		const ops = this.store.toJSON().ops;
+		if (ops.length) {
+			this.applyingRemote = true;
+			try {
+				await this.applier.applyMany(ops);
+			} finally {
+				this.applyingRemote = false;
+			}
+		}
+		this.rebuildCollider();
+		this.refreshStatus();
+	}
+
+	async undo() {
+		if (this.historyBusy || !this.store.canUndo) return;
+		this.historyBusy = true;
+		try {
+			if (!this.store.undo()) return;
+			await this.rebuildFromOps();
+			this.scheduleAutosave();
+			if (!this.applyingRemote) {
+				this.sync.broadcastSnapshot(this.store.toJSON());
+			}
+		} finally {
+			this.historyBusy = false;
+		}
+	}
+
+	async redo() {
+		if (this.historyBusy || !this.store.canRedo) return;
+		this.historyBusy = true;
+		try {
+			const batch = this.store.redo();
+			if (!batch) return;
+			await this.rebuildFromOps();
+			this.scheduleAutosave();
+			if (!this.applyingRemote) {
+				this.sync.broadcastSnapshot(this.store.toJSON());
+			}
+		} finally {
+			this.historyBusy = false;
+		}
+	}
+
+	private scheduleAutosave() {
+		if (this.autosaveTimer != null) window.clearTimeout(this.autosaveTimer);
+		this.autosaveTimer = window.setTimeout(() => {
+			this.persistence.autosaveDraft();
+			this.autosaveTimer = null;
+		}, AUTOSAVE_MS);
+	}
+
+	private async commitOp(op: WorldEditOp) {
+		if (!this.store.append(op)) return;
+		await this.applier.apply(op);
+		if (!this.applyingRemote) this.sync.broadcastOp(op);
+		this.scheduleAutosave();
+		this.refreshStatus();
+	}
+
+	private async applyIncomingOp(op: WorldEditOp) {
+		if (this.applier.hasApplied(op.id)) return;
+		this.applyingRemote = true;
+		try {
+			this.store.append(op, { trackHistory: false });
+			await this.applier.apply(op);
+			if (op.type === "sculpt") this.scheduleRemoteColliderFlush();
+			this.scheduleAutosave();
+		} finally {
+			this.applyingRemote = false;
+		}
+		this.refreshStatus();
+	}
+
+	private scheduleRemoteColliderFlush() {
+		if (this.remoteColliderTimer != null) window.clearTimeout(this.remoteColliderTimer);
+		this.remoteColliderTimer = window.setTimeout(() => {
+			this.applier.flushColliderIfNeeded();
+			this.rebuildCollider();
+			this.remoteColliderTimer = null;
+		}, 120);
+	}
+
+	private async applyIncomingSnapshot(doc: WorldEditDocument) {
+		if (this.store.opCount > doc.ops.length) return;
+		this.applyingRemote = true;
+		try {
+			this.clearSelection();
+			this.applier.clearEntities();
+			this.store.loadDocument(doc);
+			this.applier.clearApplied();
+			await this.applier.applyMany(doc.ops);
+		} finally {
+			this.applyingRemote = false;
+		}
+		this.refreshStatus();
+	}
+
+	/**
+	 * Called when a multiplayer room reports its bound worldId.
+	 * Loads that world, then peers exchange edit snapshots over the socket.
+	 */
+	async onRoomWorldBound(worldId: string) {
+		if (!worldId) return;
+		const active = this.host.getActiveWorldDefinition();
+		if (active.id !== worldId) {
+			let def = this.host.getWorldDefinitionById(worldId);
+			if (!def) {
+				const remote = await this.persistence.loadRemoteWorld(worldId);
+				if (remote) {
+					this.host.ensureWorldDefinition(remote.definition);
+					def = remote.definition;
+					await this.host.switchToWorldId(def.id);
+					this.store.loadDocument(remote.document);
+					await this.reapplyStoredEdits();
+					this.refreshStatus();
+					return;
+				}
+			}
+			if (def) await this.host.switchToWorldId(worldId);
+		}
+		this.onRoomJoined();
+	}
+
+	/** Active world id for create-room / join payloads. */
+	getActiveWorldId() {
+		return this.host.getActiveWorldDefinition().id;
+	}
+
+	/** Publish current world JSON (local + API when logged in). */
+	async publishWorld() {
+		return this.saveEdits();
+	}
+
+	private syncOrtho() {
+		const aspect =
+			this.host.canvas.clientWidth / Math.max(1, this.host.canvas.clientHeight);
+		const halfH = this.frustumSize * 0.5;
+		const halfW = halfH * aspect;
+		this.ortho.left = -halfW;
+		this.ortho.right = halfW;
+		this.ortho.top = halfH;
+		this.ortho.bottom = -halfH;
+		const camY = Math.max(220, this.host.getActiveWorldDefinition().size * 0.35);
+		this.ortho.position.set(this.target.x, camY, this.target.z);
+		this.ortho.lookAt(this.target.x, 0, this.target.z);
+		this.ortho.updateProjectionMatrix();
+	}
+
+	private syncOrbit() {
+		const aspect =
+			this.host.canvas.clientWidth / Math.max(1, this.host.canvas.clientHeight);
+		this.orbitCam.aspect = aspect;
+		const cosPitch = Math.cos(this.orbitPitch);
+		this.orbitCam.position.set(
+			this.target.x + Math.sin(this.orbitYaw) * cosPitch * this.orbitDistance,
+			this.target.y + Math.sin(this.orbitPitch) * this.orbitDistance,
+			this.target.z + Math.cos(this.orbitYaw) * cosPitch * this.orbitDistance
+		);
+		this.orbitCam.lookAt(this.target.x, this.target.y, this.target.z);
+		this.orbitCam.updateProjectionMatrix();
+	}
+
+	private getSculptTarget(): TerrainSculptTarget | null {
+		const mesh = this.host.getTerrainMesh();
+		const heights = this.host.getTerrainHeights();
+		const def = this.host.getActiveWorldDefinition();
+		if (!mesh || !heights) return null;
+		return {
+			mesh,
+			heights,
+			nrows: def.segments,
+			ncols: def.segments,
+			size: def.size,
+		};
+	}
+
+	private rebuildCollider() {
+		const heights = this.host.getTerrainHeights();
+		const mesh = this.host.getTerrainMesh();
+		const def = this.host.getActiveWorldDefinition();
+		if (!heights || !mesh) return;
+
+		this.host.getTerrainHandle()?.dispose();
+		const handle = createTerrainHeightfieldCollider(
+			heights,
+			def.segments,
+			def.segments,
+			def.size
+		);
+		this.host.setTerrainHandle(handle);
+		setIslandTerrain(mesh);
+	}
+
+	private commitRebuildCollider() {
+		this.applier.flushColliderIfNeeded();
+		const op = this.store.createOp({ type: "rebuild-collider" });
+		void this.commitOp(op).then(() => {
+			// Resample grass onto sculpted hills (skip only slopes steeper than 65°).
+			this.host.rebuildEditGrass();
+			// Re-mask roads / water after a full grass rebuild.
+			void this.reapplyGrassMasksOnly();
+		});
+	}
+
+	/** After grass rebuild, re-apply road/water grass clears without resetting terrain. */
+	private async reapplyGrassMasksOnly() {
+		const grass = this.host.getGrassField();
+		if (!grass) return;
+		for (const op of this.store.toJSON().ops) {
+			if (op.type === "paint-road") {
+				grass.maskRoadCircle(op.x, op.z, op.radius);
+			} else if (op.type === "paint-water" && op.createSurface) {
+				const r =
+					op.basin?.digRadius ??
+					op.radius ??
+					Math.max(op.basin?.width ?? 0, op.basin?.depth ?? 0) * 0.55;
+				if (r > 0) {
+					grass.maskRoadCircle(
+						op.basin?.centerX ?? op.x,
+						op.basin?.centerZ ?? op.z,
+						r + 1
+					);
+				}
+			}
+		}
+	}
+
+	private bindKeys() {
+		window.addEventListener("keydown", (event) => {
+			if (!this.enabled) return;
+			const mod = event.metaKey || event.ctrlKey;
+			if (mod && event.key.toLowerCase() === "z") {
+				event.preventDefault();
+				if (event.shiftKey) void this.redo();
+				else void this.undo();
+				return;
+			}
+			if (mod && event.key.toLowerCase() === "y") {
+				event.preventDefault();
+				void this.redo();
+				return;
+			}
+			if (
+				(event.key === "Delete" || event.key === "Backspace") &&
+				this.tool === "select" &&
+				this.selectedEntityId
+			) {
+				event.preventDefault();
+				void this.deleteSelected();
+				return;
+			}
+			if (this.tool !== "camera") return;
+			const key = event.key.toLowerCase();
+			if (["w", "a", "s", "d", "q", "e"].includes(key)) {
+				this.keys.add(key);
+				event.preventDefault();
+			}
+		});
+		window.addEventListener("keyup", (event) => {
+			this.keys.delete(event.key.toLowerCase());
+		});
+	}
+
+	private updateCameraKeys() {
+		if (this.tool !== "camera" || this.keys.size === 0) return;
+		const speed =
+			(this.viewMode === "orbit" ? this.orbitDistance : this.frustumSize) * 0.012;
+
+		const right = new THREE.Vector3();
+		const forward = new THREE.Vector3();
+		if (this.viewMode === "orbit") {
+			this.orbitCam.getWorldDirection(forward);
+			forward.y = 0;
+			forward.normalize();
+			right.crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
+		} else {
+			forward.set(0, 0, -1);
+			right.set(1, 0, 0);
+		}
+
+		if (this.keys.has("w")) this.target.addScaledVector(forward, speed);
+		if (this.keys.has("s")) this.target.addScaledVector(forward, -speed);
+		if (this.keys.has("a")) this.target.addScaledVector(right, -speed);
+		if (this.keys.has("d")) this.target.addScaledVector(right, speed);
+		if (this.keys.has("q")) this.target.y = Math.max(-40, this.target.y - speed * 0.5);
+		if (this.keys.has("e")) this.target.y = Math.min(120, this.target.y + speed * 0.5);
+
+		this.clampTargetToMap();
+	}
+
+	private bindPointer() {
+		const el = this.host.canvas;
+
+		el.addEventListener(
+			"pointerdown",
+			(event) => {
+				if (!this.enabled) return;
+
+				// Blender-like navigation (any tool):
+				//   MMB / Alt+LMB / RMB = orbit   ·   Shift+drag those = pan
+				const wantOrbitNav =
+					this.viewMode === "orbit" &&
+					(event.button === 1 ||
+						event.button === 2 ||
+						(event.button === 0 && event.altKey));
+
+				if (wantOrbitNav) {
+					this.lastPan.set(event.clientX, event.clientY);
+					if (event.shiftKey) this.panning = true;
+					else this.orbiting = true;
+					el.setPointerCapture(event.pointerId);
+					event.preventDefault();
+					return;
+				}
+
+				if (event.button === 1 || event.button === 2) {
+					this.lastPan.set(event.clientX, event.clientY);
+					this.panning = true;
+					el.setPointerCapture(event.pointerId);
+					event.preventDefault();
+					return;
+				}
+
+				if (event.button !== 0) return;
+
+				// Camera tool: LMB drag pans; short click snaps focus to surface hit.
+				if (this.tool === "camera") {
+					this.lastPan.set(event.clientX, event.clientY);
+					this.pointerDownPos.set(event.clientX, event.clientY);
+					this.cameraClickFocus = true;
+					this.panning = true;
+					el.setPointerCapture(event.pointerId);
+					event.preventDefault();
+					return;
+				}
+
+				if (this.tool === "select") {
+					this.handleSelectClick(event.clientX, event.clientY);
+					event.preventDefault();
+					return;
+				}
+
+				const hit = this.pickTerrain(event.clientX, event.clientY);
+				if (!hit) return;
+
+				if (this.tool === "sculpt" || this.tool === "paint-road") {
+					this.store.beginStroke();
+					this.painting = true;
+					void this.brushAt(hit);
+					el.setPointerCapture(event.pointerId);
+				} else if (this.tool === "place-mesh") {
+					void this.placeAt(hit);
+				} else if (this.tool === "paint-water") {
+					void this.placeWaterAt(hit);
+				}
+			},
+			{ passive: false }
+		);
+
+		el.addEventListener("pointermove", (event) => {
+			if (!this.enabled) return;
+
+			if (this.orbiting) {
+				const dx = event.clientX - this.lastPan.x;
+				const dy = event.clientY - this.lastPan.y;
+				this.lastPan.set(event.clientX, event.clientY);
+				this.cameraClickFocus = false;
+				this.orbitYaw -= dx * 0.005;
+				this.orbitPitch = THREE.MathUtils.clamp(
+					this.orbitPitch + dy * 0.005,
+					0.05,
+					1.45
+				);
+				this.syncOrbit();
+				return;
+			}
+
+			if (this.panning) {
+				const dx = event.clientX - this.lastPan.x;
+				const dy = event.clientY - this.lastPan.y;
+				this.lastPan.set(event.clientX, event.clientY);
+				if (Math.hypot(dx, dy) > 2) this.cameraClickFocus = false;
+				this.panCamera(dx, dy);
+				return;
+			}
+
+			const hit = this.pickTerrain(event.clientX, event.clientY);
+			if (hit) {
+				this.brushHelper.position.set(hit.x, hit.y + 0.15, hit.z);
+				this.brushHelper.visible = this.isBrushTool(this.tool);
+				if (
+					this.painting &&
+					(this.tool === "sculpt" || this.tool === "paint-road")
+				) {
+					void this.brushAt(hit);
+				}
+			}
+		});
+
+		el.addEventListener("pointerup", (event) => {
+			if (!this.enabled) return;
+			if (this.painting) {
+				this.painting = false;
+				if (this.tool === "sculpt") this.commitRebuildCollider();
+				this.store.endStroke();
+			}
+
+			// Short click focuses the camera on that map spot (surface height).
+			if (
+				this.tool === "camera" &&
+				this.cameraClickFocus &&
+				event.button === 0
+			) {
+				const moved = Math.hypot(
+					event.clientX - this.pointerDownPos.x,
+					event.clientY - this.pointerDownPos.y
+				);
+				if (moved < 6) {
+					const hit = this.pickTerrain(event.clientX, event.clientY);
+					if (hit) {
+						this.target.copy(hit);
+						this.clampTargetToMap();
+						if (this.viewMode === "orbit") this.syncOrbit();
+						else this.syncOrtho();
+					}
+				}
+			}
+
+			this.cameraClickFocus = false;
+			this.panning = false;
+			this.orbiting = false;
+			try {
+				el.releasePointerCapture(event.pointerId);
+			} catch {
+				/* ignore */
+			}
+		});
+
+		el.addEventListener(
+			"wheel",
+			(event) => {
+				if (!this.enabled) return;
+				event.preventDefault();
+				const size = this.host.getActiveWorldDefinition().size;
+				if (this.viewMode === "orbit") {
+					const next = this.orbitDistance * (event.deltaY > 0 ? 1.1 : 0.9);
+					this.orbitDistance = THREE.MathUtils.clamp(next, 12, size * 0.95);
+					this.syncOrbit();
+				} else {
+					const next = this.frustumSize * (event.deltaY > 0 ? 1.1 : 0.9);
+					this.frustumSize = THREE.MathUtils.clamp(next, 40, size * 1.2);
+					this.syncOrtho();
+				}
+			},
+			{ passive: false }
+		);
+
+		el.addEventListener("contextmenu", (event) => {
+			if (this.enabled) event.preventDefault();
+		});
+	}
+
+	/** Move look-at / ortho center across the map (orbit + top). */
+	private panCamera(dx: number, dy: number) {
+		if (this.viewMode === "orbit") {
+			const right = new THREE.Vector3();
+			const forward = new THREE.Vector3();
+			this.orbitCam.getWorldDirection(forward);
+			forward.y = 0;
+			if (forward.lengthSq() < 1e-6) forward.set(0, 0, -1);
+			else forward.normalize();
+			right.crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
+			const scale = this.orbitDistance * 0.0035;
+			this.target.addScaledVector(right, -dx * scale);
+			this.target.addScaledVector(forward, dy * scale);
+			this.clampTargetToMap();
+			this.syncOrbit();
+			return;
+		}
+
+		const aspect =
+			this.host.canvas.clientWidth / Math.max(1, this.host.canvas.clientHeight);
+		const worldPerPxY = this.frustumSize / this.host.canvas.clientHeight;
+		const worldPerPxX = (this.frustumSize * aspect) / this.host.canvas.clientWidth;
+		this.target.x -= dx * worldPerPxX;
+		this.target.z -= dy * worldPerPxY;
+		this.clampTargetToMap();
+	}
+
+	private clampTargetToMap() {
+		const half = this.host.getActiveWorldDefinition().size * 0.48;
+		this.target.x = THREE.MathUtils.clamp(this.target.x, -half, half);
+		this.target.z = THREE.MathUtils.clamp(this.target.z, -half, half);
+	}
+
+	private pickTerrain(clientX: number, clientY: number): THREE.Vector3 | null {
+		const rect = this.host.canvas.getBoundingClientRect();
+		this.pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+		this.pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+		this.raycaster.setFromCamera(this.pointer, this.activeCamera);
+		const mesh = this.host.getTerrainMesh();
+		if (!mesh) return null;
+		const hits = this.raycaster.intersectObject(mesh, false);
+		if (!hits.length) return null;
+		this.hitPoint.copy(hits[0].point);
+		return this.hitPoint;
+	}
+
+	private async brushAt(point: THREE.Vector3) {
+		const now = performance.now();
+		if (now - this.lastPaintAt < PAINT_MIN_INTERVAL_MS) return;
+		this.lastPaintAt = now;
+
+		if (this.tool === "sculpt") {
+			const op = this.store.createOp({
+				type: "sculpt",
+				brush: this.sculpt,
+				x: point.x,
+				z: point.z,
+				radius: this.brushRadius,
+				strength: this.brushStrength,
+			});
+			await this.commitOp(op);
+			return;
+		}
+
+		if (this.tool === "paint-road") {
+			await this.commitOp(
+				this.store.createOp({
+					type: "paint-road",
+					x: point.x,
+					z: point.z,
+					radius: this.brushRadius,
+				})
+			);
+		}
+	}
+
+	/** Click places island-style water; basin cell coords are saved in the op JSON. */
+	private async placeWaterAt(point: THREE.Vector3) {
+		if (this.placeBusy) return;
+		this.placeBusy = true;
+		try {
+			const def = this.host.getActiveWorldDefinition();
+			const cell = def.size / Math.max(1, def.segments);
+			// Dig must span several cells or the basin vanishes on coarse grids.
+			const radius = Math.max(cell * 3.5, this.brushRadius, 8);
+			const basin = this.applier.prepareBasinAt(point.x, point.z, radius);
+			if (!basin) return;
+			await this.commitOp(
+				this.store.createOp({
+					type: "paint-water",
+					x: point.x,
+					z: point.z,
+					radius,
+					createSurface: true,
+					basin,
+				})
+			);
+		} finally {
+			this.placeBusy = false;
+		}
+	}
+
+	private handleSelectClick(clientX: number, clientY: number) {
+		const rect = this.host.canvas.getBoundingClientRect();
+		this.pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+		this.pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+		this.raycaster.setFromCamera(this.pointer, this.activeCamera);
+		const hits = this.raycaster.intersectObjects(
+			this.applier.getSelectableObjects(),
+			true
+		);
+		if (!hits.length) {
+			this.clearSelection();
+			return;
+		}
+		const entityId = this.applier.getEntityIdAtObject(hits[0].object);
+		if (!entityId) {
+			this.clearSelection();
+			return;
+		}
+		// First click selects; second click on same object deselects.
+		if (this.selectedEntityId === entityId) {
+			this.clearSelection();
+			return;
+		}
+		this.setSelection(entityId);
+	}
+
+	private setSelection(entityId: string) {
+		this.selectedEntityId = entityId;
+		const obj = this.applier.getEntityObject(entityId);
+		if (!obj) {
+			this.clearSelection();
+			return;
+		}
+		if (this.selectionHelper) {
+			this.host.scene.remove(this.selectionHelper);
+			this.selectionHelper = null;
+		}
+		this.selectionHelper = new THREE.BoxHelper(obj, 0xffe08a);
+		this.selectionHelper.name = "edit-selection";
+		this.host.scene.add(this.selectionHelper);
+	}
+
+	private clearSelection() {
+		this.selectedEntityId = null;
+		if (this.selectionHelper) {
+			this.host.scene.remove(this.selectionHelper);
+			(this.selectionHelper.geometry as THREE.BufferGeometry | undefined)?.dispose();
+			(this.selectionHelper.material as THREE.Material | undefined)?.dispose();
+			this.selectionHelper = null;
+		}
+	}
+
+	private async deleteSelected() {
+		if (!this.selectedEntityId) return;
+		const entityId = this.selectedEntityId;
+		this.clearSelection();
+		await this.commitOp(
+			this.store.createOp({
+				type: "delete-entity",
+				entityId,
+			})
+		);
+	}
+
+	private async placeAt(point: THREE.Vector3) {
+		if (this.placeBusy || this.tool !== "place-mesh") return;
+		this.placeBusy = true;
+		try {
+			const isStone = this.meshId === "stone";
+			await this.commitOp(
+				this.store.createOp({
+					type: "place-mesh",
+					meshId: this.meshId,
+					x: point.x,
+					z: point.z,
+					scale: isStone
+						? 2.2 + Math.random() * 0.8
+						: 0.9 + Math.random() * 0.35,
+					rotationY: Math.random() * Math.PI * 2,
+				})
+			);
+		} finally {
+			this.placeBusy = false;
+		}
+	}
+}

@@ -14,10 +14,10 @@ export type TerrainColliderHandle = {
 export function createTerrainHeightfieldCollider(
 	heights: Float32Array,
 	nrows: number,
-	ncols: number
+	ncols: number,
+	size: number = TERRAIN_CONFIG.size
 ): TerrainColliderHandle {
 	const world = getWorld();
-	const { size } = TERRAIN_CONFIG;
 
 	const body = world.createRigidBody(RAPIER.RigidBodyDesc.fixed());
 

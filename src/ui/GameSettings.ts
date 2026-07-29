@@ -1,7 +1,8 @@
 import * as dat from "dat.gui";
 
 export type GraphicsQuality = "Low" | "Medium" | "High";
-export type GameWorldId = "island" | "valley";
+/** Builtin or custom-* world ids. */
+export type GameWorldId = string;
 
 type DayPeriod = "morning" | "noon" | "evening" | "sunset" | "night";
 
@@ -11,13 +12,17 @@ type GameSettingsOptions = {
 	autoDayNight: boolean;
 	hour: number;
 	grassDensity: number;
+	/** Grass hard-hide distance in meters (default 72). */
+	grassCullDistance: number;
 	carPower: number;
 	world: GameWorldId;
+	worldOptions?: Record<string, string>;
 	onQualityChange: (quality: GraphicsQuality) => void;
 	onPeriodChange: (period: DayPeriod) => void;
 	onAutoDayNightChange: (enabled: boolean) => void;
 	onHourChange: (hour: number) => void;
 	onGrassDensityChange: (percent: number) => void;
+	onGrassCullDistanceChange: (meters: number) => void;
 	onCarPowerChange: (power: number) => void;
 	onWorldChange: (world: GameWorldId) => Promise<void>;
 };
@@ -25,7 +30,8 @@ type GameSettingsOptions = {
 export class GameSettings {
 	private readonly gui: dat.GUI;
 	private readonly state;
-	private readonly worldController;
+	private worldController: dat.GUIController;
+	private worldFolder: dat.GUI;
 
 	constructor(private readonly options: GameSettingsOptions) {
 		this.state = {
@@ -34,6 +40,7 @@ export class GameSettings {
 			autoDayNight: options.autoDayNight,
 			hour: options.hour,
 			grassDensity: options.grassDensity,
+			grassCullDistance: options.grassCullDistance,
 			carPower: options.carPower,
 			world: options.world,
 		};
@@ -70,6 +77,10 @@ export class GameSettings {
 			.add(this.state, "grassDensity", 0, 100, 1)
 			.name("Density %")
 			.onChange(options.onGrassDensityChange);
+		grass
+			.add(this.state, "grassCullDistance", 30, 250, 1)
+			.name("Cull distance")
+			.onChange(options.onGrassCullDistanceChange);
 
 		const car = this.gui.addFolder("Car");
 		car
@@ -77,12 +88,12 @@ export class GameSettings {
 			.name("Power")
 			.onChange(options.onCarPowerChange);
 
-		const world = this.gui.addFolder("World");
-		this.worldController = world
-			.add(this.state, "world", { Island: "island", Valley: "valley" })
+		this.worldFolder = this.gui.addFolder("World");
+		this.worldController = this.worldFolder
+			.add(this.state, "world", options.worldOptions ?? { Island: "island", Valley: "valley" })
 			.name("Current")
 			.onChange(async (next: GameWorldId) => {
-				const previous = next === "island" ? "valley" : "island";
+				const previous = this.state.world;
 				try {
 					await options.onWorldChange(next);
 				} catch {
@@ -95,7 +106,7 @@ export class GameSettings {
 		dayNight.open();
 		grass.open();
 		car.open();
-		world.open();
+		this.worldFolder.open();
 		this.bindToggle();
 	}
 
@@ -122,6 +133,22 @@ export class GameSettings {
 	setWorld(world: GameWorldId): void {
 		this.state.world = world;
 		this.worldController.updateDisplay();
+	}
+
+	setWorldOptions(options: Record<string, string>): void {
+		this.worldFolder.remove(this.worldController);
+		this.worldController = this.worldFolder
+			.add(this.state, "world", options)
+			.name("Current")
+			.onChange(async (next: GameWorldId) => {
+				const previous = this.state.world;
+				try {
+					await this.options.onWorldChange(next);
+				} catch {
+					this.state.world = previous;
+					this.worldController.updateDisplay();
+				}
+			});
 	}
 
 	private configureContainer(): void {

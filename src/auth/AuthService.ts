@@ -72,6 +72,10 @@ export class AuthService {
 		localStorage.removeItem(this.tokenKey);
 	}
 
+	getToken(): string | null {
+		return localStorage.getItem(this.tokenKey);
+	}
+
 	private async readResponse(response: Response): Promise<AuthResponse> {
 		try {
 			return (await response.json()) as AuthResponse;

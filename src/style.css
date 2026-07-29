@@ -1421,6 +1421,313 @@ body.orientation-portrait-lock .dg.ac {
   flex: 1;
 }
 
-.leave-lobby-btn:hover {
-  background: rgba(255, 255, 255, 0.15);
+/* ——— Edit Mode (Blender-like top-down) ——— */
+.edit-mode-toggle {
+	position: fixed;
+	right: 12px;
+	bottom: 12px;
+	z-index: 10001;
+	padding: 10px 16px;
+	border-radius: 12px;
+	border: 1px solid rgba(190, 220, 170, 0.22);
+	background: rgba(14, 22, 16, 0.78);
+	backdrop-filter: blur(16px) saturate(1.15);
+	-webkit-backdrop-filter: blur(16px) saturate(1.15);
+	color: rgba(230, 242, 220, 0.95);
+	font-family: "Sora", system-ui, sans-serif;
+	font-size: 0.85rem;
+	font-weight: 600;
+	letter-spacing: 0.02em;
+	cursor: pointer;
+	box-shadow: 0 10px 28px rgba(0, 0, 0, 0.3);
+	transition: background 0.2s ease, border-color 0.2s ease, transform 0.15s ease;
 }
+
+.edit-mode-toggle:hover {
+	background: rgba(28, 40, 30, 0.9);
+	border-color: rgba(190, 220, 170, 0.4);
+	transform: translateY(-1px);
+}
+
+.edit-mode-toggle.is-active {
+	border-color: rgba(180, 210, 160, 0.55);
+	color: #d7efc4;
+}
+
+.edit-top-bar {
+	position: fixed;
+	top: 14px;
+	left: 50%;
+	transform: translateX(-50%);
+	z-index: 10001;
+	display: none;
+	align-items: center;
+	gap: 12px;
+	padding: 10px 14px;
+	border-radius: 14px;
+	border: 1px solid rgba(190, 220, 170, 0.18);
+	background: rgba(14, 22, 16, 0.82);
+	backdrop-filter: blur(18px) saturate(1.2);
+	-webkit-backdrop-filter: blur(18px) saturate(1.2);
+	box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32);
+	max-width: calc(100vw - 40px);
+	flex-wrap: wrap;
+	justify-content: center;
+}
+
+.edit-top-bar.is-open {
+	display: flex;
+}
+
+.edit-top-bar .edit-bar-label,
+.edit-top-bar #edit-sculpt-tools,
+.edit-top-bar .edit-slider {
+	display: none;
+}
+
+.edit-top-bar.is-sculpt-active .edit-bar-label,
+.edit-top-bar.is-sculpt-active #edit-sculpt-tools {
+	display: flex;
+}
+
+.edit-top-bar.is-sculpt-active .edit-bar-label {
+	display: block;
+}
+
+.edit-top-bar.is-brush-active .edit-slider-pencil {
+	display: flex;
+}
+
+.edit-top-bar.is-sculpt-active .edit-slider-strength {
+	display: flex;
+}
+
+.edit-slider-value {
+	min-width: 1.6em;
+	font-variant-numeric: tabular-nums;
+	color: rgba(220, 235, 210, 0.9);
+}
+
+.edit-left-bar {
+	position: fixed;
+	top: 88px;
+	left: 14px;
+	z-index: 10001;
+	display: none;
+	flex-direction: column;
+	gap: 8px;
+	padding: 12px;
+	width: 118px;
+	border-radius: 14px;
+	border: 1px solid rgba(190, 220, 170, 0.18);
+	background: rgba(14, 22, 16, 0.82);
+	backdrop-filter: blur(18px) saturate(1.2);
+	-webkit-backdrop-filter: blur(18px) saturate(1.2);
+	box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32);
+}
+
+.edit-left-bar.is-open {
+	display: flex;
+}
+
+.edit-bar-label {
+	font-family: "Sora", system-ui, sans-serif;
+	font-size: 0.68rem;
+	font-weight: 600;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: rgba(190, 220, 170, 0.7);
+}
+
+.edit-tool-row {
+	display: flex;
+	gap: 6px;
+	flex-wrap: wrap;
+}
+
+.edit-chip,
+.edit-asset {
+	appearance: none;
+	border: 1px solid rgba(255, 255, 255, 0.1);
+	background: rgba(255, 255, 255, 0.06);
+	color: rgba(235, 245, 230, 0.92);
+	font-family: "Sora", system-ui, sans-serif;
+	font-size: 0.78rem;
+	font-weight: 500;
+	border-radius: 10px;
+	cursor: pointer;
+	transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.edit-chip {
+	padding: 7px 11px;
+}
+
+.edit-asset {
+	padding: 10px 8px;
+	text-align: center;
+}
+
+.edit-chip:hover,
+.edit-asset:hover {
+	background: rgba(255, 255, 255, 0.12);
+	border-color: rgba(190, 220, 170, 0.28);
+}
+
+.edit-chip.is-active,
+.edit-asset.is-active {
+	background: rgba(120, 160, 100, 0.28);
+	border-color: rgba(180, 210, 160, 0.45);
+	color: #e8f6dc;
+}
+
+.edit-save {
+	border-color: rgba(180, 210, 160, 0.35);
+}
+
+.edit-sub-panel,
+.edit-mesh-panel {
+	display: none;
+	flex-direction: column;
+	gap: 6px;
+	margin-top: 8px;
+	padding-top: 8px;
+	border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.edit-sub-panel.is-open,
+.edit-mesh-panel.is-open {
+	display: flex;
+}
+
+
+
+.edit-slider {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	color: rgba(220, 235, 210, 0.85);
+	font-family: "Sora", system-ui, sans-serif;
+	font-size: 0.72rem;
+}
+
+.edit-slider input[type="range"] {
+	width: 88px;
+	accent-color: #a3c98a;
+}
+
+.edit-mode-hint {
+	position: fixed;
+	bottom: 56px;
+	left: 50%;
+	transform: translateX(-50%);
+	z-index: 10001;
+	display: none;
+	padding: 8px 14px;
+	border-radius: 999px;
+	background: rgba(14, 22, 16, 0.72);
+	border: 1px solid rgba(190, 220, 170, 0.14);
+	color: rgba(230, 242, 220, 0.8);
+	font-family: "Sora", system-ui, sans-serif;
+	font-size: 0.72rem;
+	pointer-events: none;
+	white-space: nowrap;
+}
+
+.edit-chip:disabled {
+	opacity: 0.35;
+	pointer-events: none;
+}
+
+.edit-create-modal {
+	position: fixed;
+	inset: 0;
+	z-index: 10050;
+	display: grid;
+	place-items: center;
+	background: rgba(8, 12, 10, 0.55);
+	backdrop-filter: blur(4px);
+}
+
+.edit-create-modal[hidden] {
+	display: none;
+}
+
+.edit-create-dialog {
+	width: min(420px, calc(100vw - 32px));
+	padding: 22px 22px 18px;
+	border-radius: 16px;
+	background: #152018;
+	border: 1px solid rgba(190, 220, 170, 0.18);
+	color: #e8f2e0;
+	font-family: "Sora", system-ui, sans-serif;
+	box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+}
+
+.edit-create-dialog h3 {
+	margin: 0 0 8px;
+	font-size: 1.15rem;
+	font-weight: 600;
+}
+
+.edit-create-copy {
+	margin: 0 0 18px;
+	font-size: 0.82rem;
+	line-height: 1.45;
+	color: rgba(230, 242, 220, 0.72);
+}
+
+.edit-create-size {
+	display: grid;
+	grid-template-columns: auto 1fr auto;
+	align-items: center;
+	gap: 12px;
+	margin-bottom: 18px;
+	font-size: 0.8rem;
+}
+
+.edit-create-size input[type="range"] {
+	width: 100%;
+}
+
+.edit-create-actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+}
+
+.edit-mode-hint.is-open {
+	display: block;
+}
+
+body.edit-mode-active .controls-hint,
+body.edit-mode-active .game-top-nav,
+body.edit-mode-active .settings-toggle {
+	opacity: 0.35;
+	pointer-events: none;
+}
+
+body.edit-mode-active .edit-mode-toggle {
+	pointer-events: auto;
+	opacity: 1;
+}
+
+@media (max-width: 720px) {
+	.edit-top-bar {
+		top: 8px;
+		gap: 8px;
+		padding: 8px 10px;
+	}
+
+	.edit-left-bar {
+		top: auto;
+		bottom: 64px;
+		left: 10px;
+		width: 96px;
+	}
+
+	.edit-mode-hint.is-open {
+		display: none;
+	}
+}
+

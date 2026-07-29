@@ -1,0 +1,146 @@
+import type { Socket } from "socket.io-client";
+import {
+	WORLD_EDIT_CHANNEL,
+	WORLD_EDIT_SOCKET,
+	type WorldEditDocument,
+	type WorldEditOp,
+	type WorldEditWireMessage,
+} from "../editor/types";
+
+export type EditSyncHandlers = {
+	onRemoteOp: (op: WorldEditOp) => void;
+	onRemoteSnapshot: (document: WorldEditDocument) => void;
+	onRequestSnapshot: () => void;
+	getRoomCode: () => string;
+	getClientId: () => string;
+};
+
+/**
+ * Live edit transport for multiplayer + same-origin tabs.
+ *
+ * Socket.IO events (backend must relay to the room — frontend already emits/listens):
+ *   world-edit-op                 { roomCode, op }
+ *   world-edit-snapshot           { roomCode, document }
+ *   world-edit-request-snapshot   { roomCode }
+ *
+ * BroadcastChannel fallback: other tabs see edits without a backend.
+ */
+export class EditSyncTransport {
+	private socket: Socket | null = null;
+	private channel: BroadcastChannel | null = null;
+	private readonly handlers: EditSyncHandlers;
+
+	constructor(handlers: EditSyncHandlers) {
+		this.handlers = handlers;
+		if (typeof BroadcastChannel !== "undefined") {
+			this.channel = new BroadcastChannel(WORLD_EDIT_CHANNEL);
+			this.channel.onmessage = (event: MessageEvent<WorldEditWireMessage>) => {
+				this.handleMessage(event.data, "broadcast");
+			};
+		}
+	}
+
+	attachSocket(socket: Socket | null) {
+		if (this.socket === socket) return;
+		this.detachSocketListeners();
+		this.socket = socket;
+		if (!socket) return;
+
+		socket.on(WORLD_EDIT_SOCKET.op, (payload: { op?: WorldEditOp; roomCode?: string }) => {
+			if (!payload?.op) return;
+			if (payload.op.authorId === this.handlers.getClientId()) return;
+			const room = this.handlers.getRoomCode();
+			if (payload.roomCode && room && payload.roomCode !== room) return;
+			this.handlers.onRemoteOp(payload.op);
+		});
+
+		socket.on(
+			WORLD_EDIT_SOCKET.snapshot,
+			(payload: { document?: WorldEditDocument; roomCode?: string }) => {
+				if (!payload?.document) return;
+				const room = this.handlers.getRoomCode();
+				if (payload.roomCode && room && payload.roomCode !== room) return;
+				this.handlers.onRemoteSnapshot(payload.document);
+			}
+		);
+
+		socket.on(WORLD_EDIT_SOCKET.requestSnapshot, (payload: { roomCode?: string }) => {
+			const room = this.handlers.getRoomCode();
+			if (payload?.roomCode && room && payload.roomCode !== room) return;
+			this.handlers.onRequestSnapshot();
+		});
+	}
+
+	private detachSocketListeners() {
+		if (!this.socket) return;
+		this.socket.off(WORLD_EDIT_SOCKET.op);
+		this.socket.off(WORLD_EDIT_SOCKET.snapshot);
+		this.socket.off(WORLD_EDIT_SOCKET.requestSnapshot);
+	}
+
+	broadcastOp(op: WorldEditOp) {
+		const roomCode = this.handlers.getRoomCode();
+		const message: WorldEditWireMessage = { kind: "op", roomCode, op };
+
+		if (this.socket?.connected && roomCode) {
+			this.socket.emit(WORLD_EDIT_SOCKET.op, { roomCode, op });
+		}
+		this.channel?.postMessage(message);
+	}
+
+	broadcastSnapshot(document: WorldEditDocument) {
+		const roomCode = this.handlers.getRoomCode();
+		const message: WorldEditWireMessage = {
+			kind: "snapshot",
+			roomCode,
+			document,
+		};
+		if (this.socket?.connected && roomCode) {
+			this.socket.emit(WORLD_EDIT_SOCKET.snapshot, { roomCode, document });
+		}
+		this.channel?.postMessage(message);
+	}
+
+	requestSnapshot() {
+		const roomCode = this.handlers.getRoomCode();
+		const message: WorldEditWireMessage = {
+			kind: "request-snapshot",
+			roomCode,
+		};
+		if (this.socket?.connected && roomCode) {
+			this.socket.emit(WORLD_EDIT_SOCKET.requestSnapshot, { roomCode });
+		}
+		this.channel?.postMessage(message);
+	}
+
+	private handleMessage(
+		message: WorldEditWireMessage,
+		_source: "broadcast" | "socket"
+	) {
+		if (!message || typeof message !== "object") return;
+		const room = this.handlers.getRoomCode();
+		// BroadcastChannel has no rooms; always accept. Socket filtered above.
+		if (message.kind === "op") {
+			if (message.op.authorId === this.handlers.getClientId()) return;
+			if (room && message.roomCode && message.roomCode !== room) return;
+			this.handlers.onRemoteOp(message.op);
+			return;
+		}
+		if (message.kind === "snapshot") {
+			if (room && message.roomCode && message.roomCode !== room) return;
+			this.handlers.onRemoteSnapshot(message.document);
+			return;
+		}
+		if (message.kind === "request-snapshot") {
+			if (room && message.roomCode && message.roomCode !== room) return;
+			this.handlers.onRequestSnapshot();
+		}
+	}
+
+	dispose() {
+		this.detachSocketListeners();
+		this.socket = null;
+		this.channel?.close();
+		this.channel = null;
+	}
+}

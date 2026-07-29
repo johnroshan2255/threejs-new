@@ -1,4 +1,4 @@
-import { Mesh, PlaneGeometry, type Texture, Vector3 } from 'three';
+import { Mesh, PlaneGeometry, type BufferGeometry, type Texture, Vector3 } from 'three';
 import { DEFAULT_WATER_OPTIONS } from '../core/Constants';
 import { WaterMaterial } from '../materials/WaterMaterial';
 import { WaterRenderer } from '../rendering/WaterRenderer';
@@ -61,13 +61,18 @@ export class Pond {
     const passHeight = this.options.renderer?.domElement.height || 1024;
     this.waterRenderer.initialize(passWidth, passHeight);
 
-    const geometry = new PlaneGeometry(
-      this.options.width,
-      this.options.height,
-      this.options.segments,
-      this.options.segments,
-    );
-    geometry.rotateX(-Math.PI / 2);
+    const geometry: BufferGeometry =
+      options.geometry ??
+      (() => {
+        const plane = new PlaneGeometry(
+          this.options.width,
+          this.options.height,
+          this.options.segments,
+          this.options.segments,
+        );
+        plane.rotateX(-Math.PI / 2);
+        return plane;
+      })();
 
     const material = this.material.threeMaterial;
     if (!material) {
@@ -97,21 +102,25 @@ export class Pond {
   }
 
   /**
-   * Advance simulation, update material, and run reflection / refraction / caustics.
+   * Advance simulation, update material, and optionally run reflection / refraction / caustics.
+   * Pass `full: false` for cheap time-only ticks (many editor water tiles).
    */
-  update(delta: number): void {
+  update(delta: number, options?: { full?: boolean }): void {
     this.elapsed += delta;
 
+    const full = options?.full !== false;
     const { renderer, scene, camera } = this.options;
 
-    if (renderer) {
+    if (full && renderer) {
       this.simulation.step(renderer, delta);
     }
 
     this.material.setTime(this.elapsed);
-    this.material.setHeightMap(this.simulation.heightTexture);
+    if (full) {
+      this.material.setHeightMap(this.simulation.heightTexture);
+    }
 
-    if (renderer && scene && camera) {
+    if (full && renderer && scene && camera) {
       this.waterRenderer.render(
         renderer,
         scene,

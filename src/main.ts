@@ -39,8 +39,21 @@ import {
 import {
 	createPondStones,
 	type PondStoneHandle,
+	type PlacedStoneHandle,
 } from "./entities/stone";
-import { GrassChunkField } from "./entities/grass";
+import { GrassChunkField, DEFAULT_GRASS_CULL_DISTANCE } from "./entities/grass";
+import { EditModeController } from "./editor/EditModeController";
+import {
+	createLargeBlankWorld,
+	createProceduralTerrain,
+	grassCountForSize,
+	ISLAND_GRASS_DENSITY,
+	ISLAND_TERRAIN_CELL,
+	ISLAND_WORLD,
+	VALLEY_WORLD,
+	type WorldDefinition,
+} from "./worlds";
+import { CUSTOM_WORLDS_KEY } from "./editor/types";
 import {
 	createDayNightCycle,
 	type DayNightCycle,
@@ -120,8 +133,16 @@ export class FluffyGrass {
 	private grassMaterial: GrassMaterial;
 	private grassCount = 50000;
 	private grassDensity = 100;
+	private grassCullDistance = DEFAULT_GRASS_CULL_DISTANCE;
 	private islandGrassField: GrassChunkField | null = null;
 	private valleyGrassField: GrassChunkField | null = null;
+	private customGrassField: GrassChunkField | null = null;
+	private customWorldGroup = new THREE.Group();
+	private customTerrainMesh: THREE.Mesh | null = null;
+	private customHeights: Float32Array | null = null;
+	private customTerrainHandle: TerrainColliderHandle | null = null;
+	private activeWorldDef: WorldDefinition = ISLAND_WORLD;
+	private customWorldDefs: WorldDefinition[] = [];
 	private graphicsQuality: GraphicsQuality = "High";
 	private waterUpdateInterval = 1;
 	private waterFrameCounter = 0;
@@ -130,6 +151,9 @@ export class FluffyGrass {
 	private lastGpuPanelUpdate = 0;
 	private lastSettingsSync = 0;
 	private lastRippleInjection = 0;
+	private lastEditorRippleInjection = 0;
+	private editorWaterDeltaAccumulator = 0;
+	private editorWaterFrameCounter = 0;
 	private readonly viewFrustum = new THREE.Frustum();
 	private readonly viewProjectionMatrix = new THREE.Matrix4();
 
@@ -163,6 +187,11 @@ export class FluffyGrass {
 	private remotePlayers: Map<string, RemotePlayer> = new Map();
 
 	private trees: TreeHandle[] = [];
+	private editorStones: PlacedStoneHandle[] = [];
+	private editorPonds: Pond[] = [];
+	private islandTerrainMesh: THREE.Mesh | null = null;
+	private islandHeights: Float32Array | null = null;
+	private editMode: EditModeController | null = null;
 	private pondStones: PondStoneHandle | null = null;
 	private dayNight: DayNightCycle | null = null;
 	private fireflies: Fireflies | null = null;
@@ -186,6 +215,8 @@ export class FluffyGrass {
 	private worldLoading!: WorldLoadingOverlay;
 	private islandTerrainHandle: TerrainColliderHandle | null = null;
 	private valleyTerrainBody: RAPIER.RigidBody | null = null;
+	private valleyTerrainMesh: THREE.Mesh | null = null;
+	private valleyHeights: Float32Array | null = null;
 	private valleySpawn = new THREE.Vector3(0, 4, 5);
 	private initializationPromise: Promise<void>;
 	private currentFogRadius = 65;
@@ -234,7 +265,10 @@ export class FluffyGrass {
 		this.scene.add(this.camera);
 		this.scene.add(this.worldGroup);
 		this.scene.add(this.newWorldGroup);
+		this.scene.add(this.customWorldGroup);
 		this.newWorldGroup.visible = false;
+		this.customWorldGroup.visible = false;
+		this.loadCustomWorldDefs();
 
 		this.audioListener = new THREE.AudioListener();
 		this.camera.add(this.audioListener);
@@ -264,7 +298,8 @@ export class FluffyGrass {
 		this.terrainMat = new THREE.MeshPhongMaterial({
 			color: this.sceneProps.terrainColor,
 			shininess: 0,
-			flatShading: true
+			flatShading: true,
+			vertexColors: false,
 		});
 
 		this.setupStats();
@@ -276,6 +311,7 @@ export class FluffyGrass {
 		this.dayNight.auto = this.dayNightGui.auto;
 		this.worldLoading = new WorldLoadingOverlay();
 		this.setupSettings();
+		this.setupEditMode();
 
 		this.dayNight.speed = this.dayNightGui.speed;
 
@@ -321,6 +357,8 @@ export class FluffyGrass {
 				if (this.carInput) this.carInput.isEnabled = true;
 				if (this.humanInput) this.humanInput.isEnabled = true;
 				this.gameNavigation?.show();
+				this.editMode?.onGameActiveChanged(true);
+				void this.tryOpenSharedWorldFromUrl();
 				const settingsToggle = document.getElementById("settings-toggle");
 				if (settingsToggle) settingsToggle.style.display = "flex";
 				this.loadingScreenController?.hide();
@@ -428,6 +466,7 @@ export class FluffyGrass {
 		const { io } = await import("socket.io-client");
 		if (this.socket) return;
 		this.socket = io(SERVER_URL);
+		this.editMode?.attachSocket(this.socket);
 
 			this.socket.on("room-updated", (players: any[]) => {
 				for (let i = 0; i < 4; i++) {
@@ -757,6 +796,16 @@ export class FluffyGrass {
 			});
 	}
 
+	private async tryOpenSharedWorldFromUrl() {
+		const worldId = new URLSearchParams(window.location.search).get("world");
+		if (!worldId || !this.editMode) return;
+		try {
+			await this.editMode.onRoomWorldBound(worldId);
+		} catch (error) {
+			console.warn("[world] Failed to open shared world", worldId, error);
+		}
+	}
+
 	private async connectSocket(action: "host" | "join", roomCodeToJoin?: string) {
 		await this.ensureSocket();
 
@@ -766,33 +815,57 @@ export class FluffyGrass {
 		const settingsToggle = document.getElementById("settings-toggle");
 
 		if (action === "host") {
-			this.socket!.emit("create-room", this.userData, (res: any) => {
-				if (res.success) {
-					this.roomCode = res.roomCode;
-					this.isGameActive = false;
-					if (lobbyPanel) lobbyPanel.style.display = "flex";
-					if (startBtn) startBtn.style.display = "block";
-					if (loadingScreen) loadingScreen.style.display = "none";
-					if (settingsToggle) settingsToggle.style.display = "none";
-					this.gameNavigation?.hide();
-					this.settings.hide();
+			const worldId = this.editMode?.getActiveWorldId() ?? this.activeWorldDef.id;
+			const worldDefinition = this.resolveWorldDefinition(worldId);
+			this.socket!.emit(
+				"create-room",
+				{
+					user: this.userData,
+					worldId,
+					worldDefinition,
+				},
+				(res: any) => {
+					if (res.success) {
+						this.roomCode = res.roomCode;
+						this.editMode?.attachSocket(this.socket);
+						void this.editMode?.onRoomWorldBound(res.worldId ?? worldId);
+						this.isGameActive = false;
+						if (lobbyPanel) lobbyPanel.style.display = "flex";
+						if (startBtn) startBtn.style.display = "block";
+						if (loadingScreen) loadingScreen.style.display = "none";
+						if (settingsToggle) settingsToggle.style.display = "none";
+						this.gameNavigation?.hide();
+						this.settings.hide();
+					}
 				}
-			});
+			);
 		} else if (action === "join" && roomCodeToJoin) {
-			this.socket!.emit("join-room", { roomCode: roomCodeToJoin, userData: this.userData }, (res: any) => {
-				if (res.success) {
-					this.roomCode = res.roomCode;
-					this.isGameActive = false;
-					if (lobbyPanel) lobbyPanel.style.display = "flex";
-					if (startBtn) startBtn.style.display = "none";
-					if (loadingScreen) loadingScreen.style.display = "none";
-					if (settingsToggle) settingsToggle.style.display = "none";
-					this.gameNavigation?.hide();
-					this.settings.hide();
-				} else {
-					console.error(res.error || "Failed to join room");
+			this.socket!.emit(
+				"join-room",
+				{
+					roomCode: roomCodeToJoin,
+					userData: this.userData,
+					worldId: this.editMode?.getActiveWorldId() ?? this.activeWorldDef.id,
+				},
+				(res: any) => {
+					if (res.success) {
+						this.roomCode = res.roomCode;
+						this.editMode?.attachSocket(this.socket);
+						void this.editMode?.onRoomWorldBound(
+							res.worldId ?? this.activeWorldDef.id
+						);
+						this.isGameActive = false;
+						if (lobbyPanel) lobbyPanel.style.display = "flex";
+						if (startBtn) startBtn.style.display = "none";
+						if (loadingScreen) loadingScreen.style.display = "none";
+						if (settingsToggle) settingsToggle.style.display = "none";
+						this.gameNavigation?.hide();
+						this.settings.hide();
+					} else {
+						console.error(res.error || "Failed to join room");
+					}
 				}
-			});
+			);
 		}
 	}
 
@@ -936,79 +1009,149 @@ export class FluffyGrass {
 		targetGroup: THREE.Group,
 		pondLocalPos: THREE.Vector2 = new THREE.Vector2(-20, 5),
 		grassHeightMultiplier: number = 1.0,
-		isNewWorld: boolean = false
+		isNewWorld: boolean = false,
+		options?: {
+			chunkSize?: number;
+			clearPondHole?: boolean;
+			/** Even grid + jitter (custom worlds) — avoids random patchy gaps. */
+			evenCoverage?: boolean;
+			/** Skip grass steeper than this slope angle (degrees). Default 65. */
+			maxSlopeDeg?: number;
+			heights?: Float32Array;
+			nrows?: number;
+			ncols?: number;
+			terrainSize?: number;
+		}
 	) {
-		const sampler = new MeshSurfaceSampler(surfaceMesh).build();
 		const matrices: THREE.Matrix4[] = [];
+		const clearPondHole = options?.clearPondHole !== false;
+		const maxSlopeDeg = options?.maxSlopeDeg ?? 65;
+		const minNormalY = Math.cos((maxSlopeDeg * Math.PI) / 180);
 
 		const position = new THREE.Vector3();
 		const quaternion = new THREE.Quaternion();
 		const scale = new THREE.Vector3(1, 1, 1);
-
 		const normal = new THREE.Vector3();
 		const yAxis = new THREE.Vector3(0, 1, 0);
 		const matrix = new THREE.Matrix4();
 
-		let instanceIndex = 0;
-		for (let i = 0; i < this.grassCount * 1.5; i++) { // sample more to hit target
-			if (instanceIndex >= this.grassCount) break;
-			sampler.sample(position, normal);
-
-			if (isNewWorld) {
-				// Only place grass on flat-ish surfaces (like real mountains)
-				// dot = 1.0 means perfectly flat, dot = 0 means vertical cliff
-				const steepness = normal.dot(yAxis);
-				if (steepness < 0.5) continue; // Very steep cliff — no grass at all
-				if (steepness < 0.7 && Math.random() > 0.15) continue; // Moderately steep — very sparse grass
-
-				// Cluster grass into natural patches using noise
-				// This creates distinct groups of grass with bare ground between them
-				const clusterNoise =
-					Math.sin(position.x * 0.4 + position.z * 0.3) *
-					Math.cos(position.z * 0.5 - position.x * 0.2) +
-					Math.sin(position.x * 0.8 + 2.1) * Math.cos(position.z * 0.7 + 1.3) * 0.5;
-				if (clusterNoise < 0.2) continue; // Skip — bare ground between clusters
-			}
-
-			// Use the provided pond local position to clear grass around it
-			const distToPond = Math.hypot(position.x - pondLocalPos.x, position.z - pondLocalPos.y);
+		const pushBlade = () => {
+			const distToPond = clearPondHole
+				? Math.hypot(position.x - pondLocalPos.x, position.z - pondLocalPos.y)
+				: Infinity;
 			let heightScale = 1.0;
 
 			if (distToPond < 14) {
 				if (distToPond < 8) {
-					// Deep water - very sparse and short grass
-					if (Math.random() > 0.15) continue;
+					if (Math.random() > 0.15) return false;
 					heightScale = 0.25 + Math.random() * 0.15;
 				} else if (distToPond < 10) {
-					// Shallow water - sparse short grass
-					if (Math.random() > 0.4) continue;
+					if (Math.random() > 0.4) return false;
 					heightScale = 0.35 + Math.random() * 0.2;
 				} else {
-					// Shoreline - transition from short grass to full height
 					const t = (distToPond - 10) / 4;
 					heightScale = 0.45 + 0.55 * t;
 				}
 			}
 
-			// Base random scale variation for all grass
 			const randomVariation = 0.8 + Math.random() * 0.4;
 			scale.set(
-				randomVariation * grassHeightMultiplier,                 // X: Scaled width
-				heightScale * randomVariation * grassHeightMultiplier,   // Y: Scaled height
-				randomVariation * grassHeightMultiplier                  // Z: Scaled width
+				randomVariation * grassHeightMultiplier,
+				heightScale * randomVariation * grassHeightMultiplier,
+				randomVariation * grassHeightMultiplier
 			);
 
 			quaternion.setFromUnitVectors(yAxis, normal);
 			const randomRotation = new THREE.Euler(0, Math.random() * Math.PI * 2, 0);
-			const randomQuaternion = new THREE.Quaternion().setFromEuler(
-				randomRotation
-			);
-
+			const randomQuaternion = new THREE.Quaternion().setFromEuler(randomRotation);
 			quaternion.multiply(randomQuaternion);
 			matrix.compose(position, quaternion, scale);
-
 			matrices.push(matrix.clone());
-			instanceIndex++;
+			return true;
+		};
+
+		const useEven =
+			options?.evenCoverage &&
+			options.heights &&
+			options.nrows != null &&
+			options.ncols != null &&
+			options.terrainSize != null;
+
+		if (useEven) {
+			const heights = options.heights!;
+			const nrows = options.nrows!;
+			const ncols = options.ncols!;
+			const size = options.terrainSize!;
+			const half = size * 0.5;
+			// Same blade spacing as island (~0.9 m). If budget is lower than full
+			// coverage, keep probability so thinning stays uniform (not patchy corners).
+			const spacing = Math.sqrt(1 / ISLAND_GRASS_DENSITY);
+			const fullCount = (size * size) * ISLAND_GRASS_DENSITY;
+			const keepProb = Math.min(1, this.grassCount / Math.max(1, fullCount));
+			const sampleH = (x: number, z: number) => {
+				const col = THREE.MathUtils.clamp(
+					Math.round(((x + half) / size) * ncols),
+					0,
+					ncols
+				);
+				const row = THREE.MathUtils.clamp(
+					Math.round(((z + half) / size) * nrows),
+					0,
+					nrows
+				);
+				return heights[row + col * (nrows + 1)]!;
+			};
+			const sampleN = (x: number, z: number, out: THREE.Vector3) => {
+				const e = Math.max(spacing * 0.5, size / ncols);
+				out.set(
+					sampleH(x - e, z) - sampleH(x + e, z),
+					e * 2,
+					sampleH(x, z - e) - sampleH(x, z + e)
+				).normalize();
+			};
+
+			for (let gz = -half + spacing * 0.5; gz < half; gz += spacing) {
+				if (matrices.length >= this.grassCount) break;
+				for (let gx = -half + spacing * 0.5; gx < half; gx += spacing) {
+					if (matrices.length >= this.grassCount) break;
+					if (keepProb < 1 && Math.random() > keepProb) continue;
+					const x = gx + (Math.random() - 0.5) * spacing * 0.9;
+					const z = gz + (Math.random() - 0.5) * spacing * 0.9;
+					if (x < -half || x > half || z < -half || z > half) continue;
+					sampleN(x, z, normal);
+					// Only bare on steep slopes (> maxSlopeDeg). Gentle hills keep grass.
+					if (normal.y < minNormalY) continue;
+					position.set(x, sampleH(x, z), z);
+					pushBlade();
+				}
+			}
+		} else {
+			const sampler = new MeshSurfaceSampler(surfaceMesh).build();
+			let instanceIndex = 0;
+			const maxAttempts = this.grassCount * (isNewWorld ? 4 : 2);
+			for (let i = 0; i < maxAttempts; i++) {
+				if (instanceIndex >= this.grassCount) break;
+				sampler.sample(position, normal);
+				if (normal.lengthSq() > 1e-8) normal.normalize();
+				else normal.copy(yAxis);
+
+				if (isNewWorld) {
+					const steepness = normal.dot(yAxis);
+					if (steepness < 0.5) continue;
+					if (steepness < 0.7 && Math.random() > 0.15) continue;
+					const clusterNoise =
+						Math.sin(position.x * 0.4 + position.z * 0.3) *
+							Math.cos(position.z * 0.5 - position.x * 0.2) +
+						Math.sin(position.x * 0.8 + 2.1) *
+							Math.cos(position.z * 0.7 + 1.3) *
+							0.5;
+					if (clusterNoise < 0.2) continue;
+				} else if (normal.y < minNormalY) {
+					continue;
+				}
+
+				if (pushBlade()) instanceIndex++;
+			}
 		}
 
 		const field = new GrassChunkField({
@@ -1016,8 +1159,9 @@ export class FluffyGrass {
 			geometry: grassGeometry,
 			material: this.grassMaterial.material,
 			origin: surfaceMesh.position,
-			chunkSize: 20,
+			chunkSize: options?.chunkSize ?? 15,
 			density: this.grassDensity,
+			cullDistance: this.grassCullDistance,
 		});
 		targetGroup.add(field.group);
 		return field;
@@ -1043,10 +1187,17 @@ export class FluffyGrass {
 	private async loadModels() {
 		const { mesh, heights, nrows, ncols } = createLargeTerrain(this.terrainMat);
 		this.worldGroup.add(mesh);
+		this.islandTerrainMesh = mesh;
+		this.islandHeights = heights;
 
 		mesh.updateMatrixWorld(true);
 		setIslandTerrain(mesh);
-		this.islandTerrainHandle = createTerrainHeightfieldCollider(heights, nrows, ncols);
+		this.islandTerrainHandle = createTerrainHeightfieldCollider(
+			heights,
+			nrows,
+			ncols,
+			TERRAIN_CONFIG.size
+		);
 
 		this.pond = new Pond({
 			width: 20,
@@ -1521,14 +1672,35 @@ export class FluffyGrass {
 			}
 		}
 
+		// Cull around the player (not the orbiting chase camera) so mouse-look
+		// doesn't slide the grass ring in a weird direction.
+		let cullPos: THREE.Vector3;
+		if (this.editMode?.isEnabled) {
+			cullPos = this.editMode.activeCamera.position;
+		} else if (this.activePlayer === "human" && this.human?.mesh) {
+			cullPos = this.human.mesh.position;
+		} else if (this.car?.mesh) {
+			cullPos = this.car.mesh.position;
+		} else {
+			cullPos = this.camera.position;
+		}
+		if (this.renderFrameCounter % 2 === 0) {
+			if (this.currentWorld === "island" && this.worldGroup.visible) {
+				this.islandGrassField?.updateDistanceCulling(cullPos);
+			} else if (this.currentWorld === "valley" && this.newWorldGroup.visible) {
+				this.valleyGrassField?.updateDistanceCulling(cullPos);
+			} else if (this.activeWorldDef.kind === "custom" && this.customWorldGroup.visible) {
+				this.customGrassField?.updateDistanceCulling(cullPos);
+			}
+			this.updateMeshDistanceCulling(cullPos);
+		}
+
 		if (this.currentWorld === "island" && this.worldGroup.visible) {
 			this.grassMaterial.update(this.Uniforms.uTime.value);
-			if (this.renderFrameCounter % 2 === 0) {
-				this.islandGrassField?.updateDistanceCulling(this.camera.position);
-			}
 			updateFoliageWind(dt);
 			if (this.pond) {
 				const pondVisible = this.isObjectVisible(this.pond.mesh);
+				this.pond.mesh.visible = pondVisible;
 				if (pondVisible) {
 					this.waterDeltaAccumulator = Math.min(
 						0.1,
@@ -1541,6 +1713,7 @@ export class FluffyGrass {
 						this.waterDeltaAccumulator = 0;
 					}
 				}
+				this.updateEditorPonds(dt);
 
 				if (pondVisible && now - this.lastRippleInjection >= 100) {
 					this.lastRippleInjection = now;
@@ -1591,11 +1764,16 @@ export class FluffyGrass {
 			}
 		}
 
-		if (this.currentWorld === "valley" && this.newWorldGroup.visible) {
+		if (
+			(this.currentWorld === "valley" && this.newWorldGroup.visible) ||
+			(this.activeWorldDef.kind === "custom" && this.customWorldGroup.visible)
+		) {
 			this.grassMaterial.update(this.Uniforms.uTime.value);
 			if (this.renderFrameCounter % 2 === 0) {
-				this.valleyGrassField?.updateDistanceCulling(this.camera.position);
+				// distance cull already handled above
 			}
+			updateFoliageWind(dt);
+			this.updateEditorPonds(dt);
 		}
 
 		if (!this.isGameActive) {
@@ -2011,8 +2189,15 @@ export class FluffyGrass {
 			}
 		}
 
-		this.renderer.render(this.scene, this.camera);
+		this.renderer.render(
+			this.scene,
+			this.editMode?.isEnabled ? this.editMode.activeCamera : this.camera
+		);
 		this.stats.update();
+
+		if (this.editMode?.isEnabled) {
+			this.editMode.update();
+		}
 
 		if (now - this.lastGpuPanelUpdate >= 250) {
 			this.lastGpuPanelUpdate = now;
@@ -2044,8 +2229,10 @@ export class FluffyGrass {
 			autoDayNight: this.dayNightGui.auto,
 			hour: this.dayNightGui.hour,
 			grassDensity: this.grassDensity,
+			grassCullDistance: this.grassCullDistance,
 			carPower: CAR_CONFIG.drive.engineForce,
 			world: this.currentWorld,
+			worldOptions: this.getWorldSelectOptions(),
 			onQualityChange: (quality) => this.applyGraphicsQuality(quality),
 			onPeriodChange: (period) => {
 				this.dayNight?.setPeriod(period);
@@ -2065,6 +2252,7 @@ export class FluffyGrass {
 				this.settings.setAutoDayNight(false);
 			},
 			onGrassDensityChange: (percent) => this.setGrassDensity(percent),
+			onGrassCullDistanceChange: (meters) => this.setGrassCullDistance(meters),
 			onCarPowerChange: (power) => {
 				CAR_CONFIG.drive.engineForce = power;
 			},
@@ -2087,6 +2275,8 @@ export class FluffyGrass {
 			quality === "Low" ? 4 : quality === "Medium" ? 3 : 2;
 		this.waterFrameCounter = 0;
 		this.waterDeltaAccumulator = 0;
+		this.editorWaterFrameCounter = 0;
+		this.editorWaterDeltaAccumulator = 0;
 		this.resizePondTargets();
 		if (this.volumetricFog) {
 			this.volumetricFog.group.visible = quality !== "Low";
@@ -2094,7 +2284,6 @@ export class FluffyGrass {
 	}
 
 	private resizePondTargets() {
-		if (!this.pond) return;
 		const targetScale =
 			this.graphicsQuality === "Low"
 				? 0.4
@@ -2108,16 +2297,174 @@ export class FluffyGrass {
 				: this.graphicsQuality === "Medium"
 					? 768
 					: 1024;
-		this.pond.setSize(
-			Math.min(
-				maxDimension,
-				Math.max(1, Math.floor(window.innerWidth * pixelRatio * targetScale))
-			),
-			Math.min(
-				maxDimension,
-				Math.max(1, Math.floor(window.innerHeight * pixelRatio * targetScale))
-			)
+		const w = Math.min(
+			maxDimension,
+			Math.max(1, Math.floor(window.innerWidth * pixelRatio * targetScale))
 		);
+		const h = Math.min(
+			maxDimension,
+			Math.max(1, Math.floor(window.innerHeight * pixelRatio * targetScale))
+		);
+		this.pond?.setSize(w, h);
+		for (const pond of this.editorPonds) {
+			pond.setSize(w, h);
+		}
+	}
+
+	private updateEditorPonds(dt: number) {
+		if (!this.editorPonds.length) return;
+
+		const cam = this.editMode?.isEnabled
+			? this.editMode.activeCamera
+			: this.camera;
+		cam.updateMatrixWorld();
+		this.viewProjectionMatrix.multiplyMatrices(
+			cam.projectionMatrix,
+			cam.matrixWorldInverse
+		);
+		this.viewFrustum.setFromProjectionMatrix(this.viewProjectionMatrix);
+
+		const ranked: Array<{ pond: Pond; dist: number }> = [];
+		const camPos = cam.position;
+
+		for (const pond of this.editorPonds) {
+			pond.mesh.updateWorldMatrix(true, false);
+			// Same as island pond: only draw when the camera is actually looking at it.
+			const inView = this.viewFrustum.intersectsObject(pond.mesh);
+			pond.mesh.visible = inView;
+			if (!inView) continue;
+			const dx = pond.mesh.position.x - camPos.x;
+			const dz = pond.mesh.position.z - camPos.z;
+			const dist = Math.hypot(dx, dz);
+			ranked.push({ pond, dist });
+		}
+
+		ranked.sort((a, b) => a.dist - b.dist);
+
+		// Same cadence as the island Pond: accumulate dt, then run full
+		// reflection / refraction / ripple simulation passes.
+		this.editorWaterDeltaAccumulator = Math.min(
+			0.1,
+			this.editorWaterDeltaAccumulator + dt
+		);
+		this.editorWaterFrameCounter++;
+		const interval = Math.max(1, this.waterUpdateInterval);
+		const runFull = this.editorWaterFrameCounter >= interval;
+		const simDt = runFull ? this.editorWaterDeltaAccumulator : dt;
+
+		for (let i = 0; i < ranked.length; i++) {
+			const { pond } = ranked[i]!;
+			// Nearest ponds get the full island shader pipeline.
+			if (i < 3 && runFull) {
+				pond.update(simDt, { full: true });
+			} else {
+				pond.update(dt, { full: false });
+			}
+		}
+
+		if (runFull) {
+			this.editorWaterFrameCounter = 0;
+			this.editorWaterDeltaAccumulator = 0;
+		}
+
+		this.injectEditorPondRipples();
+	}
+
+	/** Same car / human / bomb ripples as the island pond (own throttle). */
+	private injectEditorPondRipples() {
+		const now = performance.now();
+		if (now - this.lastEditorRippleInjection < 100) return;
+		let didRipple = false;
+
+		for (const pond of this.editorPonds) {
+			if (!pond.mesh.visible) continue;
+			const waterY = pond.mesh.position.y;
+			const halfW = Number(pond.mesh.userData.waterHalfW) || Number(pond.mesh.userData.waterRadius) || 10;
+			const halfD = Number(pond.mesh.userData.waterHalfD) || halfW;
+			const inBasin = (x: number, z: number) => {
+				const dx = Math.abs(x - pond.mesh.position.x);
+				const dz = Math.abs(z - pond.mesh.position.z);
+				return dx <= halfW + 1.5 && dz <= halfD + 1.5;
+			};
+
+			if (this.car?.body) {
+				const p = this.car.mesh.position;
+				if (inBasin(p.x, p.z) && Math.abs(p.y - waterY) < 2.0) {
+					const speed = this.car.body.linvel();
+					const velocity = Math.hypot(speed.x, speed.z);
+					if (velocity > 1.0) {
+						pond.createRipple({
+							position: p,
+							strength: Math.min(0.5, velocity * 0.05),
+							radius: 1.5,
+						});
+						didRipple = true;
+					}
+				}
+			}
+
+			if (this.human?.body) {
+				const p = this.human.mesh.position;
+				if (inBasin(p.x, p.z) && Math.abs(p.y - waterY) < 1.0) {
+					const speed = this.human.body.linvel();
+					const velocity = Math.hypot(speed.x, speed.z);
+					if (velocity > 0.5) {
+						pond.createRipple({
+							position: p,
+							strength: 0.1,
+							radius: 0.8,
+						});
+						didRipple = true;
+					}
+				}
+			}
+
+			for (const bomb of this.bombs) {
+				if (!bomb.body) continue;
+				const p = bomb.mesh.position;
+				if (inBasin(p.x, p.z) && Math.abs(p.y - waterY) < 0.5) {
+					const speed = bomb.body.linvel();
+					const velocity = Math.hypot(speed.x, speed.z);
+					if (velocity > 0.5) {
+						pond.createRipple({
+							position: p,
+							strength: 0.05,
+							radius: 0.5,
+						});
+						didRipple = true;
+					}
+				}
+			}
+		}
+
+		if (didRipple) this.lastEditorRippleInjection = now;
+	}
+
+	/** Hide trees / placed stones beyond ~200 m (same on every world). */
+	private updateMeshDistanceCulling(cameraPos: THREE.Vector3) {
+		const hideAt = 200;
+		const showAt = 170;
+		for (const tree of this.trees) {
+			const dx = tree.group.position.x - cameraPos.x;
+			const dz = tree.group.position.z - cameraPos.z;
+			const dist = Math.hypot(dx, dz);
+			if (tree.group.visible) {
+				if (dist > hideAt) tree.group.visible = false;
+			} else if (dist < showAt) {
+				tree.group.visible = true;
+			}
+		}
+		for (const stone of this.editorStones) {
+			const p = stone.group.position;
+			const dx = p.x - cameraPos.x;
+			const dz = p.z - cameraPos.z;
+			const dist = Math.hypot(dx, dz);
+			if (stone.group.visible) {
+				if (dist > hideAt) stone.group.visible = false;
+			} else if (dist < showAt) {
+				stone.group.visible = true;
+			}
+		}
 	}
 
 	private isObjectVisible(object: THREE.Object3D) {
@@ -2135,6 +2482,14 @@ export class FluffyGrass {
 		this.grassDensity = THREE.MathUtils.clamp(percent, 0, 100);
 		this.islandGrassField?.setDensity(this.grassDensity);
 		this.valleyGrassField?.setDensity(this.grassDensity);
+		this.customGrassField?.setDensity(this.grassDensity);
+	}
+
+	private setGrassCullDistance(meters: number) {
+		this.grassCullDistance = THREE.MathUtils.clamp(meters, 30, 250);
+		this.islandGrassField?.setCullDistance(this.grassCullDistance);
+		this.valleyGrassField?.setCullDistance(this.grassCullDistance);
+		this.customGrassField?.setCullDistance(this.grassCullDistance);
 	}
 
 	private setupInteractionUI() {
@@ -2176,7 +2531,7 @@ export class FluffyGrass {
 		const statsDom = (this.stats as unknown as { dom: HTMLElement }).dom;
 
 		statsDom.style.position = "fixed";
-		statsDom.style.bottom = "45px";
+		statsDom.style.bottom = "58px";
 		statsDom.style.right = "10px";
 		statsDom.style.left = "auto";
 		statsDom.style.top = "auto";
@@ -2213,6 +2568,295 @@ export class FluffyGrass {
 		}, 100); // small delay to ensure stats-gl has created the children
 
 		document.body.appendChild(statsDom);
+	}
+
+	private setupEditMode() {
+		this.editMode = new EditModeController({
+			scene: this.scene,
+			renderer: this.renderer,
+			playCamera: this.camera,
+			canvas: this.canvas,
+			getEditWorldGroup: () => {
+				if (this.currentWorld === "valley") return this.newWorldGroup;
+				if (this.activeWorldDef.kind === "custom") return this.customWorldGroup;
+				return this.worldGroup;
+			},
+			getTerrainMesh: () => {
+				if (this.activeWorldDef.kind === "custom") return this.customTerrainMesh;
+				if (this.currentWorld === "valley") return this.valleyTerrainMesh;
+				return this.islandTerrainMesh;
+			},
+			getTerrainHeights: () => {
+				if (this.activeWorldDef.kind === "custom") return this.customHeights;
+				if (this.currentWorld === "valley") return this.valleyHeights;
+				return this.islandHeights;
+			},
+			getTerrainHandle: () => {
+				if (this.activeWorldDef.kind === "custom") return this.customTerrainHandle;
+				return this.islandTerrainHandle;
+			},
+			setTerrainHandle: (handle) => {
+				if (this.activeWorldDef.kind === "custom") this.customTerrainHandle = handle;
+				else this.islandTerrainHandle = handle;
+			},
+			getGrassField: () => {
+				if (this.activeWorldDef.kind === "custom") return this.customGrassField;
+				if (this.currentWorld === "valley") return this.valleyGrassField;
+				return this.islandGrassField;
+			},
+			getActiveWorldDefinition: () => this.activeWorldDef,
+			getWorldDefinitionById: (worldId) => {
+				if (worldId === "island") return ISLAND_WORLD;
+				if (worldId === "valley") return VALLEY_WORLD;
+				return this.customWorldDefs.find((w) => w.id === worldId) ?? null;
+			},
+			ensureWorldDefinition: (definition) => {
+				if (definition.kind !== "custom") return;
+				if (this.customWorldDefs.some((w) => w.id === definition.id)) return;
+				this.customWorldDefs.push(definition);
+				this.persistCustomWorldDefs();
+				this.settings.setWorldOptions(this.getWorldSelectOptions());
+			},
+			enableTerrainVertexColors: () => {
+				const mesh = this.activeWorldDef.kind === "custom"
+					? this.customTerrainMesh
+					: this.currentWorld === "valley"
+						? this.valleyTerrainMesh
+						: this.islandTerrainMesh;
+				const mat = (mesh?.material as THREE.MeshPhongMaterial | undefined) ?? this.terrainMat;
+				mat.vertexColors = true;
+				// Keep albedo white so vertex greens (and mud) show at full strength.
+				mat.color.setHex(0xffffff);
+				mat.needsUpdate = true;
+			},
+			setMapMode: (enabled) => {
+				this.sceneProps.mapMode = enabled;
+				if (this.carInput) this.carInput.isEnabled = !enabled && this.isGameActive;
+				if (this.humanInput) this.humanInput.isEnabled = !enabled && this.isGameActive;
+			},
+			addEditorTree: (tree) => {
+				this.trees.push(tree);
+			},
+			addEditorStone: (stone) => {
+				this.editorStones.push(stone);
+			},
+			addEditorPond: (pond) => {
+				this.editorPonds.push(pond);
+				this.resizePondTargets();
+			},
+			removeEditorTree: (tree) => {
+				this.trees = this.trees.filter((t) => t !== tree);
+			},
+			removeEditorStone: (stone) => {
+				this.editorStones = this.editorStones.filter((s) => s !== stone);
+			},
+			removeEditorPond: (pond) => {
+				this.editorPonds = this.editorPonds.filter((p) => p !== pond);
+			},
+			getScenePropsTerrainColor: () => this.sceneProps.terrainColor,
+			isGameActive: () => this.isGameActive,
+			getRoomCode: () => this.roomCode,
+			createNewLargeWorld: async (sizeKm) => {
+				await this.createAndEnterCustomWorld(sizeKm);
+			},
+			switchToWorldId: async (worldId) => {
+				await this.switchWorld(worldId);
+			},
+			rebuildEditGrass: () => {
+				this.rebuildActiveEditGrass();
+			},
+			getAuthToken: () => this.authService.getToken(),
+			getAuthUser: () => this.userData,
+			getServerUrl: () => SERVER_URL,
+		});
+	}
+
+	private loadCustomWorldDefs() {
+		try {
+			const raw = localStorage.getItem(CUSTOM_WORLDS_KEY);
+			if (!raw) return;
+			const parsed = JSON.parse(raw) as WorldDefinition[];
+			if (!Array.isArray(parsed)) return;
+			let dirty = false;
+			this.customWorldDefs = parsed.map((def) => {
+				if (def.kind !== "custom") return def;
+				let next = def;
+				const expectedSegs = Math.min(
+					900,
+					Math.max(64, Math.round(def.size / ISLAND_TERRAIN_CELL))
+				);
+				if (Math.abs((def.segments ?? 0) - expectedSegs) > 8) {
+					next = { ...next, segments: expectedSegs };
+					dirty = true;
+				}
+				const minGrass = grassCountForSize(def.size);
+				if ((def.grassCount ?? 0) < minGrass) {
+					next = { ...next, grassCount: minGrass };
+					dirty = true;
+				}
+				return next;
+			});
+			if (dirty) this.persistCustomWorldDefs();
+		} catch {
+			this.customWorldDefs = [];
+		}
+	}
+
+	private persistCustomWorldDefs() {
+		try {
+			localStorage.setItem(CUSTOM_WORLDS_KEY, JSON.stringify(this.customWorldDefs));
+		} catch {
+			/* ignore */
+		}
+	}
+
+	private getWorldSelectOptions(): Record<string, string> {
+		const options: Record<string, string> = {
+			Island: "island",
+			Valley: "valley",
+		};
+		for (const def of this.customWorldDefs) {
+			options[def.name] = def.id;
+		}
+		return options;
+	}
+
+	private async createAndEnterCustomWorld(sizeKm = 1) {
+		const kmLabel =
+			sizeKm >= 1 ? `${sizeKm.toFixed(sizeKm % 1 === 0 ? 0 : 1)}km` : `${Math.round(sizeKm * 1000)}m`;
+		const def = createLargeBlankWorld(
+			`World ${this.customWorldDefs.length + 1} (${kmLabel})`,
+			sizeKm
+		);
+		this.customWorldDefs.push(def);
+		this.persistCustomWorldDefs();
+		this.settings.setWorldOptions(this.getWorldSelectOptions());
+		await this.switchWorld(def.id);
+	}
+
+	/** Re-sample grass after undo/redo restores terrain (roads bury blades in place). */
+	private rebuildActiveEditGrass() {
+		const mesh = this.activeWorldDef.kind === "custom"
+			? this.customTerrainMesh
+			: this.currentWorld === "valley"
+				? this.valleyTerrainMesh
+				: this.islandTerrainMesh;
+		const group =
+			this.activeWorldDef.kind === "custom"
+				? this.customWorldGroup
+				: this.currentWorld === "valley"
+					? this.newWorldGroup
+					: this.worldGroup;
+		if (!mesh || !this.grassGeometry) return;
+
+		const previousCount = this.grassCount;
+		this.grassCount = grassCountForSize(this.activeWorldDef.size);
+
+		if (this.activeWorldDef.kind === "custom") {
+			const heights = this.customHeights;
+			const segs = this.activeWorldDef.segments;
+			this.customGrassField?.dispose();
+			this.customGrassField = this.addGrass(
+				mesh,
+				this.grassGeometry,
+				group,
+				new THREE.Vector2(1e6, 1e6),
+				1.0,
+				false,
+				{
+					chunkSize: 15,
+					clearPondHole: false,
+					evenCoverage: Boolean(heights),
+					maxSlopeDeg: 65,
+					heights: heights ?? undefined,
+					nrows: segs,
+					ncols: segs,
+					terrainSize: this.activeWorldDef.size,
+				}
+			);
+			this.customGrassField.setDensity(this.grassDensity);
+		} else if (this.currentWorld === "valley") {
+			this.valleyGrassField?.dispose();
+			this.valleyGrassField = this.addGrass(
+				mesh,
+				this.grassGeometry,
+				group,
+				new THREE.Vector2(-20, 5),
+				1.0,
+				true
+			);
+			this.valleyGrassField.setDensity(this.grassDensity);
+		} else {
+			this.islandGrassField?.dispose();
+			this.islandGrassField = this.addGrass(mesh, this.grassGeometry, group);
+			this.islandGrassField.setDensity(this.grassDensity);
+		}
+		this.grassCount = previousCount;
+		this.grassMaterial.setTerrainSize(this.activeWorldDef.size);
+	}
+
+	private async buildCustomWorld(def: WorldDefinition) {
+		this.disposeCustomWorld();
+		// Same green look as island until roads need vertex colors.
+		const mat = new THREE.MeshPhongMaterial({
+			color: this.sceneProps.terrainColor,
+			shininess: 0,
+			flatShading: true,
+			vertexColors: false,
+		});
+		const { mesh, heights, nrows, ncols, size } = createProceduralTerrain(mat, def);
+		this.customTerrainMesh = mesh;
+		this.customHeights = heights;
+		this.customWorldGroup.add(mesh);
+		mesh.updateMatrixWorld(true);
+		setIslandTerrain(mesh);
+		this.customTerrainHandle = createTerrainHeightfieldCollider(
+			heights,
+			nrows,
+			ncols,
+			size
+		);
+
+		const previousCount = this.grassCount;
+		this.grassCount = grassCountForSize(def.size);
+		this.customGrassField = this.addGrass(
+			mesh,
+			this.grassGeometry,
+			this.customWorldGroup,
+			new THREE.Vector2(1e6, 1e6),
+			1.0,
+			false,
+			{
+				chunkSize: 15,
+				clearPondHole: false,
+				evenCoverage: true,
+				maxSlopeDeg: 65,
+				heights,
+				nrows,
+				ncols,
+				terrainSize: size,
+			}
+		);
+		this.grassCount = previousCount;
+		this.customGrassField.setDensity(this.grassDensity);
+		this.grassMaterial.setTerrainSize(def.size);
+	}
+
+	private disposeCustomWorld() {
+		for (const pond of this.editorPonds) {
+			pond.mesh.removeFromParent();
+			pond.dispose();
+		}
+		this.editorPonds = [];
+		for (const stone of this.editorStones) stone.dispose();
+		this.editorStones = [];
+		this.customGrassField?.dispose();
+		this.customGrassField = null;
+		this.customTerrainHandle?.dispose();
+		this.customTerrainHandle = null;
+		this.customTerrainMesh = null;
+		this.customHeights = null;
+		this.disposeWorldGroup(this.customWorldGroup);
 	}
 
 	private setupEventListeners() {
@@ -2255,13 +2899,22 @@ export class FluffyGrass {
 		}
 	}
 
+	private resolveWorldDefinition(id: GameWorldId): WorldDefinition {
+		if (id === "island") return ISLAND_WORLD;
+		if (id === "valley") return VALLEY_WORLD;
+		const custom = this.customWorldDefs.find((w) => w.id === id);
+		if (custom) return custom;
+		return ISLAND_WORLD;
+	}
+
 	private async switchWorld(target: GameWorldId) {
 		if (target === this.currentWorld || this.isWorldSwitching) return;
 
 		const previous = this.currentWorld;
-		const targetName = target === "island" ? "Island" : "Valley";
+		const previousDef = this.activeWorldDef;
+		const targetDef = this.resolveWorldDefinition(target);
 		this.isWorldSwitching = true;
-		this.worldLoading.show(targetName);
+		this.worldLoading.show(targetDef.name);
 
 		try {
 			this.worldLoading.setProgress(15, "Generating terrain and physics...");
@@ -2269,49 +2922,52 @@ export class FluffyGrass {
 
 			if (target === "island") {
 				await this.buildIslandWorld();
-				this.worldGroup.visible = true;
-			} else {
+			} else if (target === "valley") {
 				this.createValleyTerrain(0, 0, 0);
-				this.newWorldGroup.visible = true;
-			}
-			if (previous === "island") {
-				this.worldGroup.visible = false;
 			} else {
-				this.newWorldGroup.visible = false;
+				await this.buildCustomWorld(targetDef);
 			}
 
 			this.worldLoading.setProgress(65, "Compiling world graphics...");
 			await this.renderer.compileAsync(this.scene, this.camera);
 			await this.nextFrame();
 
-			this.worldLoading.setProgress(82, "Placing player safely...");
-			this.teleportPlayerToCurrentTerrain(target);
-
+			this.activeWorldDef = targetDef;
 			this.currentWorld = target;
 			this.worldGroup.visible = target === "island";
 			this.newWorldGroup.visible = target === "valley";
+			this.customWorldGroup.visible = targetDef.kind === "custom";
 			this.applyWorldEnvironment(target);
+
+			this.worldLoading.setProgress(82, "Placing player safely...");
+			this.teleportPlayerToCurrentTerrain(target);
 
 			this.worldLoading.setProgress(92, "Unloading previous world...");
 			await this.nextFrame();
-			if (previous === "island") {
-				this.disposeIslandWorld();
-			} else {
-				this.disposeValleyWorld();
+			if (previous === "island") this.disposeIslandWorld();
+			else if (previous === "valley") this.disposeValleyWorld();
+			else if (previousDef.kind === "custom" && targetDef.kind !== "custom") {
+				this.disposeCustomWorld();
 			}
-			this.renderer.renderLists.dispose();
 
+			this.renderer.renderLists.dispose();
 			this.settings.setWorld(target);
+			this.editMode?.onGameActiveChanged(this.isGameActive);
+			this.editMode?.onActiveWorldChanged();
+
 			this.worldLoading.setProgress(100, "Ready");
 			await this.nextFrame();
 			this.worldLoading.hide();
 		} catch (error) {
 			if (target === "island") this.disposeIslandWorld();
-			else this.disposeValleyWorld();
+			else if (target === "valley") this.disposeValleyWorld();
+			else this.disposeCustomWorld();
 
 			this.currentWorld = previous;
+			this.activeWorldDef = previousDef;
 			this.worldGroup.visible = previous === "island";
 			this.newWorldGroup.visible = previous === "valley";
+			this.customWorldGroup.visible = previousDef.kind === "custom";
 			this.settings.setWorld(previous);
 			const message = error instanceof Error ? error.message : "Unable to load world.";
 			this.worldLoading.showError(message);
@@ -2323,7 +2979,7 @@ export class FluffyGrass {
 
 	private teleportPlayerToCurrentTerrain(target: GameWorldId) {
 		const x = 0;
-		const z = target === "island" ? 0 : this.valleySpawn.z;
+		const z = target === "valley" ? this.valleySpawn.z : 0;
 		const groundY = getWorldTerrainY(x, z);
 
 		if (this.car) {
@@ -2345,17 +3001,25 @@ export class FluffyGrass {
 
 	private applyWorldEnvironment(world: GameWorldId) {
 		const sky = this.scene.getObjectByName("sky-dome");
-		if (world === "island") {
-			this.grassMaterial.setTerrainSize(TERRAIN_CONFIG.size);
+		const def = this.resolveWorldDefinition(world);
+		if (world === "island" || def.kind === "custom") {
+			this.grassMaterial.setTerrainSize(def.size);
 			if (this.dayNight) {
 				this.dayNight.overrideColors = false;
 				this.dayNight.setHour(this.dayNightGui.hour);
 			}
 			if (sky) sky.visible = true;
-			this.currentFogRadius = 65;
+			this.currentFogRadius = def.kind === "custom" ? 90 : 65;
 			this.grassMaterial.uniforms.baseColor.value.set("#313f1b");
 			this.grassMaterial.uniforms.tipColor1.value.set("#5e875e");
 			this.grassMaterial.uniforms.tipColor2.value.set("#1f352a");
+			this.scene.background = new THREE.Color(
+				def.kind === "custom" ? "#87a4c0" : this.sceneProps.fogColor
+			);
+			if (this.scene.fog instanceof THREE.FogExp2) {
+				this.scene.fog.color.copy(this.scene.background as THREE.Color);
+				this.scene.fog.density = def.kind === "custom" ? 0.0035 : this.sceneProps.fogDensity;
+			}
 		} else {
 			this.grassMaterial.setTerrainSize(200);
 			if (this.dayNight) this.dayNight.overrideColors = true;
@@ -2378,6 +3042,15 @@ export class FluffyGrass {
 		this.pond?.dispose();
 		this.pond = undefined;
 
+		for (const pond of this.editorPonds) {
+			pond.mesh.removeFromParent();
+			pond.dispose();
+		}
+		this.editorPonds = [];
+
+		for (const stone of this.editorStones) stone.dispose();
+		this.editorStones = [];
+
 		this.pondStones?.dispose();
 		this.pondStones = null;
 		this.islandGrassField?.dispose();
@@ -2391,6 +3064,8 @@ export class FluffyGrass {
 
 		this.islandTerrainHandle?.dispose();
 		this.islandTerrainHandle = null;
+		this.islandTerrainMesh = null;
+		this.islandHeights = null;
 		this.proceduralBridge?.dispose();
 		this.proceduralBridge?.group.removeFromParent();
 		this.proceduralBridge = null;
@@ -2567,6 +3242,7 @@ export class FluffyGrass {
 		newTerrain.position.set(centerX, 0, centerZ);
 		newTerrain.receiveShadow = true;
 		this.newWorldGroup.add(newTerrain);
+		this.valleyTerrainMesh = newTerrain;
 		newTerrain.updateMatrixWorld(true);
 		setIslandTerrain(newTerrain);
 		this.valleySpawn.set(centerX, bridgeEndHeight + 4, bridgeEndZ + 5);
@@ -2588,6 +3264,7 @@ export class FluffyGrass {
 			const row = Math.floor(i / (resolution + 1));
 			heights[col * (resolution + 1) + row] = posAttr.getY(i);
 		}
+		this.valleyHeights = heights;
 
 		const bodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(centerX, 0, centerZ);
 		const body = getWorld().createRigidBody(bodyDesc);

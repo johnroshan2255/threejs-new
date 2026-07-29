@@ -63,6 +63,12 @@ export interface WaterOptions {
   circular?: boolean;
 
   /**
+   * Optional custom water surface (already in local XZ, Y-up).
+   * When set, this replaces the default plane; width/height still size the ripple sim.
+   */
+  geometry?: import('three').BufferGeometry;
+
+  /**
    * Host WebGL renderer. Required for reflection / refraction / GPU simulation.
    */
   renderer?: WebGLRenderer;
@@ -78,6 +84,6 @@ export interface WaterOptions {
  * Fully resolved options after defaults are applied.
  */
 export type ResolvedWaterOptions = Required<
-  Omit<WaterOptions, 'renderer' | 'scene' | 'camera' | 'sunDirection'>
+  Omit<WaterOptions, 'renderer' | 'scene' | 'camera' | 'sunDirection' | 'geometry'>
 > &
-  Pick<WaterOptions, 'renderer' | 'scene' | 'camera' | 'sunDirection'>;
+  Pick<WaterOptions, 'renderer' | 'scene' | 'camera' | 'sunDirection' | 'geometry'>;
