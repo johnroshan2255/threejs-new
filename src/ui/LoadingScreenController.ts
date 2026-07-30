@@ -1,8 +1,9 @@
-import { AuthService } from "../auth/AuthService";
+import { AuthService, type AuthUser } from "../auth/AuthService";
 
 type LoadingScreenOptions = {
 	auth: AuthService;
 	onPlay: () => void;
+	onAccountCreated?: (user: AuthUser) => void;
 };
 
 export class LoadingScreenController {
@@ -44,8 +45,9 @@ export class LoadingScreenController {
 
 			submitAccountButton.disabled = true;
 			try {
-				await this.options.auth.register(username, email);
-				this.showMessage(message, "Account created. You can play now and log in from the game.", false);
+				const user = await this.options.auth.register(username, email);
+				this.options.onAccountCreated?.(user);
+				this.showMessage(message, "Account created — you're logged in.", false);
 				if (usernameInput) usernameInput.value = "";
 				if (emailInput) emailInput.value = "";
 				window.setTimeout(() => {

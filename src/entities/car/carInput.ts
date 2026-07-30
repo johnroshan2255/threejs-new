@@ -24,6 +24,11 @@ export class CarInput {
 		return this.horn.isPlaying;
 	}
 
+	/** Call when leaving the car so the horn can't keep blaring. */
+	public releaseControls() {
+		this.clearKeys();
+	}
+
 	setMobileControls(mobile: MobileControls | null) {
 		this.mobile = mobile;
 	}
@@ -63,10 +68,11 @@ export class CarInput {
 		e.preventDefault();
 
 		if (e.code === "KeyE") {
-			this.horn.stop();
+			if (this.isEnabled) this.horn.stop();
 			return;
 		}
 
+		if (!this.isEnabled) return;
 		this.set(e, false);
 	};
 

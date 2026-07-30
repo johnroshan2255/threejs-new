@@ -5,10 +5,21 @@ export type AuthUser = {
 };
 
 type AuthResponse = {
-	user?: AuthUser;
+	user?: AuthUser & { _id?: string };
 	token?: string;
 	error?: string;
 };
+
+function normalizeUser(raw: AuthUser & { _id?: string } | null | undefined): AuthUser | null {
+	if (!raw) return null;
+	const id = raw.id ?? (raw._id != null ? String(raw._id) : undefined);
+	if (!id) return { username: raw.username, email: raw.email };
+	return {
+		id,
+		username: raw.username,
+		email: raw.email,
+	};
+}
 
 export class AuthService {
 	private readonly tokenKey = "authToken";
@@ -30,13 +41,13 @@ export class AuthService {
 				return null;
 			}
 
-			return data.user;
+			return normalizeUser(data.user);
 		} catch {
 			return null;
 		}
 	}
 
-	async register(username: string, email: string): Promise<void> {
+	async register(username: string, email: string): Promise<AuthUser> {
 		const response = await fetch(`${this.serverUrl}/api/auth/register`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
@@ -47,6 +58,16 @@ export class AuthService {
 		if (!response.ok) {
 			throw new Error(data.error || "Failed to create account.");
 		}
+
+		if (data.token) {
+			localStorage.setItem(this.tokenKey, data.token);
+		}
+
+		const user = normalizeUser(data.user);
+		if (!user?.id) {
+			throw new Error("Account created but user id was missing.");
+		}
+		return user;
 	}
 
 	async login(email: string): Promise<AuthUser> {
@@ -65,7 +86,11 @@ export class AuthService {
 			localStorage.setItem(this.tokenKey, data.token);
 		}
 
-		return data.user;
+		const user = normalizeUser(data.user);
+		if (!user?.id) {
+			throw new Error("Login succeeded but user id was missing.");
+		}
+		return user;
 	}
 
 	logout(): void {

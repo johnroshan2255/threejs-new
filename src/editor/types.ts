@@ -159,15 +159,28 @@ export type WorldEditRequestSnapshotMessage = {
 	roomCode: string;
 };
 
+export type WorldSavedMessage = {
+	kind: "world-saved";
+	worldId: string;
+	roomCode?: string;
+	document: WorldEditDocument;
+	definition?: import("../worlds/worldTypes").WorldDefinition | null;
+	updatedAt: number;
+};
+
 export type WorldEditWireMessage =
 	| WorldEditOpMessage
 	| WorldEditSnapshotMessage
-	| WorldEditRequestSnapshotMessage;
+	| WorldEditRequestSnapshotMessage
+	| WorldSavedMessage;
 
 export const WORLD_EDIT_SOCKET = {
 	op: "world-edit-op",
 	snapshot: "world-edit-snapshot",
 	requestSnapshot: "world-edit-request-snapshot",
+	/** Authoritative publish after owner Save World (HTTP PUT + socket). */
+	saved: "world-saved",
+	watchWorld: "watch-world",
 } as const;
 
 /**

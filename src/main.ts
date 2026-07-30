@@ -41,6 +41,10 @@ import {
 	type PondStoneHandle,
 	type PlacedStoneHandle,
 } from "./entities/stone";
+import {
+	placeScenicProp,
+	type ScenicPropHandle,
+} from "./entities/props";
 import { GrassChunkField, DEFAULT_GRASS_CULL_DISTANCE } from "./entities/grass";
 import { EditModeController } from "./editor/EditModeController";
 import {
@@ -61,6 +65,10 @@ import {
 	type DayPeriod,
 } from "./environment/dayNightCycle";
 import { createFireflies, type Fireflies } from "./environment/fireflies";
+import {
+	createLampFireflyGlow,
+	type LampFireflyGlow,
+} from "./environment/lampFireflyGlow";
 import { VolumetricFogSystem } from "./environment/VolumetricFogSystem";
 import { SmokeTrailSystem } from "./environment/smokeTrail";
 import { ExplosionSystem } from "./environment/ExplosionSystem";
@@ -96,6 +104,8 @@ type RemotePlayer = {
 	targetCarQuaternion: THREE.Quaternion;
 	isBeingCarried?: boolean;
 	isCarryingPlayer?: boolean;
+	/** Occupied island bench seat (0 | 1), or null if not sitting. */
+	benchSeat?: 0 | 1 | null;
 };
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:3000";
@@ -192,6 +202,17 @@ export class FluffyGrass {
 	private trees: TreeHandle[] = [];
 	private editorStones: PlacedStoneHandle[] = [];
 	private editorPonds: Pond[] = [];
+	private islandScenicProps: ScenicPropHandle[] = [];
+	private lampFireflyGlow: LampFireflyGlow | null = null;
+	/** Island bench: two seats along the plank. */
+	private benchInteract: {
+		seats: [THREE.Vector3, THREE.Vector3];
+		yaw: number;
+	} | null = null;
+	private sitState: "none" | "entering" | "sitting" | "exiting" = "none";
+	private sitTimer = 0;
+	/** Which seat we occupy (0 = left, 1 = right). */
+	private sitSeatIndex: 0 | 1 | null = null;
 	private islandTerrainMesh: THREE.Mesh | null = null;
 	private islandHeights: Float32Array | null = null;
 	private editMode: EditModeController | null = null;
@@ -230,6 +251,8 @@ export class FluffyGrass {
 		bg: THREE.Color;
 		volVisible: boolean;
 	} | null = null;
+	/** Day/night state while editing — editor uses fixed noon; peers keep their own cycle. */
+	private editDayNightBackup: { auto: boolean; hour: number } | null = null;
 	private lastFrameTime = performance.now();
 	private frameFireflyIntensity = 0;
 	private frameHeadAmount = 0;
@@ -365,8 +388,10 @@ export class FluffyGrass {
 				this.userData = user;
 				this.isGameActive = true;
 				this.settings.show();
-				if (this.carInput) this.carInput.isEnabled = true;
-				if (this.humanInput) this.humanInput.isEnabled = true;
+				if (this.carInput) this.carInput.isEnabled = this.activePlayer === "car";
+				if (this.humanInput) {
+					this.humanInput.isEnabled = this.activePlayer === "human";
+				}
 				this.gameNavigation?.show();
 				this.editMode?.onGameActiveChanged(true);
 				void this.tryOpenSharedWorldFromUrl();
@@ -406,6 +431,7 @@ export class FluffyGrass {
 				auth: this.authService,
 				onUserChanged: (user) => {
 					this.userData = user;
+					this.editMode?.onAuthChanged();
 				},
 				onHost: () => this.connectSocket("host"),
 				onJoin: () => this.fetchRooms(),
@@ -420,6 +446,11 @@ export class FluffyGrass {
 			this.loadingScreenController = new LoadingScreenController({
 				auth: this.authService,
 				onPlay: () => proceed("play", this.userData),
+				onAccountCreated: (user) => {
+					this.userData = user;
+					this.gameNavigation?.setUser(user);
+					this.editMode?.onAuthChanged();
+				},
 			});
 			this.loadingScreenController.initialize();
 
@@ -476,7 +507,10 @@ export class FluffyGrass {
 		if (this.socket) return;
 		const { io } = await import("socket.io-client");
 		if (this.socket) return;
-		this.socket = io(SERVER_URL);
+		this.socket = io(SERVER_URL, {
+			transports: ["websocket"],
+			upgrade: false
+		  });
 		this.editMode?.attachSocket(this.socket);
 
 			this.socket.on("room-updated", (players: any[]) => {
@@ -708,7 +742,7 @@ export class FluffyGrass {
 					const humanDesc = RAPIER.RigidBodyDesc.kinematicPositionBased();
 					const humanBody = getWorld().createRigidBody(humanDesc);
 					const humanCollider = RAPIER.ColliderDesc.capsule(humanHalfHeight, humanRadius)
-						.setTranslation(0, 2.4, 0); // Offset upwards from feet
+						.setTranslation(0, HumanEntity.MESH_Y_OFFSET, 0); // Offset upwards from feet
 					getWorld().createCollider(humanCollider, humanBody);
 
 					const hx = Math.max(0.1, (layout.chassisSize.x / 2) - CAR_CONFIG.colliderRoundness);
@@ -767,6 +801,9 @@ export class FluffyGrass {
 				} else if (!state.honking && rp.hornSound.isPlaying) {
 					rp.hornSound.stop();
 				}
+
+				rp.benchSeat =
+					state.benchSeat === 0 || state.benchSeat === 1 ? state.benchSeat : null;
 
 				if (state.activeEntity === "human") {
 					rp.carGroup.visible = true; // Wait, actually should carGroup be true here? Yes, if they left it. But humanGroup should be true too!
@@ -1019,6 +1056,7 @@ export class FluffyGrass {
 		grassGeometry: THREE.BufferGeometry,
 		targetGroup: THREE.Group,
 		pondLocalPos: THREE.Vector2 = new THREE.Vector2(-20, 5),
+		/** Blade height only (1 = full). Does not change XZ / chunk coverage width. */
 		grassHeightMultiplier: number = 1.0,
 		isNewWorld: boolean = false,
 		options?: {
@@ -1038,6 +1076,8 @@ export class FluffyGrass {
 		const clearPondHole = options?.clearPondHole !== false;
 		const maxSlopeDeg = options?.maxSlopeDeg ?? 65;
 		const minNormalY = Math.cos((maxSlopeDeg * Math.PI) / 180);
+		// Shader tip lift is world-space after instanceMatrix — keep it in sync with Y scale.
+		this.grassMaterial.setBladeHeightScale(grassHeightMultiplier);
 
 		const position = new THREE.Vector3();
 		const quaternion = new THREE.Quaternion();
@@ -1066,10 +1106,12 @@ export class FluffyGrass {
 			}
 
 			const randomVariation = 0.8 + Math.random() * 0.4;
+			// X/Z = blade / footprint width (unchanged by height multiplier).
+			// Y = blade height only.
 			scale.set(
-				randomVariation * grassHeightMultiplier,
+				randomVariation,
 				heightScale * randomVariation * grassHeightMultiplier,
-				randomVariation * grassHeightMultiplier
+				randomVariation
 			);
 
 			quaternion.setFromUnitVectors(yAxis, normal);
@@ -1249,7 +1291,13 @@ export class FluffyGrass {
 			}
 		}
 
-		this.islandGrassField = this.addGrass(mesh, this.grassGeometry, this.worldGroup);
+		this.islandGrassField = this.addGrass(
+			mesh,
+			this.grassGeometry,
+			this.worldGroup,
+			new THREE.Vector2(-20, 5),
+			0.6 // blade height only (XZ / chunk coverage unchanged)
+		);
 
 		console.log(
 			`[FluffyGrass] terrain ${TERRAIN_CONFIG.size}×${TERRAIN_CONFIG.size}, grass=${this.grassCount}`
@@ -1260,6 +1308,7 @@ export class FluffyGrass {
 		await this.loadModels();
 		await this.setupPondStones();
 		await this.setupTrees();
+		await this.setupIslandScenicProps();
 		await this.createBombs();
 		this.proceduralBridge = new ProceduralBridge(
 			getWorld(),
@@ -1269,6 +1318,86 @@ export class FluffyGrass {
 			200
 		);
 		this.scene.add(this.proceduralBridge.group);
+	}
+
+	/**
+	 * Bridge near top-center; props on the RIGHT side of the world.
+	 * Looking +Z toward the bridge, right = +X. Island is 200 m (−100…100).
+	 */
+	private async setupIslandScenicProps() {
+		for (const prop of this.islandScenicProps) prop.dispose();
+		this.islandScenicProps = [];
+
+		const placements = [
+			{
+				// Wooden sign — a bit more left (+top) from the bench cluster
+				assetUrl: "/models/wooden_sign.glb",
+				position: { x: 70, z: 75 },
+				targetHeight: 9.6,
+				rotationY: Math.PI * 0.1,
+			},
+			{
+				// Lamp ~0.8 m from the bench
+				assetUrl: "/models/medieval_lamp_post.glb",
+				position: { x: 68, z: -52 },
+				targetHeight: 8,
+				rotationY: -Math.PI * 0.8,
+			},
+			{
+				// Bench — seat height for a human (~knee / sit height)
+				assetUrl: "/models/bench.glb",
+				position: { x: 69.5, z: -46 },
+				targetHeight: 0.55,
+				rotationY: -Math.PI * 0.55,
+			},
+		] as const;
+
+		const placed = await Promise.all(
+			placements.map((p) =>
+				placeScenicProp({
+					...p,
+					withCollider: true,
+					manager: this.loadingManager,
+				})
+			)
+		);
+		this.islandScenicProps = placed;
+		for (const prop of placed) this.worldGroup.add(prop.group);
+
+		const bench = placed.find((p) => p.group.userData.assetUrl === "/models/bench.glb");
+		if (bench) {
+			bench.group.updateMatrixWorld(true);
+			const box = new THREE.Box3().setFromObject(bench.group);
+			const center = new THREE.Vector3();
+			const size = new THREE.Vector3();
+			box.getCenter(center);
+			box.getSize(size);
+			const yaw = -Math.PI * 0.55;
+			// Along the bench plank (local +X after yaw).
+			const along = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
+			const halfSpan = Math.max(size.x, size.z) * 0.28;
+			const seatY = box.max.y;
+			const left = center.clone().addScaledVector(along, -halfSpan);
+			const right = center.clone().addScaledVector(along, halfSpan);
+			left.y = seatY;
+			right.y = seatY;
+			this.benchInteract = {
+				seats: [left, right],
+				yaw,
+			};
+		} else {
+			this.benchInteract = null;
+		}
+
+		// Big firefly-style glow at the lamp (same look as night bugs). Tweak position later.
+		this.lampFireflyGlow?.dispose();
+		this.lampFireflyGlow = createLampFireflyGlow({
+			x: 68,
+			z: -50,
+			heightAboveGround: 5.2,
+			size: 5.5,
+		});
+		this.worldGroup.add(this.lampFireflyGlow.points);
 	}
 
 	private async setupPondStones() {
@@ -1583,7 +1712,7 @@ export class FluffyGrass {
 			const worldPos = new THREE.Vector3();
 			worldPos.copy(this.human.mesh.position);
 			worldPos.y += 1.5; 
-			worldPos.y += 2.4; // Account for physics body offset so they don't spawn underground!
+			worldPos.y += HumanEntity.MESH_Y_OFFSET; // Account for physics body offset so they don't spawn underground!
 			worldPos.addScaledVector(forward, 1.5);
 			
 			const vel = {
@@ -1833,6 +1962,9 @@ export class FluffyGrass {
 			this.carHeadlights?.setIntensity(headAmount);
 			this.frameFireflyIntensity = fireflyIntensity;
 			this.frameHeadAmount = headAmount;
+
+			// Lamp glow: same evening/night curve as fireflies (big soft sprite).
+			this.lampFireflyGlow?.setIntensity(fireflyIntensity);
 		}
 
 		if (!this.isWorldSwitching && this.isGameActive && this.car && this.carInput && this.chaseCameraInput && this.human && this.humanInput) {
@@ -1844,7 +1976,7 @@ export class FluffyGrass {
 				if (this.activePlayer === "car") {
 					this.carInput.applyInput(dt);
 				} else {
-					if (!this.isBeingCarriedBy) {
+					if (!this.isBeingCarriedBy && this.sitState === "none") {
 						this.humanInput.isEnabled = true;
 						this.humanInput.update(dt, this.camera);
 					} else {
@@ -1864,7 +1996,7 @@ export class FluffyGrass {
 					worldPos.addScaledVector(forward, 0.65); // Move forward into hands (increased distance)
 					worldPos.addScaledVector(right, 0.7); // Move to the right side (centered slightly more)
 					worldPos.y += 1.4; // Hands height for mesh
-					worldPos.y += 2.4; // Add physics body offset
+					worldPos.y += HumanEntity.MESH_Y_OFFSET; // Add physics body offset
 					
 					this.human.body.setTranslation(worldPos, true);
 					this.human.body.setLinvel({x:0, y:0, z:0}, true);
@@ -2001,6 +2133,8 @@ export class FluffyGrass {
 				}
 			}
 
+			this.updateBenchSit(dt);
+
 			// Update car entry/exit UI prompt
 			if (this.interactionPrompt) {
 				if (this.activePlayer === "car") {
@@ -2035,6 +2169,15 @@ export class FluffyGrass {
 						this.interactionPrompt.style.alignItems = "center";
 						this.interactionPrompt.style.justifyContent = "center";
 						this.interactionPrompt.textContent = "U";
+					} else if (
+						this.sitState === "sitting" ||
+						this.sitState === "entering" ||
+						(this.isNearBench() && this.getFreeBenchSeat() != null)
+					) {
+						this.interactionPrompt.style.display = "flex";
+						this.interactionPrompt.style.alignItems = "center";
+						this.interactionPrompt.style.justifyContent = "center";
+						this.interactionPrompt.textContent = "E";
 					} else if (holdingBomb || nearestBombDist < 3.0) {
 						this.interactionPrompt.style.display = "flex";
 						this.interactionPrompt.style.alignItems = "center";
@@ -2134,7 +2277,12 @@ export class FluffyGrass {
 				const state: any = {
 					activeEntity: this.activePlayer,
 					speed: this.carController ? this.carController.getSpeed() : 0,
-					throttle: this.carController ? this.carController.getThrottle() : 0
+					throttle: this.carController ? this.carController.getThrottle() : 0,
+					honking: this.carInput?.isHonking ?? false,
+					benchSeat:
+						this.sitState === "sitting" || this.sitState === "entering"
+							? this.sitSeatIndex
+							: null,
 				};
 
 				if (this.human) {
@@ -2618,6 +2766,8 @@ export class FluffyGrass {
 			if (!this.isGameActive) return;
 			if (this.interactionPrompt!.textContent === "U") {
 				this.tryTogglePlayer();
+			} else if (this.interactionPrompt!.textContent === "E") {
+				this.tryToggleBenchSit();
 			} else if (this.interactionPrompt!.textContent === "T") {
 				if (this.humanInput) {
 					this.humanInput.triggerPickup();
@@ -2731,10 +2881,19 @@ export class FluffyGrass {
 				mat.color.setHex(0xffffff);
 				mat.needsUpdate = true;
 			},
-			setMapMode: (enabled) => {
+	setMapMode: (enabled) => {
 				this.sceneProps.mapMode = enabled;
-				if (this.carInput) this.carInput.isEnabled = !enabled && this.isGameActive;
-				if (this.humanInput) this.humanInput.isEnabled = !enabled && this.isGameActive;
+				if (this.carInput) {
+					this.carInput.isEnabled =
+						!enabled && this.isGameActive && this.activePlayer === "car";
+				}
+				if (this.humanInput) {
+					this.humanInput.isEnabled =
+						!enabled &&
+						this.isGameActive &&
+						this.activePlayer === "human" &&
+						this.sitState === "none";
+				}
 				this.applyEditMapAtmosphere(enabled);
 			},
 			addEditorTree: (tree) => {
@@ -2765,6 +2924,7 @@ export class FluffyGrass {
 			switchToWorldId: async (worldId) => {
 				await this.switchWorld(worldId);
 			},
+			listLocalCustomWorlds: () => [...this.customWorldDefs],
 			rebuildEditGrass: () => {
 				this.rebuildActiveEditGrass();
 			},
@@ -2864,7 +3024,7 @@ export class FluffyGrass {
 				this.grassGeometry,
 				group,
 				new THREE.Vector2(1e6, 1e6),
-				1.0,
+				0.6,
 				false,
 				{
 					chunkSize: 15,
@@ -2885,13 +3045,19 @@ export class FluffyGrass {
 				this.grassGeometry,
 				group,
 				new THREE.Vector2(-20, 5),
-				1.0,
+				0.3,
 				true
 			);
 			this.valleyGrassField.setDensity(this.grassDensity);
 		} else {
 			this.islandGrassField?.dispose();
-			this.islandGrassField = this.addGrass(mesh, this.grassGeometry, group);
+			this.islandGrassField = this.addGrass(
+				mesh,
+				this.grassGeometry,
+				group,
+				new THREE.Vector2(-20, 5),
+				0.6 // blade height only
+			);
 			this.islandGrassField.setDensity(this.grassDensity);
 		}
 		this.grassCount = previousCount;
@@ -2928,7 +3094,7 @@ export class FluffyGrass {
 			this.grassGeometry,
 			this.customWorldGroup,
 			new THREE.Vector2(1e6, 1e6),
-			1.0,
+			0.6,
 			false,
 			{
 				chunkSize: 15,
@@ -2973,10 +3139,145 @@ export class FluffyGrass {
 
 		window.addEventListener("keydown", (e) => {
 			if (!this.isGameActive) return;
-			if (e.key.toLowerCase() === "u") {
+			const key = (e.key ?? "").toLowerCase();
+			if (key === "u") {
 				this.tryTogglePlayer();
+			} else if (key === "e") {
+				this.tryToggleBenchSit();
 			}
 		});
+	}
+
+	private isNearBench(): boolean {
+		if (!this.human || !this.benchInteract) return false;
+		if (this.activePlayer !== "human") return false;
+		const p = this.human.mesh.position;
+		for (const s of this.benchInteract.seats) {
+			if (Math.hypot(p.x - s.x, p.z - s.z) < 2.6) return true;
+		}
+		return false;
+	}
+
+	/** First free seat index, or null if both taken (local + remotes). */
+	private getFreeBenchSeat(): 0 | 1 | null {
+		const taken = new Set<0 | 1>();
+		if (
+			this.sitSeatIndex != null &&
+			(this.sitState === "sitting" ||
+				this.sitState === "entering" ||
+				this.sitState === "exiting")
+		) {
+			taken.add(this.sitSeatIndex);
+		}
+		for (const rp of this.remotePlayers.values()) {
+			if (rp.benchSeat === 0 || rp.benchSeat === 1) taken.add(rp.benchSeat);
+		}
+		if (!taken.has(0)) return 0;
+		if (!taken.has(1)) return 1;
+		return null;
+	}
+
+	/** Sit / stand on the island bench (E). */
+	private tryToggleBenchSit() {
+		if (!this.human || !this.humanInput || !this.benchInteract) return;
+		if (this.activePlayer !== "human") return;
+		if (this.sitState === "entering" || this.sitState === "exiting") return;
+		if (this.humanInput.isRecovering()) return;
+
+		if (this.sitState === "sitting") {
+			this.beginStandFromBench();
+			return;
+		}
+		if (this.sitState === "none" && this.isNearBench()) {
+			const seat = this.getFreeBenchSeat();
+			if (seat == null) return; // Both seats full — no E / no sit
+			this.beginSitOnBench(seat);
+		}
+	}
+
+	private beginSitOnBench(seatIndex: 0 | 1) {
+		if (!this.human || !this.humanInput || !this.benchInteract) return;
+		const seat = this.benchInteract.seats[seatIndex];
+		const yaw = this.benchInteract.yaw;
+		this.sitSeatIndex = seatIndex;
+
+		this.humanInput.isEnabled = false;
+		this.human.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+		this.human.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+
+		// Place feet on ground at this side of the bench; sit anim lowers hips onto the seat.
+		const groundY = getWorldTerrainY(seat.x, seat.z);
+		const bodyY = groundY + HumanEntity.MESH_Y_OFFSET;
+		this.human.body.setTranslation({ x: seat.x, y: bodyY, z: seat.z }, true);
+
+		const q = new THREE.Quaternion().setFromAxisAngle(
+			new THREE.Vector3(0, 1, 0),
+			yaw + Math.PI
+		);
+		this.human.body.setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }, true);
+		this.human.mesh.quaternion.copy(q);
+
+		const duration = this.human.playAnimation("stand to sit");
+		this.sitState = "entering";
+		this.sitTimer = duration > 0 ? duration : 1.2;
+	}
+
+	private beginStandFromBench() {
+		if (!this.human) return;
+		const duration = this.human.playAnimation("sit to stand");
+		this.sitState = "exiting";
+		this.sitTimer = duration > 0 ? duration : 1.2;
+	}
+
+	private updateBenchSit(dt: number) {
+		if (!this.human || this.sitState === "none") return;
+
+		// Keep seated pose locked on our seat while sitting / transitioning.
+		if (
+			this.benchInteract &&
+			this.sitSeatIndex != null &&
+			(this.sitState === "entering" || this.sitState === "sitting")
+		) {
+			const seat = this.benchInteract.seats[this.sitSeatIndex];
+			const yaw = this.benchInteract.yaw;
+			const groundY = getWorldTerrainY(seat.x, seat.z);
+			const sitRootY = Math.max(groundY, seat.y - 0.48);
+			const bodyY = sitRootY + HumanEntity.MESH_Y_OFFSET;
+			this.human.body.setTranslation({ x: seat.x, y: bodyY, z: seat.z }, true);
+			this.human.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+			const q = new THREE.Quaternion().setFromAxisAngle(
+				new THREE.Vector3(0, 1, 0),
+				yaw + Math.PI
+			);
+			this.human.body.setRotation({ x: q.x, y: q.y, z: q.z, w: q.w }, true);
+			this.human.mesh.quaternion.copy(q);
+		}
+
+		if (this.sitState === "entering") {
+			this.sitTimer -= dt;
+			if (this.sitTimer <= 0) {
+				this.human.playAnimation("Sitting");
+				this.sitState = "sitting";
+			}
+			return;
+		}
+
+		if (this.sitState === "sitting") {
+			this.human.playAnimation("Sitting");
+			return;
+		}
+
+		if (this.sitState === "exiting") {
+			this.sitTimer -= dt;
+			if (this.sitTimer <= 0) {
+				this.human.playAnimation("idle");
+				this.sitState = "none";
+				this.sitSeatIndex = null;
+				if (this.humanInput && this.activePlayer === "human") {
+					this.humanInput.isEnabled = true;
+				}
+			}
+		}
 	}
 
 	private tryTogglePlayer() {
@@ -2985,18 +3286,32 @@ export class FluffyGrass {
 		if (this.activePlayer === "car") {
 			// Switch to human (can exit car anytime)
 			this.activePlayer = "human";
+			if (this.carInput) {
+				this.carInput.isEnabled = false;
+				this.carInput.releaseControls();
+			}
 			const spawnPos = this.car.mesh.position.clone();
 			spawnPos.x += 3;
 			spawnPos.y += 1;
 			this.human.body.setTranslation(spawnPos, true);
 			this.human.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
 			this.human.mesh.visible = true;
+			if (this.humanInput && this.sitState === "none") {
+				this.humanInput.isEnabled = true;
+			}
 		} else {
 			// Switch to car (must be near car)
 			const distToCar = this.human.mesh.position.distanceTo(this.car.mesh.position);
 			if (distToCar > 3.0) return; // Too far from car
 
+			// Cancel bench sit if leaving for the car
+			this.sitState = "none";
+			this.sitTimer = 0;
+			this.sitSeatIndex = null;
+			if (this.humanInput) this.humanInput.isEnabled = false;
+
 			this.activePlayer = "car";
+			if (this.carInput) this.carInput.isEnabled = true;
 			this.human.body.setTranslation(new THREE.Vector3(0, -100, 0), true);
 			this.human.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
 			this.human.mesh.visible = false;
@@ -3169,8 +3484,30 @@ export class FluffyGrass {
 				bg,
 				volVisible: this.volumetricFog?.group.visible ?? false,
 			};
+			// Local editor only: lock noon lighting. Other clients keep their own day/night.
+			if (this.dayNight && !this.editDayNightBackup) {
+				this.editDayNightBackup = {
+					auto: this.dayNight.auto,
+					hour: this.dayNight.hour,
+				};
+				this.dayNight.setPeriod("noon");
+				this.dayNight.auto = false;
+				this.dayNightGui.auto = false;
+				this.dayNightGui.period = "noon";
+				this.dayNightGui.hour = this.dayNight.hour;
+			}
 			this.suppressFogForEditMode();
 			return;
+		}
+
+		if (this.editDayNightBackup && this.dayNight) {
+			const { auto, hour } = this.editDayNightBackup;
+			this.editDayNightBackup = null;
+			this.dayNight.setHour(hour);
+			this.dayNight.auto = auto;
+			this.dayNightGui.auto = auto;
+			this.dayNightGui.hour = hour;
+			this.dayNightGui.period = this.dayNight.period;
 		}
 
 		const backup = this.editFogBackup;
@@ -3213,6 +3550,14 @@ export class FluffyGrass {
 
 		for (const tree of this.trees) tree.dispose();
 		this.trees = [];
+		for (const prop of this.islandScenicProps) prop.dispose();
+		this.islandScenicProps = [];
+		this.benchInteract = null;
+		this.sitState = "none";
+		this.sitTimer = 0;
+		this.sitSeatIndex = null;
+		this.lampFireflyGlow?.dispose();
+		this.lampFireflyGlow = null;
 		this.fireflies?.dispose();
 		this.fireflies = null;
 		this.disposeBombs();

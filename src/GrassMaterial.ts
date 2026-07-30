@@ -7,6 +7,7 @@ interface GrassUniformsInterface {
 	uShadowDarkness?: { value: number };
 	uGrassLightIntensity?: { value: number };
 	uNoiseScale?: { value: number };
+	uBladeHeightScale?: { value: number };
 	uTerrainSize?: { value: number };
 	uPlayerPosition?: { value: THREE.Vector3 };
 	baseColor?: { value: THREE.Color };
@@ -32,6 +33,8 @@ export class GrassMaterial {
 		uShadowDarkness: { value: 0.5 },
 		uGrassLightIntensity: { value: 1 },
 		uNoiseScale: { value: 1.5 },
+		/** Scales tip stretch / wind — must match blade instance height or grass stays tall. */
+		uBladeHeightScale: { value: 0.6 },
 		uTerrainSize: { value: 140 },
 		uPlayerPosition: { value: new THREE.Vector3() },
 		baseColor: { value: new THREE.Color(this.grassColorProps.baseColor) },
@@ -74,6 +77,11 @@ export class GrassMaterial {
 		this.uniforms.uTime.value = delta;
 	}
 
+	/** Blade visual height (1 = original). Affects shader tip lift + wind amp. */
+	setBladeHeightScale(scale: number) {
+		this.uniforms.uBladeHeightScale.value = Math.max(0.05, scale);
+	}
+
 	private setupGrassMaterial(material: THREE.Material) {
 		material.onBeforeCompile = (shader) => {
 			shader.uniforms = {
@@ -86,6 +94,7 @@ export class GrassMaterial {
 				uShadowDarkness: this.uniforms.uShadowDarkness,
 				uGrassLightIntensity: this.uniforms.uGrassLightIntensity,
 				uNoiseScale: this.uniforms.uNoiseScale,
+				uBladeHeightScale: this.uniforms.uBladeHeightScale,
 				uTerrainSize: this.uniforms.uTerrainSize,
 				uNoiseTexture: this.uniforms.noiseTexture,
 				uGrassAlphaTexture: this.uniforms.grassAlphaTexture,
@@ -101,6 +110,7 @@ export class GrassMaterial {
       #include <shadowmap_pars_vertex>
       uniform sampler2D uNoiseTexture;
       uniform float uNoiseScale;
+      uniform float uBladeHeightScale;
       uniform float uTerrainSize;
       uniform float uTime;
       
@@ -126,9 +136,9 @@ export class GrassMaterial {
         #include <shadowmap_vertex>
         // SHADOW
 
-        // wind effect
+        // wind effect (amp scales with blade height)
         vec2 uWindDirection = vec2(1.0,1.0);
-        float uWindAmp = 0.1;
+        float uWindAmp = 0.1 * uBladeHeightScale;
         float uWindFreq = 50.;
         float uSpeed = 1.0;
         float uNoiseFactor = 5.50;
@@ -142,15 +152,17 @@ export class GrassMaterial {
 
         vec4 noise = texture2D(uNoiseTexture,vGlobalUV+uTime*uNoiseSpeed);
 
-        float sinWave = sin(uWindFreq*dot(windDirection, vGlobalUV) + noise.g*uNoiseFactor + uTime * uSpeed) * uWindAmp * (1.-uv.y);
+        float tip = (1.-uv.y);
+        float sinWave = sin(uWindFreq*dot(windDirection, vGlobalUV) + noise.g*uNoiseFactor + uTime * uSpeed) * uWindAmp * tip;
 
         float xDisp = sinWave;
         float zDisp = sinWave;
         modelPosition.x += xDisp;
         modelPosition.z += zDisp;
 
-        // use perlinNoise to vary the terrainHeight of the grass
-        modelPosition.y += exp(texture2D(uNoiseTexture,vGlobalUV * uNoiseScale).r) * 0.5 * (1.-uv.y);
+        // Tip lift is in world units AFTER instance scale — must scale with blade height
+        // or grass stays tall even when instanceMatrix Y is reduced.
+        modelPosition.y += exp(texture2D(uNoiseTexture,vGlobalUV * uNoiseScale).r) * 0.5 * uBladeHeightScale * tip;
 
         vec4 viewPosition = viewMatrix * modelPosition;
         vec4 projectedPosition = projectionMatrix * viewPosition;

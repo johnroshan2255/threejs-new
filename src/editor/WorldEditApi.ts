@@ -1,24 +1,6 @@
 import type { WorldDefinition } from "../worlds/worldTypes";
 import type { WorldEditDocument } from "./types";
 
-/**
- * Backend contract (implement on server later).
- *
- * REST (auth Bearer token):
- *   PUT    /api/worlds/:worldId     body: SavedWorldPayload
- *   GET    /api/worlds/:worldId     → SavedWorldPayload
- *   GET    /api/worlds?mine=1       → { worlds: WorldListItem[] }
- *   GET    /api/worlds?public=1     → { worlds: WorldListItem[] }
- *   DELETE /api/worlds/:worldId
- *
- * Socket.IO room relay (multiplayer live edit):
- *   world-edit-op                 { roomCode, op }
- *   world-edit-snapshot           { roomCode, document }
- *   world-edit-request-snapshot   { roomCode }
- *   create-room / join-room should include worldId (+ optional WorldDefinition)
- *   so every peer loads the same editable world before requesting a snapshot.
- */
-
 export type WorldVisibility = "private" | "unlisted" | "public";
 
 /** Full JSON blob stored per user-created / edited place. */
@@ -48,7 +30,13 @@ export type WorldEditApiOptions = {
 
 /**
  * Frontend API client for saving / loading user worlds as JSON.
- * Safe no-op / soft-fail until the backend exists.
+ *
+ * REST (auth Bearer token):
+ *   PUT    /api/worlds/:worldId     body: SavedWorldPayload
+ *   GET    /api/worlds/:worldId     → SavedWorldPayload
+ *   GET    /api/worlds?mine=1       → { worlds: WorldListItem[] }
+ *   GET    /api/worlds?public=1     → { worlds: WorldListItem[] }
+ *   DELETE /api/worlds/:worldId
  */
 export class WorldEditApi {
 	constructor(private readonly options: WorldEditApiOptions) {}
@@ -56,7 +44,7 @@ export class WorldEditApi {
 	async saveWorld(payload: SavedWorldPayload): Promise<{ ok: boolean; synced: boolean; error?: string }> {
 		const token = this.options.getToken();
 		if (!token) {
-			return { ok: true, synced: false, error: "Not logged in — kept local only." };
+			return { ok: false, synced: false, error: "Not logged in." };
 		}
 
 		try {
@@ -75,11 +63,6 @@ export class WorldEditApi {
 				}
 			);
 
-			if (res.status === 404 || res.status === 501) {
-				// Backend route not implemented yet.
-				return { ok: true, synced: false, error: "World API not available yet." };
-			}
-
 			if (!res.ok) {
 				const data = (await res.json().catch(() => ({}))) as { error?: string };
 				return {
@@ -91,7 +74,7 @@ export class WorldEditApi {
 
 			return { ok: true, synced: true };
 		} catch {
-			return { ok: true, synced: false, error: "Offline — saved locally only." };
+			return { ok: false, synced: false, error: "Offline — could not reach server." };
 		}
 	}
 

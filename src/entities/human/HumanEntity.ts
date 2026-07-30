@@ -17,6 +17,13 @@ export class HumanEntity {
     private rightArmBone: THREE.Object3D | undefined;
     private leftArmBone: THREE.Object3D | undefined;
 
+    /** Capsule radius / half-height — mesh feet align to capsule bottom. */
+    static readonly CAPSULE_RADIUS = 0.45;
+    static readonly CAPSULE_HALF_HEIGHT = 1.5;
+    /** Body center → feet (must match capsule bottom). */
+    static readonly MESH_Y_OFFSET =
+        HumanEntity.CAPSULE_HALF_HEIGHT + HumanEntity.CAPSULE_RADIUS;
+
     constructor(
         gltfScene: THREE.Group,
         gltfAnimations: THREE.AnimationClip[],
@@ -60,10 +67,14 @@ export class HumanEntity {
         });
 
         // Physics Setup (Capsule)
-        const radius = 0.45; // reduced so players can get closer
-        const halfHeight = 1.5; // scaled by 3
+        const radius = HumanEntity.CAPSULE_RADIUS;
+        const halfHeight = HumanEntity.CAPSULE_HALF_HEIGHT;
         const rigidBodyDesc = RAPIER.RigidBodyDesc.dynamic()
-            .setTranslation(initialPosition.x, initialPosition.y + halfHeight + radius + 1.0, initialPosition.z)
+            .setTranslation(
+                initialPosition.x,
+                initialPosition.y + halfHeight + radius + 0.15,
+                initialPosition.z
+            )
             .setLinearDamping(4.0) // High damping to stop instantly when no input
             .setAngularDamping(1.0)
             .lockRotations(); // Keep character upright
@@ -84,8 +95,12 @@ export class HumanEntity {
 
         // Sync visual mesh to physics body
         const translation = this.body.translation();
-        // Offset mesh down so feet are at bottom of capsule.
-        this.mesh.position.set(translation.x, translation.y - 2.4, translation.z); 
+        // Feet at capsule bottom (was -2.4 → buried ~0.45 m under terrain).
+        this.mesh.position.set(
+            translation.x,
+            translation.y - HumanEntity.MESH_Y_OFFSET,
+            translation.z
+        );
     }
 
 
@@ -121,9 +136,12 @@ export class HumanEntity {
 
             targetAction.reset().fadeIn(fadeDuration);
             
-            if (lowerName === "being carried" || lowerName === "fall down" || lowerName === "sit to stand" || lowerName === "sweep fall" || lowerName === "stand to sit") {
+			if (lowerName === "being carried" || lowerName === "fall down" || lowerName === "sit to stand" || lowerName === "sweep fall" || lowerName === "stand to sit") {
                 targetAction.setLoop(THREE.LoopOnce, 1);
                 targetAction.clampWhenFinished = true;
+            } else if (lowerName === "sitting" || lowerName.includes("sitting")) {
+                targetAction.setLoop(THREE.LoopRepeat, Infinity);
+                targetAction.clampWhenFinished = false;
             } else {
                 targetAction.setLoop(THREE.LoopRepeat, Infinity);
                 targetAction.clampWhenFinished = false;

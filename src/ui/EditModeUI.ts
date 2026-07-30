@@ -31,6 +31,8 @@ export type EditSyncStatus = {
 export type EditViewMode = "top" | "orbit";
 
 export type EditModeUIOptions = {
+	/** Enter edit: open world picker (main island is not editable). */
+	onRequestEnterEdit: () => void;
 	onToggleEdit: (enabled: boolean) => void;
 	onToolChange: (tool: EditTool) => void;
 	onSculptChange: (sculpt: SculptType) => void;
@@ -42,9 +44,18 @@ export type EditModeUIOptions = {
 	onSave: () => void;
 	/** Create a custom world; sizeKm is 0.1–10. */
 	onCreateWorld: (sizeKm: number) => void;
+	/** Open an existing user world for editing. */
+	onOpenWorld: (worldId: string) => void;
 	onDeleteSelected: () => void;
 	onUndo: () => void;
 	onRedo: () => void;
+};
+
+export type EditWorldPickerItem = {
+	worldId: string;
+	worldName: string;
+	updatedAt: number;
+	terrainSize?: number;
 };
 
 /**
@@ -67,6 +78,10 @@ export class EditModeUI {
 	private readonly redoBtn: HTMLButtonElement;
 	private readonly statusEl: HTMLElement;
 	private readonly createModal: HTMLElement;
+	private readonly worldPickerModal: HTMLElement;
+	private readonly worldPickerList: HTMLElement;
+	private readonly worldPickerEmpty: HTMLElement;
+	private readonly worldPickerStatus: HTMLElement;
 	private enabled = false;
 	private tool: EditTool = "camera";
 	private sculpt: SculptType = "raise";
@@ -156,6 +171,20 @@ export class EditModeUI {
 			<div class="edit-mode-hint" id="edit-mode-hint" hidden>
 				Orbit: drag to rotate · Shift-drag / WASD pan · Scroll zoom · Q/E height
 			</div>
+			<div class="edit-create-modal" id="edit-world-picker-modal" hidden>
+				<div class="edit-create-dialog" role="dialog" aria-labelledby="edit-world-picker-title">
+					<h3 id="edit-world-picker-title">Your worlds</h3>
+					<div class="edit-world-picker-status" id="edit-world-picker-status">Loading…</div>
+					<div class="edit-world-picker-list" id="edit-world-picker-list" hidden></div>
+					<p class="edit-create-copy edit-world-picker-empty" id="edit-world-picker-empty" hidden>
+						No worlds created yet. Create a new world to start editing.
+					</p>
+					<div class="edit-create-actions">
+						<button type="button" class="edit-chip" id="edit-world-picker-cancel">Cancel</button>
+						<button type="button" class="edit-chip edit-save" id="edit-world-picker-new">New World</button>
+					</div>
+				</div>
+			</div>
 			<div class="edit-create-modal" id="edit-create-modal" hidden>
 				<div class="edit-create-dialog" role="dialog" aria-labelledby="edit-create-title">
 					<h3 id="edit-create-title">Create world</h3>
@@ -189,8 +218,15 @@ export class EditModeUI {
 		this.redoBtn = this.root.querySelector("#edit-redo-btn")!;
 		this.statusEl = this.root.querySelector("#edit-sync-status")!;
 		this.createModal = this.root.querySelector("#edit-create-modal")!;
+		this.worldPickerModal = this.root.querySelector("#edit-world-picker-modal")!;
+		this.worldPickerList = this.root.querySelector("#edit-world-picker-list")!;
+		this.worldPickerEmpty = this.root.querySelector("#edit-world-picker-empty")!;
+		this.worldPickerStatus = this.root.querySelector("#edit-world-picker-status")!;
 
-		this.editBtn.addEventListener("click", () => this.setEnabled(!this.enabled));
+		this.editBtn.addEventListener("click", () => {
+			if (this.enabled) this.setEnabled(false);
+			else this.options.onRequestEnterEdit();
+		});
 		this.root.querySelector("#edit-exit-btn")!.addEventListener("click", () => {
 			this.setEnabled(false);
 		});
@@ -211,6 +247,16 @@ export class EditModeUI {
 		});
 		this.createModal.addEventListener("click", (event) => {
 			if (event.target === this.createModal) this.closeCreateWorldModal();
+		});
+		this.root.querySelector("#edit-world-picker-cancel")!.addEventListener("click", () => {
+			this.closeWorldPicker();
+		});
+		this.root.querySelector("#edit-world-picker-new")!.addEventListener("click", () => {
+			this.closeWorldPicker();
+			this.openCreateWorldModal();
+		});
+		this.worldPickerModal.addEventListener("click", (event) => {
+			if (event.target === this.worldPickerModal) this.closeWorldPicker();
 		});
 		const sizeInput = this.root.querySelector<HTMLInputElement>("#edit-world-size-km")!;
 		const sizeLabel = this.root.querySelector<HTMLElement>("#edit-world-size-label")!;
@@ -300,7 +346,8 @@ export class EditModeUI {
 		if (!visible && this.enabled) this.setEnabled(false);
 	}
 
-	setEnabled(enabled: boolean) {
+	/** Sync chrome when controller enables edit after picking a world. */
+	syncEnabled(enabled: boolean) {
 		if (this.enabled === enabled) return;
 		this.enabled = enabled;
 		this.editBtn.classList.toggle("is-active", enabled);
@@ -313,7 +360,78 @@ export class EditModeUI {
 		this.hint.hidden = !enabled;
 		document.body.classList.toggle("edit-mode-active", enabled);
 		this.syncPanels();
+	}
+
+	setEnabled(enabled: boolean) {
+		if (this.enabled === enabled) return;
+		this.syncEnabled(enabled);
 		this.options.onToggleEdit(enabled);
+	}
+
+	openWorldPicker() {
+		this.closeCreateWorldModal();
+		this.worldPickerModal.hidden = false;
+		this.setWorldPickerLoading();
+	}
+
+	closeWorldPicker() {
+		this.worldPickerModal.hidden = true;
+	}
+
+	setWorldPickerLoading(message = "Loading your worlds…") {
+		this.worldPickerStatus.hidden = false;
+		this.worldPickerStatus.textContent = message;
+		this.worldPickerList.hidden = true;
+		this.worldPickerList.innerHTML = "";
+		this.worldPickerEmpty.hidden = true;
+	}
+
+	setWorldPickerWorlds(worlds: EditWorldPickerItem[]) {
+		this.worldPickerStatus.hidden = true;
+		this.worldPickerList.innerHTML = "";
+		if (!worlds.length) {
+			this.worldPickerList.hidden = true;
+			this.worldPickerEmpty.hidden = false;
+			return;
+		}
+		this.worldPickerEmpty.hidden = true;
+		this.worldPickerList.hidden = false;
+		for (const world of worlds) {
+			const btn = document.createElement("button");
+			btn.type = "button";
+			btn.className = "edit-world-picker-item";
+			const sizeLabel =
+				world.terrainSize != null
+					? world.terrainSize >= 1000
+						? `${(world.terrainSize / 1000).toFixed(1)} km`
+						: `${Math.round(world.terrainSize)} m`
+					: "";
+			const date = new Date(world.updatedAt).toLocaleDateString();
+			btn.innerHTML = `<strong>${escapeHtml(world.worldName)}</strong><span>${escapeHtml(
+				[sizeLabel, date].filter(Boolean).join(" · ")
+			)}</span>`;
+			btn.addEventListener("click", () => {
+				this.closeWorldPicker();
+				this.options.onOpenWorld(world.worldId);
+			});
+			this.worldPickerList.appendChild(btn);
+		}
+	}
+
+	setWorldPickerError(message: string) {
+		this.worldPickerStatus.hidden = false;
+		this.worldPickerStatus.textContent = message;
+		this.worldPickerList.hidden = true;
+		this.worldPickerEmpty.hidden = true;
+	}
+
+	openCreateWorldModal() {
+		this.closeWorldPicker();
+		this.createModal.hidden = false;
+	}
+
+	private closeCreateWorldModal() {
+		this.createModal.hidden = true;
 	}
 
 	setSyncStatus(status: EditSyncStatus) {
@@ -360,14 +478,6 @@ export class EditModeUI {
 			);
 		});
 		this.options.onTransformModeChange(mode);
-	}
-
-	private openCreateWorldModal() {
-		this.createModal.hidden = false;
-	}
-
-	private closeCreateWorldModal() {
-		this.createModal.hidden = true;
 	}
 
 	/** Match pencil range to the active world's cell size (1km needs larger brushes). */
@@ -504,4 +614,12 @@ export class EditModeUI {
 		});
 		this.options.onSculptChange(sculpt);
 	}
+}
+
+function escapeHtml(text: string): string {
+	return text
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;");
 }

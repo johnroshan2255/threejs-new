@@ -1,16 +1,27 @@
 import type { Socket } from "socket.io-client";
+import type { WorldDefinition } from "../worlds/worldTypes";
 import {
 	WORLD_EDIT_CHANNEL,
 	WORLD_EDIT_SOCKET,
 	type WorldEditDocument,
 	type WorldEditOp,
 	type WorldEditWireMessage,
+	type WorldSavedMessage,
 } from "../editor/types";
+
+export type WorldSavedPayload = {
+	worldId: string;
+	document: WorldEditDocument;
+	definition?: WorldDefinition | null;
+	updatedAt: number;
+};
 
 export type EditSyncHandlers = {
 	onRemoteOp: (op: WorldEditOp) => void;
 	onRemoteSnapshot: (document: WorldEditDocument) => void;
 	onRequestSnapshot: () => void;
+	/** Owner published a saved world — apply live for players in that world. */
+	onWorldSaved: (payload: WorldSavedPayload) => void;
 	getRoomCode: () => string;
 	getClientId: () => string;
 };
@@ -22,6 +33,8 @@ export type EditSyncHandlers = {
  *   world-edit-op                 { roomCode, op }
  *   world-edit-snapshot           { roomCode, document }
  *   world-edit-request-snapshot   { roomCode }
+ *   world-saved                   { worldId, document, definition?, updatedAt }
+ *   watch-world                   worldId
  *
  * BroadcastChannel fallback: other tabs see edits without a backend.
  */
@@ -29,6 +42,7 @@ export class EditSyncTransport {
 	private socket: Socket | null = null;
 	private channel: BroadcastChannel | null = null;
 	private readonly handlers: EditSyncHandlers;
+	private watchedWorldId: string | null = null;
 
 	constructor(handlers: EditSyncHandlers) {
 		this.handlers = handlers;
@@ -69,6 +83,15 @@ export class EditSyncTransport {
 			if (payload?.roomCode && room && payload.roomCode !== room) return;
 			this.handlers.onRequestSnapshot();
 		});
+
+		socket.on(WORLD_EDIT_SOCKET.saved, (payload: WorldSavedPayload) => {
+			if (!payload?.document || !payload.worldId) return;
+			this.handlers.onWorldSaved(payload);
+		});
+
+		if (this.watchedWorldId) {
+			socket.emit(WORLD_EDIT_SOCKET.watchWorld, this.watchedWorldId);
+		}
 	}
 
 	private detachSocketListeners() {
@@ -76,6 +99,15 @@ export class EditSyncTransport {
 		this.socket.off(WORLD_EDIT_SOCKET.op);
 		this.socket.off(WORLD_EDIT_SOCKET.snapshot);
 		this.socket.off(WORLD_EDIT_SOCKET.requestSnapshot);
+		this.socket.off(WORLD_EDIT_SOCKET.saved);
+	}
+
+	/** Subscribe to `world-saved` for this worldId (socket room `world:{id}`). */
+	watchWorld(worldId: string | null) {
+		this.watchedWorldId = worldId;
+		if (this.socket?.connected) {
+			this.socket.emit(WORLD_EDIT_SOCKET.watchWorld, worldId);
+		}
 	}
 
 	broadcastOp(op: WorldEditOp) {
@@ -97,6 +129,26 @@ export class EditSyncTransport {
 		};
 		if (this.socket?.connected && roomCode) {
 			this.socket.emit(WORLD_EDIT_SOCKET.snapshot, { roomCode, document });
+		}
+		this.channel?.postMessage(message);
+	}
+
+	/** Push authoritative saved world to room peers + BroadcastChannel tabs. */
+	broadcastWorldSaved(payload: WorldSavedPayload) {
+		const roomCode = this.handlers.getRoomCode();
+		const message: WorldSavedMessage = {
+			kind: "world-saved",
+			worldId: payload.worldId,
+			roomCode,
+			document: payload.document,
+			definition: payload.definition ?? null,
+			updatedAt: payload.updatedAt,
+		};
+		if (this.socket?.connected) {
+			this.socket.emit(WORLD_EDIT_SOCKET.saved, {
+				...payload,
+				roomCode,
+			});
 		}
 		this.channel?.postMessage(message);
 	}
@@ -134,6 +186,15 @@ export class EditSyncTransport {
 		if (message.kind === "request-snapshot") {
 			if (room && message.roomCode && message.roomCode !== room) return;
 			this.handlers.onRequestSnapshot();
+			return;
+		}
+		if (message.kind === "world-saved") {
+			this.handlers.onWorldSaved({
+				worldId: message.worldId,
+				document: message.document,
+				definition: message.definition,
+				updatedAt: message.updatedAt,
+			});
 		}
 	}
 

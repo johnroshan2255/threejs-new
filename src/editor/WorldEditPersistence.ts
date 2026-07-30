@@ -21,9 +21,9 @@ export type WorldEditPersistenceOptions = {
 
 /**
  * Persistence facade.
- * - Always writes JSON to localStorage (works offline / anonymous).
- * - When logged in, also PUTs SavedWorldPayload to /api/worlds/:id (backend later).
- * - Multiplayer peers still sync live via socket ops/snapshots (EditSyncTransport).
+ * - Always writes JSON to localStorage (draft / offline).
+ * - When logged in, PUTs SavedWorldPayload to /api/worlds/:id (owned by user).
+ * - Multiplayer peers sync live via socket ops/snapshots (EditSyncTransport).
  */
 export class WorldEditPersistence {
 	constructor(
@@ -43,13 +43,25 @@ export class WorldEditPersistence {
 			this.downloadJson(doc);
 		}
 
+		const owner = this.options.getOwner?.() ?? null;
+		if (!owner?.id) {
+			return {
+				ok: false,
+				document: doc,
+				savedLocally: true,
+				syncedToBackend: false,
+				pendingBackend: true,
+				message: "Log in to save this world to your account.",
+			};
+		}
+
 		const backend = await this.saveToBackend(doc);
-		this.store.markSaved();
+		if (backend.synced) this.store.markSaved();
 
 		const message = backend.synced
-			? "Saved locally + synced to account."
+			? "Saved to your account."
 			: backend.error
-				? `Saved locally (${backend.error})`
+				? `Draft kept locally (${backend.error})`
 				: "Saved to localStorage.";
 
 		return {
@@ -70,6 +82,11 @@ export class WorldEditPersistence {
 		const payload = await this.options.api.fetchWorld(worldId);
 		if (!payload?.definition || !payload?.document) return null;
 		return { definition: payload.definition, document: payload.document };
+	}
+
+	/** Logged-in user's worlds from GET /api/worlds?mine=1. */
+	async listMineWorlds() {
+		return this.options.api.listWorlds("mine");
 	}
 
 	private async saveToBackend(doc: WorldEditDocument) {

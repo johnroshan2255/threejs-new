@@ -56,6 +56,8 @@ export type EditModeHost = {
 	createNewLargeWorld: (sizeKm: number) => Promise<void>;
 	/** Switch active world (used when joining a room bound to a worldId). */
 	switchToWorldId: (worldId: string) => Promise<void>;
+	/** Local custom world defs (drafts / not yet saved to API). */
+	listLocalCustomWorlds: () => WorldDefinition[];
 	/** Rebuild fluffy grass from the current terrain (used after undo/redo). */
 	rebuildEditGrass: () => void;
 	getAuthToken: () => string | null;
@@ -119,6 +121,9 @@ export class EditModeController {
 	private autosaveTimer: number | null = null;
 	private applyingRemote = false;
 	private remoteColliderTimer: number | null = null;
+	/** Skip echo of our own Save World publish. */
+	private lastPublishedAt = 0;
+	private applyingPublished = false;
 
 	constructor(private readonly host: EditModeHost) {
 		const def = host.getActiveWorldDefinition();
@@ -177,6 +182,9 @@ export class EditModeController {
 					this.sync.broadcastSnapshot(this.store.toJSON());
 				}
 			},
+			onWorldSaved: (payload) => {
+				void this.onWorldSaved(payload);
+			},
 		});
 
 		const user = host.getAuthUser();
@@ -221,7 +229,13 @@ export class EditModeController {
 		this.host.scene.add(this.transformControls);
 
 		this.ui = new EditModeUI({
-			onToggleEdit: (on) => this.setEnabled(on),
+			onRequestEnterEdit: () => {
+				void this.requestEnterEdit();
+			},
+			onToggleEdit: (on) => {
+				if (on) void this.requestEnterEdit();
+				else void this.exitEditToHub();
+			},
 			onToolChange: (tool) => {
 				this.tool = tool;
 				this.brushHelper.visible = this.enabled && this.isBrushTool(tool);
@@ -265,7 +279,10 @@ export class EditModeController {
 			},
 			onSave: () => this.saveEdits(),
 			onCreateWorld: (sizeKm) => {
-				void this.host.createNewLargeWorld(sizeKm);
+				void this.createAndEnterEditableWorld(sizeKm);
+			},
+			onOpenWorld: (worldId) => {
+				void this.openEditableWorld(worldId);
 			},
 			onDeleteSelected: () => {
 				void this.deleteSelected();
@@ -308,18 +325,29 @@ export class EditModeController {
 	onGameActiveChanged(active: boolean) {
 		const user = this.host.getAuthUser();
 		this.store.setAuthorId(user?.id ?? null);
-		this.ui.setVisible(active);
-		if (!active && this.enabled) this.setEnabled(false);
+		// Edit Mode is only for logged-in users (worlds save to their account).
+		const canEdit = active && Boolean(user?.id);
+		this.ui.setVisible(canEdit);
+		if (!canEdit && this.enabled) void this.exitEditToHub();
 		if (active) this.bindStoreToActiveWorld();
 		this.refreshStatus();
+	}
+
+	/** Call when login / logout changes while the game is already active. */
+	onAuthChanged() {
+		this.onGameActiveChanged(this.host.isGameActive());
 	}
 
 	/** Call after switching island / valley / custom world. */
 	onActiveWorldChanged() {
 		this.bindStoreToActiveWorld();
+		this.sync.watchWorld(this.host.getActiveWorldDefinition().id);
 		this.refreshStatus();
 		this.syncBrushToWorld();
-		if (this.enabled) {
+		if (this.enabled && this.host.getActiveWorldDefinition().kind !== "custom") {
+			this.setEnabled(false);
+			this.ui.syncEnabled(false);
+		} else if (this.enabled) {
 			this.recenterCameraOnTerrain();
 		}
 	}
@@ -332,7 +360,115 @@ export class EditModeController {
 		this.refreshStatus();
 	}
 
+	/**
+	 * Main Island / Valley are multiplayer hubs — not editable.
+	 * Edit Mode opens a picker of the user's custom worlds (or New World).
+	 */
+	private async requestEnterEdit() {
+		if (this.enabled) return;
+		const user = this.host.getAuthUser();
+		if (!user?.id || !this.host.getAuthToken()) {
+			this.ui.setSaveState("saved", "Log in to edit your worlds.");
+			return;
+		}
+		this.ui.openWorldPicker();
+		try {
+			const remote = await this.persistence.listMineWorlds();
+			const byId = new Map<
+				string,
+				{ worldId: string; worldName: string; updatedAt: number; terrainSize?: number }
+			>();
+			for (const def of this.host.listLocalCustomWorlds()) {
+				byId.set(def.id, {
+					worldId: def.id,
+					worldName: def.name,
+					updatedAt: 0,
+					terrainSize: def.size,
+				});
+			}
+			for (const item of remote) {
+				byId.set(item.worldId, {
+					worldId: item.worldId,
+					worldName: item.worldName,
+					updatedAt: item.updatedAt,
+					terrainSize: item.terrainSize,
+				});
+			}
+			const worlds = [...byId.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+			this.ui.setWorldPickerWorlds(worlds);
+		} catch {
+			this.ui.setWorldPickerError(
+				"Could not load your worlds. Check your connection, or create a new one."
+			);
+		}
+	}
+
+	private async openEditableWorld(worldId: string) {
+		this.ui.closeWorldPicker();
+		try {
+			const remote = await this.persistence.loadRemoteWorld(worldId);
+			if (remote?.definition.kind === "custom") {
+				this.host.ensureWorldDefinition(remote.definition);
+				await this.host.switchToWorldId(remote.definition.id);
+				this.store.loadDocument(remote.document);
+				await this.reapplyStoredEdits();
+				this.enableEditMode();
+				return;
+			}
+
+			const local = this.host.getWorldDefinitionById(worldId);
+			if (!local || local.kind !== "custom") {
+				this.ui.openWorldPicker();
+				this.ui.setWorldPickerError("That world could not be loaded.");
+				return;
+			}
+			await this.host.switchToWorldId(local.id);
+			this.enableEditMode();
+		} catch (error) {
+			const message =
+				error instanceof Error ? error.message : "Unable to open world.";
+			this.ui.openWorldPicker();
+			this.ui.setWorldPickerError(message);
+		}
+	}
+
+	private async createAndEnterEditableWorld(sizeKm: number) {
+		try {
+			await this.host.createNewLargeWorld(sizeKm);
+			this.enableEditMode();
+		} catch (error) {
+			const message =
+				error instanceof Error ? error.message : "Unable to create world.";
+			this.ui.setSaveState("saved", message);
+		}
+	}
+
+	private enableEditMode() {
+		const def = this.host.getActiveWorldDefinition();
+		if (def.kind !== "custom") return;
+		if (!this.enabled) this.setEnabled(true);
+		this.ui.syncEnabled(true);
+	}
+
+	/** Leave edit tools and return to the main multiplayer Island hub. */
+	private async exitEditToHub() {
+		this.ui.closeWorldPicker();
+		if (this.enabled) this.setEnabled(false);
+		this.ui.syncEnabled(false);
+		const active = this.host.getActiveWorldDefinition();
+		if (active.id !== "island") {
+			try {
+				await this.host.switchToWorldId("island");
+			} catch {
+				/* keep current world if hub switch fails */
+			}
+		}
+	}
+
 	setEnabled(enabled: boolean) {
+		if (enabled && this.host.getActiveWorldDefinition().kind !== "custom") {
+			return;
+		}
 		if (this.enabled === enabled) return;
 		this.enabled = enabled;
 		this.host.setMapMode(enabled);
@@ -472,11 +608,28 @@ export class EditModeController {
 	}
 
 	async saveEdits() {
+		const user = this.host.getAuthUser();
+		if (!user?.id || !this.host.getAuthToken()) {
+			this.ui.setSaveState("saved", "Log in to save worlds to your account.");
+			return;
+		}
 		this.ui.setSaveState("saving");
 		await this.bakeContinuousWaterSurfaces();
 		const result = await this.persistence.save({ download: false });
 		this.ui.setSaveState("saved", result.message);
 		this.refreshStatus();
+
+		// Push saved world to anyone playing this worldId (same room / watchers).
+		if (result.syncedToBackend) {
+			const def = this.host.getActiveWorldDefinition();
+			this.lastPublishedAt = result.document.updatedAt;
+			this.sync.broadcastWorldSaved({
+				worldId: result.document.worldId,
+				document: result.document,
+				definition: def.kind === "custom" ? def : null,
+				updatedAt: result.document.updatedAt,
+			});
+		}
 	}
 
 	/**
@@ -772,17 +925,74 @@ export class EditModeController {
 
 	private async applyIncomingSnapshot(doc: WorldEditDocument) {
 		if (this.store.opCount > doc.ops.length) return;
+		await this.applyPublishedDocument(doc, { silent: true });
+	}
+
+	/**
+	 * Owner saved the world — players already in it apply the new document
+	 * without reload or UI interruption.
+	 */
+	private async onWorldSaved(payload: {
+		worldId: string;
+		document: WorldEditDocument;
+		definition?: import("../worlds/worldTypes").WorldDefinition | null;
+		updatedAt: number;
+	}) {
+		if (!payload?.document || !payload.worldId) return;
+		if (payload.updatedAt && payload.updatedAt <= this.lastPublishedAt) return;
+
+		const activeId = this.host.getActiveWorldDefinition().id;
+		if (payload.worldId !== activeId && payload.document.worldId !== activeId) {
+			return;
+		}
+
+		// Editor who just saved already has this content.
+		if (this.enabled && this.store.toJSON().updatedAt >= payload.document.updatedAt) {
+			this.lastPublishedAt = Math.max(this.lastPublishedAt, payload.document.updatedAt);
+			return;
+		}
+
+		if (payload.definition?.kind === "custom") {
+			this.host.ensureWorldDefinition(payload.definition);
+		}
+
+		await this.applyPublishedDocument(payload.document, { silent: true });
+		this.lastPublishedAt = Math.max(
+			this.lastPublishedAt,
+			payload.document.updatedAt || payload.updatedAt || 0
+		);
+	}
+
+	/** Authoritative rebuild from a published / remote document (baseline + ops). */
+	private async applyPublishedDocument(
+		doc: WorldEditDocument,
+		options?: { silent?: boolean }
+	) {
+		if (this.applyingPublished) return;
+		this.applyingPublished = true;
 		this.applyingRemote = true;
 		try {
 			this.clearSelection();
+			this.applier.setSpawnWaterSurfaces(!this.enabled);
 			this.applier.clearEntities();
-			this.store.loadDocument(doc);
 			this.applier.clearApplied();
-			await this.applier.applyMany(doc.ops);
+			this.store.loadDocument(doc);
+			this.persistence.autosaveDraft();
+			if (!this.terrainBaselineHeights) this.captureTerrainBaseline();
+			this.restoreTerrainBaseline();
+			if (doc.ops.length) {
+				await this.applier.applyMany(doc.ops);
+			}
+			this.rebuildCollider();
+			this.host.rebuildEditGrass();
 		} finally {
 			this.applyingRemote = false;
+			this.applyingPublished = false;
 		}
 		this.refreshStatus();
+		if (!options?.silent) {
+			this.ui.setSaveState("saved", "World updated.");
+		}
 	}
 
 	/**
@@ -791,6 +1001,7 @@ export class EditModeController {
 	 */
 	async onRoomWorldBound(worldId: string) {
 		if (!worldId) return;
+		this.sync.watchWorld(worldId);
 		const active = this.host.getActiveWorldDefinition();
 		if (active.id !== worldId) {
 			let def = this.host.getWorldDefinitionById(worldId);
@@ -800,8 +1011,7 @@ export class EditModeController {
 					this.host.ensureWorldDefinition(remote.definition);
 					def = remote.definition;
 					await this.host.switchToWorldId(def.id);
-					this.store.loadDocument(remote.document);
-					await this.reapplyStoredEdits();
+					await this.applyPublishedDocument(remote.document, { silent: true });
 					this.refreshStatus();
 					return;
 				}
@@ -918,14 +1128,15 @@ export class EditModeController {
 	private bindKeys() {
 		window.addEventListener("keydown", (event) => {
 			if (!this.enabled) return;
+			const key = (event.key ?? "").toLowerCase();
 			const mod = event.metaKey || event.ctrlKey;
-			if (mod && event.key.toLowerCase() === "z") {
+			if (mod && key === "z") {
 				event.preventDefault();
 				if (event.shiftKey) void this.redo();
 				else void this.undo();
 				return;
 			}
-			if (mod && event.key.toLowerCase() === "y") {
+			if (mod && key === "y") {
 				event.preventDefault();
 				void this.redo();
 				return;
@@ -940,32 +1151,31 @@ export class EditModeController {
 				return;
 			}
 			if (this.tool === "select" && this.selectedEntityId) {
-				const k = event.key.toLowerCase();
-				if (k === "g") {
+				if (key === "g") {
 					event.preventDefault();
 					this.ui.setTransformMode("translate");
 					return;
 				}
-				if (k === "r") {
+				if (key === "r") {
 					event.preventDefault();
 					this.ui.setTransformMode("rotate");
 					return;
 				}
-				if (k === "s" && !(event.metaKey || event.ctrlKey)) {
+				if (key === "s" && !(event.metaKey || event.ctrlKey)) {
 					event.preventDefault();
 					this.ui.setTransformMode("scale");
 					return;
 				}
 			}
 			if (this.tool !== "camera") return;
-			const key = event.key.toLowerCase();
 			if (["w", "a", "s", "d", "q", "e"].includes(key)) {
 				this.keys.add(key);
 				event.preventDefault();
 			}
 		});
 		window.addEventListener("keyup", (event) => {
-			this.keys.delete(event.key.toLowerCase());
+			const key = (event.key ?? "").toLowerCase();
+			if (key) this.keys.delete(key);
 		});
 	}
 
