@@ -2862,12 +2862,14 @@ export class FluffyGrass {
 				if (worldId === "valley") return VALLEY_WORLD;
 				return this.customWorldDefs.find((w) => w.id === worldId) ?? null;
 			},
-			ensureWorldDefinition: (definition) => {
+			ensureWorldDefinition: (definition, options) => {
 				if (definition.kind !== "custom") return;
 				if (this.customWorldDefs.some((w) => w.id === definition.id)) return;
 				this.customWorldDefs.push(definition);
-				this.persistCustomWorldDefs();
-				this.settings.setWorldOptions(this.getWorldSelectOptions());
+				if (options?.persist !== false) {
+					this.persistCustomWorldDefs();
+					this.settings.setWorldOptions(this.getWorldSelectOptions());
+				}
 			},
 			enableTerrainVertexColors: () => {
 				const mesh = this.activeWorldDef.kind === "custom"

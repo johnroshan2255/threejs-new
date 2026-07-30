@@ -282,6 +282,22 @@ export class WorldEditStore {
 		return WorldEditStore.loadAllDocs()[worldId] ?? null;
 	}
 
+	/** Drop a polluted / hub draft so island edits cannot leak across sessions. */
+	static clearDocForWorld(worldId: string) {
+		try {
+			const all = WorldEditStore.loadAllDocs();
+			if (!(worldId in all)) return;
+			delete all[worldId];
+			localStorage.setItem(WORLD_EDIT_DOCS_KEY, JSON.stringify(all));
+			const draft = WorldEditStore.loadDraftLocal();
+			if (draft?.worldId === worldId) {
+				localStorage.removeItem(WORLD_EDIT_STORAGE_KEY);
+			}
+		} catch {
+			/* quota / private mode */
+		}
+	}
+
 	static loadDraftLocal(): WorldEditDocument | null {
 		try {
 			const raw = localStorage.getItem(WORLD_EDIT_STORAGE_KEY);

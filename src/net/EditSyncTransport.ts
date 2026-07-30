@@ -17,13 +17,15 @@ export type WorldSavedPayload = {
 };
 
 export type EditSyncHandlers = {
-	onRemoteOp: (op: WorldEditOp) => void;
-	onRemoteSnapshot: (document: WorldEditDocument) => void;
+	onRemoteOp: (op: WorldEditOp, worldId?: string) => void;
+	onRemoteSnapshot: (document: WorldEditDocument, worldId?: string) => void;
 	onRequestSnapshot: () => void;
 	/** Owner published a saved world — apply live for players in that world. */
 	onWorldSaved: (payload: WorldSavedPayload) => void;
 	getRoomCode: () => string;
 	getClientId: () => string;
+	/** Active editable world — used to drop cross-world BroadcastChannel leaks. */
+	getActiveWorldId: () => string;
 };
 
 /**
@@ -60,21 +62,32 @@ export class EditSyncTransport {
 		this.socket = socket;
 		if (!socket) return;
 
-		socket.on(WORLD_EDIT_SOCKET.op, (payload: { op?: WorldEditOp; roomCode?: string }) => {
-			if (!payload?.op) return;
-			if (payload.op.authorId === this.handlers.getClientId()) return;
-			const room = this.handlers.getRoomCode();
-			if (payload.roomCode && room && payload.roomCode !== room) return;
-			this.handlers.onRemoteOp(payload.op);
-		});
+		socket.on(
+			WORLD_EDIT_SOCKET.op,
+			(payload: { op?: WorldEditOp; roomCode?: string; worldId?: string }) => {
+				if (!payload?.op) return;
+				if (payload.op.authorId === this.handlers.getClientId()) return;
+				const room = this.handlers.getRoomCode();
+				if (payload.roomCode && room && payload.roomCode !== room) return;
+				const worldId = payload.worldId;
+				if (worldId && worldId !== this.handlers.getActiveWorldId()) return;
+				this.handlers.onRemoteOp(payload.op, worldId);
+			}
+		);
 
 		socket.on(
 			WORLD_EDIT_SOCKET.snapshot,
-			(payload: { document?: WorldEditDocument; roomCode?: string }) => {
+			(payload: {
+				document?: WorldEditDocument;
+				roomCode?: string;
+				worldId?: string;
+			}) => {
 				if (!payload?.document) return;
 				const room = this.handlers.getRoomCode();
 				if (payload.roomCode && room && payload.roomCode !== room) return;
-				this.handlers.onRemoteSnapshot(payload.document);
+				const worldId = payload.worldId ?? payload.document.worldId;
+				if (worldId && worldId !== this.handlers.getActiveWorldId()) return;
+				this.handlers.onRemoteSnapshot(payload.document, worldId);
 			}
 		);
 
@@ -112,23 +125,30 @@ export class EditSyncTransport {
 
 	broadcastOp(op: WorldEditOp) {
 		const roomCode = this.handlers.getRoomCode();
-		const message: WorldEditWireMessage = { kind: "op", roomCode, op };
+		const worldId = this.handlers.getActiveWorldId();
+		const message: WorldEditWireMessage = { kind: "op", roomCode, worldId, op };
 
 		if (this.socket?.connected && roomCode) {
-			this.socket.emit(WORLD_EDIT_SOCKET.op, { roomCode, op });
+			this.socket.emit(WORLD_EDIT_SOCKET.op, { roomCode, worldId, op });
 		}
 		this.channel?.postMessage(message);
 	}
 
 	broadcastSnapshot(document: WorldEditDocument) {
 		const roomCode = this.handlers.getRoomCode();
+		const worldId = document.worldId || this.handlers.getActiveWorldId();
 		const message: WorldEditWireMessage = {
 			kind: "snapshot",
 			roomCode,
+			worldId,
 			document,
 		};
 		if (this.socket?.connected && roomCode) {
-			this.socket.emit(WORLD_EDIT_SOCKET.snapshot, { roomCode, document });
+			this.socket.emit(WORLD_EDIT_SOCKET.snapshot, {
+				roomCode,
+				worldId,
+				document,
+			});
 		}
 		this.channel?.postMessage(message);
 	}
@@ -171,16 +191,24 @@ export class EditSyncTransport {
 	) {
 		if (!message || typeof message !== "object") return;
 		const room = this.handlers.getRoomCode();
-		// BroadcastChannel has no rooms; always accept. Socket filtered above.
+		const activeWorldId = this.handlers.getActiveWorldId();
+		// BroadcastChannel has no rooms — require worldId match to avoid hub leaks.
 		if (message.kind === "op") {
 			if (message.op.authorId === this.handlers.getClientId()) return;
 			if (room && message.roomCode && message.roomCode !== room) return;
-			this.handlers.onRemoteOp(message.op);
+			const worldId = message.worldId;
+			if (worldId && worldId !== activeWorldId) return;
+			// Legacy messages without worldId: only accept inside a matching room.
+			if (!worldId && !room) return;
+			this.handlers.onRemoteOp(message.op, worldId);
 			return;
 		}
 		if (message.kind === "snapshot") {
 			if (room && message.roomCode && message.roomCode !== room) return;
-			this.handlers.onRemoteSnapshot(message.document);
+			const worldId = message.worldId ?? message.document?.worldId;
+			if (worldId && worldId !== activeWorldId) return;
+			if (!worldId && !room) return;
+			this.handlers.onRemoteSnapshot(message.document, worldId);
 			return;
 		}
 		if (message.kind === "request-snapshot") {
@@ -189,6 +217,10 @@ export class EditSyncTransport {
 			return;
 		}
 		if (message.kind === "world-saved") {
+			if (message.worldId && message.worldId !== activeWorldId) return;
+			if (message.document?.worldId && message.document.worldId !== activeWorldId) {
+				return;
+			}
 			this.handlers.onWorldSaved({
 				worldId: message.worldId,
 				document: message.document,

@@ -145,12 +145,16 @@ export type WorldEditDocument = {
 export type WorldEditOpMessage = {
 	kind: "op";
 	roomCode: string;
+	/** World these ops belong to — receivers must match active worldId. */
+	worldId?: string;
 	op: WorldEditOp;
 };
 
 export type WorldEditSnapshotMessage = {
 	kind: "snapshot";
 	roomCode: string;
+	/** World this document belongs to — receivers must match active worldId. */
+	worldId?: string;
 	document: WorldEditDocument;
 };
 

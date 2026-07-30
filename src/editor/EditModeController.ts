@@ -41,7 +41,10 @@ export type EditModeHost = {
 	/** Resolve any known world def (island / valley / custom catalog). */
 	getWorldDefinitionById: (worldId: string) => WorldDefinition | null;
 	/** Ensure a custom def exists locally (e.g. after fetching a shared world). */
-	ensureWorldDefinition: (definition: WorldDefinition) => void;
+	ensureWorldDefinition: (
+		definition: WorldDefinition,
+		options?: { persist?: boolean }
+	) => void;
 	enableTerrainVertexColors: () => void;
 	setMapMode: (enabled: boolean) => void;
 	addEditorTree: (tree: TreeHandle) => void;
@@ -124,6 +127,13 @@ export class EditModeController {
 	/** Skip echo of our own Save World publish. */
 	private lastPublishedAt = 0;
 	private applyingPublished = false;
+	/**
+	 * When opening a remote document right after switchWorld, skip bindStore's
+	 * localStorage replay so ops are not applied twice.
+	 */
+	private skipNextBindApply = false;
+	/** Bumps on each terrain rebuild so stale async applyMany calls abort. */
+	private terrainApplyGeneration = 0;
 
 	constructor(private readonly host: EditModeHost) {
 		const def = host.getActiveWorldDefinition();
@@ -171,11 +181,12 @@ export class EditModeController {
 		this.sync = new EditSyncTransport({
 			getRoomCode: () => host.getRoomCode(),
 			getClientId: () => this.store.authorId,
-			onRemoteOp: (op) => {
-				void this.applyIncomingOp(op);
+			getActiveWorldId: () => this.host.getActiveWorldDefinition().id,
+			onRemoteOp: (op, worldId) => {
+				void this.applyIncomingOp(op, worldId);
 			},
-			onRemoteSnapshot: (doc) => {
-				void this.applyIncomingSnapshot(doc);
+			onRemoteSnapshot: (doc, worldId) => {
+				void this.applyIncomingSnapshot(doc, worldId);
 			},
 			onRequestSnapshot: () => {
 				if (this.store.opCount > 0) {
@@ -408,10 +419,10 @@ export class EditModeController {
 		try {
 			const remote = await this.persistence.loadRemoteWorld(worldId);
 			if (remote?.definition.kind === "custom") {
-				this.host.ensureWorldDefinition(remote.definition);
+				this.host.ensureWorldDefinition(remote.definition, { persist: true });
+				this.skipNextBindApply = true;
 				await this.host.switchToWorldId(remote.definition.id);
-				this.store.loadDocument(remote.document);
-				await this.reapplyStoredEdits();
+				await this.applyPublishedDocument(remote.document, { silent: true });
 				this.enableEditMode();
 				return;
 			}
@@ -696,10 +707,19 @@ export class EditModeController {
 		this.clearSelection();
 		this.applier.clearEntities();
 		this.applier.clearApplied();
-		if (!doc.ops.length) return;
+		const generation = ++this.terrainApplyGeneration;
+		if (!this.terrainBaselineHeights) this.captureTerrainBaseline();
+		this.restoreTerrainBaseline();
+		if (!doc.ops.length) {
+			this.rebuildCollider();
+			this.refreshStatus();
+			return;
+		}
 		this.applyingRemote = true;
 		try {
 			await this.applier.applyMany(doc.ops);
+			if (generation !== this.terrainApplyGeneration) return;
+			this.rebuildCollider();
 		} finally {
 			this.applyingRemote = false;
 		}
@@ -708,7 +728,15 @@ export class EditModeController {
 
 	private bindStoreToActiveWorld() {
 		const def = this.host.getActiveWorldDefinition();
-		const existing = WorldEditStore.loadDocForWorld(def.id);
+		const isHub = def.kind === "island" || def.kind === "valley";
+		// Hub worlds are not editable — drop any leaked sculpt drafts onto island.
+		if (isHub) {
+			WorldEditStore.clearDocForWorld(def.id);
+		}
+		const existing = isHub ? null : WorldEditStore.loadDocForWorld(def.id);
+		const skipApply = this.skipNextBindApply;
+		this.skipNextBindApply = false;
+
 		this.store.switchWorld(
 			{
 				worldId: def.id,
@@ -724,14 +752,20 @@ export class EditModeController {
 		// Baseline = pristine terrain before any edit ops.
 		this.captureTerrainBaseline();
 		this.applier.setSpawnWaterSurfaces(!this.enabled);
-		if (existing?.ops.length) {
-			void this.applier.applyMany(existing.ops).then(() => {
-				this.rebuildCollider();
-				this.refreshStatus();
-			});
-		} else {
+
+		if (skipApply || isHub || !existing?.ops.length) {
+			// Cancel any in-flight applyMany from the previous world.
+			this.terrainApplyGeneration++;
 			this.refreshStatus();
+			return;
 		}
+
+		const generation = ++this.terrainApplyGeneration;
+		void this.applier.applyMany(existing.ops).then(() => {
+			if (generation !== this.terrainApplyGeneration) return;
+			this.rebuildCollider();
+			this.refreshStatus();
+		});
 	}
 
 	private isBrushTool(tool: EditTool) {
@@ -839,6 +873,7 @@ export class EditModeController {
 		this.clearSelection();
 		this.applier.clearEntities();
 		this.applier.clearApplied();
+		const generation = ++this.terrainApplyGeneration;
 		this.restoreTerrainBaseline();
 		const ops = this.store.toJSON().ops;
 		if (ops.length) {
@@ -849,6 +884,7 @@ export class EditModeController {
 				this.applyingRemote = false;
 			}
 		}
+		if (generation !== this.terrainApplyGeneration) return;
 		this.rebuildCollider();
 		this.refreshStatus();
 	}
@@ -900,7 +936,19 @@ export class EditModeController {
 		this.refreshStatus();
 	}
 
-	private async applyIncomingOp(op: WorldEditOp) {
+	/** True when remote edits may mutate the active terrain. */
+	private acceptsRemoteEditsFor(worldId: string | undefined): boolean {
+		const active = this.host.getActiveWorldDefinition();
+		// Never sculpt the Island / Valley hubs from remote edit traffic.
+		if (active.kind !== "custom") return false;
+		if (active.id !== this.store.worldId) return false;
+		if (worldId && worldId !== active.id) return false;
+		return true;
+	}
+
+	private async applyIncomingOp(op: WorldEditOp, worldId?: string) {
+		const resolvedWorldId = worldId ?? this.store.worldId;
+		if (!this.acceptsRemoteEditsFor(resolvedWorldId)) return;
 		if (this.applier.hasApplied(op.id)) return;
 		this.applyingRemote = true;
 		try {
@@ -923,7 +971,15 @@ export class EditModeController {
 		}, 120);
 	}
 
-	private async applyIncomingSnapshot(doc: WorldEditDocument) {
+	private async applyIncomingSnapshot(
+		doc: WorldEditDocument,
+		worldId?: string
+	) {
+		const resolvedWorldId = worldId ?? doc.worldId;
+		if (!this.acceptsRemoteEditsFor(resolvedWorldId)) return;
+		if (doc.worldId && doc.worldId !== this.host.getActiveWorldDefinition().id) {
+			return;
+		}
 		if (this.store.opCount > doc.ops.length) return;
 		await this.applyPublishedDocument(doc, { silent: true });
 	}
@@ -945,6 +1001,7 @@ export class EditModeController {
 		if (payload.worldId !== activeId && payload.document.worldId !== activeId) {
 			return;
 		}
+		if (!this.acceptsRemoteEditsFor(payload.worldId)) return;
 
 		// Editor who just saved already has this content.
 		if (this.enabled && this.store.toJSON().updatedAt >= payload.document.updatedAt) {
@@ -953,7 +1010,8 @@ export class EditModeController {
 		}
 
 		if (payload.definition?.kind === "custom") {
-			this.host.ensureWorldDefinition(payload.definition);
+			// Already in this world — keep def in memory only (avoid catalog pollution).
+			this.host.ensureWorldDefinition(payload.definition, { persist: false });
 		}
 
 		await this.applyPublishedDocument(payload.document, { silent: true });
@@ -968,9 +1026,14 @@ export class EditModeController {
 		doc: WorldEditDocument,
 		options?: { silent?: boolean }
 	) {
+		const active = this.host.getActiveWorldDefinition();
+		if (doc.worldId && doc.worldId !== active.id) return;
+		if (active.kind !== "custom") return;
+
 		if (this.applyingPublished) return;
 		this.applyingPublished = true;
 		this.applyingRemote = true;
+		const generation = ++this.terrainApplyGeneration;
 		try {
 			this.clearSelection();
 			this.applier.setSpawnWaterSurfaces(!this.enabled);
@@ -983,6 +1046,7 @@ export class EditModeController {
 			if (doc.ops.length) {
 				await this.applier.applyMany(doc.ops);
 			}
+			if (generation !== this.terrainApplyGeneration) return;
 			this.rebuildCollider();
 			this.host.rebuildEditGrass();
 		} finally {
@@ -1008,8 +1072,9 @@ export class EditModeController {
 			if (!def) {
 				const remote = await this.persistence.loadRemoteWorld(worldId);
 				if (remote) {
-					this.host.ensureWorldDefinition(remote.definition);
+					this.host.ensureWorldDefinition(remote.definition, { persist: true });
 					def = remote.definition;
+					this.skipNextBindApply = true;
 					await this.host.switchToWorldId(def.id);
 					await this.applyPublishedDocument(remote.document, { silent: true });
 					this.refreshStatus();
