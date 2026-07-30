@@ -1,4 +1,10 @@
-import { EDIT_MESH_CATALOG, type EditMeshId } from "../editor/meshCatalog";
+import {
+	EDIT_MESH_CATEGORIES,
+	EDIT_MESH_CATALOG,
+	getEditMeshesByCategory,
+	type EditMeshCategoryId,
+	type EditMeshId,
+} from "../editor/meshCatalog";
 
 export type EditTool =
 	| "camera"
@@ -11,6 +17,8 @@ export type EditTool =
 export type SculptType = "raise" | "lower" | "smooth" | "flatten";
 
 export type RoadStyle = "mud";
+
+export type EditTransformMode = "translate" | "rotate" | "scale";
 
 export type EditSyncStatus = {
 	opCount: number;
@@ -30,6 +38,7 @@ export type EditModeUIOptions = {
 	onViewModeChange: (mode: EditViewMode) => void;
 	onMeshChange: (meshId: EditMeshId) => void;
 	onRoadStyleChange: (style: RoadStyle) => void;
+	onTransformModeChange: (mode: EditTransformMode) => void;
 	onSave: () => void;
 	/** Create a custom world; sizeKm is 0.1–10. */
 	onCreateWorld: (sizeKm: number) => void;
@@ -47,6 +56,8 @@ export class EditModeUI {
 	private readonly topBar: HTMLElement;
 	private readonly leftBar: HTMLElement;
 	private readonly meshPanel: HTMLElement;
+	private readonly meshCats: HTMLElement;
+	private readonly meshGrid: HTMLElement;
 	private readonly roadPanel: HTMLElement;
 	private readonly cameraPanel: HTMLElement;
 	private readonly selectPanel: HTMLElement;
@@ -59,13 +70,15 @@ export class EditModeUI {
 	private enabled = false;
 	private tool: EditTool = "camera";
 	private sculpt: SculptType = "raise";
-	private meshId: EditMeshId = "tree";
+	private meshId: EditMeshId = EDIT_MESH_CATALOG[0]?.id ?? "tree";
+	private meshCategory: EditMeshCategoryId = "trees";
+	private transformMode: EditTransformMode = "translate";
 	private roadStyle: RoadStyle = "mud";
 
 	constructor(private readonly options: EditModeUIOptions) {
-		const meshButtons = EDIT_MESH_CATALOG.map(
-			(entry, i) =>
-				`<button type="button" data-mesh="${entry.id}" class="edit-asset${i === 0 ? " is-active" : ""}"><span>${entry.label}</span></button>`
+		const catButtons = EDIT_MESH_CATEGORIES.map(
+			(cat, i) =>
+				`<button type="button" data-mesh-cat="${cat.id}" class="edit-chip${i === 0 ? " is-active" : ""}">${cat.label}</button>`
 		).join("");
 
 		this.root = document.createElement("div");
@@ -73,57 +86,75 @@ export class EditModeUI {
 		this.root.innerHTML = `
 			<button type="button" class="edit-mode-toggle" id="edit-mode-toggle" title="Edit Mode">Edit Mode</button>
 			<div class="edit-top-bar" id="edit-top-bar" hidden>
-				<div class="edit-bar-label">Sculpt</div>
-				<div class="edit-tool-row" id="edit-sculpt-tools">
-					<button type="button" data-sculpt="raise" class="edit-chip is-active">Raise</button>
-					<button type="button" data-sculpt="lower" class="edit-chip">Lower</button>
-					<button type="button" data-sculpt="smooth" class="edit-chip">Smooth</button>
-					<button type="button" data-sculpt="flatten" class="edit-chip">Flatten</button>
+				<div class="edit-top-scroll">
+					<div class="edit-top-options">
+						<div class="edit-bar-label">Sculpt</div>
+						<div class="edit-tool-row" id="edit-sculpt-tools">
+							<button type="button" data-sculpt="raise" class="edit-chip is-active">Raise</button>
+							<button type="button" data-sculpt="lower" class="edit-chip">Lower</button>
+							<button type="button" data-sculpt="smooth" class="edit-chip">Smooth</button>
+							<button type="button" data-sculpt="flatten" class="edit-chip">Flatten</button>
+						</div>
+						<label class="edit-slider edit-slider-pencil">
+							<span id="edit-brush-size-label">Pencil</span>
+							<input type="range" id="edit-brush-radius" min="0.5" max="24" step="0.5" value="3" />
+							<span class="edit-slider-value" id="edit-brush-radius-value">3</span>
+						</label>
+						<label class="edit-slider edit-slider-strength">
+							<span>Strength</span>
+							<input type="range" id="edit-brush-strength" min="0.05" max="1.5" step="0.05" value="0.35" />
+						</label>
+					</div>
+					<div class="edit-top-actions">
+						<button type="button" class="edit-chip" id="edit-undo-btn" title="Undo (Ctrl/⌘ Z)" disabled>Undo</button>
+						<button type="button" class="edit-chip" id="edit-redo-btn" title="Redo (Ctrl/⌘ Shift Z)" disabled>Redo</button>
+						<button type="button" class="edit-chip edit-save" id="edit-save-btn">Save World</button>
+						<button type="button" class="edit-chip" id="edit-create-world-btn">New World</button>
+						<button type="button" class="edit-chip edit-exit" id="edit-exit-btn">Exit Edit</button>
+					</div>
 				</div>
-				<label class="edit-slider edit-slider-pencil">
-					<span id="edit-brush-size-label">Pencil</span>
-					<input type="range" id="edit-brush-radius" min="0.5" max="24" step="0.5" value="3" />
-					<span class="edit-slider-value" id="edit-brush-radius-value">3</span>
-				</label>
-				<label class="edit-slider edit-slider-strength">
-					<span>Strength</span>
-					<input type="range" id="edit-brush-strength" min="0.05" max="1.5" step="0.05" value="0.35" />
-				</label>
-				<button type="button" class="edit-chip" id="edit-undo-btn" title="Undo (Ctrl/⌘ Z)" disabled>Undo</button>
-				<button type="button" class="edit-chip" id="edit-redo-btn" title="Redo (Ctrl/⌘ Shift Z)" disabled>Redo</button>
-				<button type="button" class="edit-chip edit-save" id="edit-save-btn">Save World</button>
-				<button type="button" class="edit-chip" id="edit-create-world-btn">New World</button>
-				<button type="button" class="edit-chip edit-exit" id="edit-exit-btn">Exit Edit</button>
 			</div>
 			<aside class="edit-left-bar" id="edit-left-bar" hidden>
-				<div class="edit-bar-label">Tools</div>
-				<button type="button" data-tool="camera" class="edit-asset is-active"><span>Camera</span></button>
-				<button type="button" data-tool="sculpt" class="edit-asset"><span>Sculpt</span></button>
-				<button type="button" data-tool="paint-road" class="edit-asset"><span>Road</span></button>
-				<button type="button" data-tool="place-mesh" class="edit-asset"><span>Meshes</span></button>
-				<button type="button" data-tool="paint-water" class="edit-asset"><span>Water</span></button>
-				<button type="button" data-tool="select" class="edit-asset"><span>Select</span></button>
-				<div class="edit-sub-panel" id="edit-select-panel" hidden>
-					<div class="edit-bar-label">Select</div>
-					<button type="button" class="edit-asset" id="edit-delete-btn"><span>Delete</span></button>
+				<div class="edit-tools-rail">
+					<div class="edit-bar-label edit-tools-label">Tools</div>
+					<div class="edit-tools-scroll">
+						<button type="button" data-tool="camera" class="edit-asset is-active"><span>Camera</span></button>
+						<button type="button" data-tool="sculpt" class="edit-asset"><span>Sculpt</span></button>
+						<button type="button" data-tool="paint-road" class="edit-asset"><span>Road</span></button>
+						<button type="button" data-tool="place-mesh" class="edit-asset"><span>Meshes</span></button>
+						<button type="button" data-tool="paint-water" class="edit-asset"><span>Water</span></button>
+						<button type="button" data-tool="select" class="edit-asset"><span>Select</span></button>
+					</div>
 				</div>
-				<div class="edit-sub-panel" id="edit-camera-panel">
-					<div class="edit-bar-label">View</div>
-					<button type="button" data-view="top" class="edit-asset is-active"><span>Top</span></button>
-					<button type="button" data-view="orbit" class="edit-asset"><span>Orbit</span></button>
+				<div class="edit-options-sheet" id="edit-options-sheet">
+					<div class="edit-sub-panel" id="edit-select-panel" hidden>
+						<div class="edit-bar-label">Transform</div>
+						<div class="edit-tool-row edit-xform-row">
+							<button type="button" data-xform="translate" class="edit-chip is-active" title="Move (G)">Move</button>
+							<button type="button" data-xform="rotate" class="edit-chip" title="Rotate (R)">Rotate</button>
+							<button type="button" data-xform="scale" class="edit-chip" title="Scale (S)">Scale</button>
+						</div>
+						<button type="button" class="edit-asset" id="edit-delete-btn"><span>Delete</span></button>
+					</div>
+					<div class="edit-sub-panel" id="edit-camera-panel">
+						<div class="edit-bar-label">View</div>
+						<button type="button" data-view="top" class="edit-asset is-active"><span>Top</span></button>
+						<button type="button" data-view="orbit" class="edit-asset"><span>Orbit</span></button>
+					</div>
+					<div class="edit-sub-panel" id="edit-road-panel" hidden>
+						<div class="edit-bar-label">Road</div>
+						<button type="button" data-road="mud" class="edit-asset is-active"><span>Light mud</span></button>
+					</div>
+					<div class="edit-sub-panel" id="edit-mesh-panel" hidden>
+						<div class="edit-bar-label">Place</div>
+						<div class="edit-mesh-cats" id="edit-mesh-cats">${catButtons}</div>
+						<div class="edit-mesh-grid" id="edit-mesh-grid"></div>
+					</div>
+					<div class="edit-sync-status" id="edit-sync-status">Island · 0 edits</div>
 				</div>
-				<div class="edit-sub-panel" id="edit-road-panel" hidden>
-					<div class="edit-bar-label">Road</div>
-					<button type="button" data-road="mud" class="edit-asset is-active"><span>Light mud</span></button>
-				</div>
-				<div class="edit-sub-panel" id="edit-mesh-panel" hidden>
-					<div class="edit-bar-label">Place</div>
-					${meshButtons}
-				</div>
-				<div class="edit-sync-status" id="edit-sync-status">Island · 0 edits</div>
 			</aside>
 			<div class="edit-mode-hint" id="edit-mode-hint" hidden>
-				Water: dig basin only · Save World fills continuous water · Exit Edit to see it
+				Orbit: drag to rotate · Shift-drag / WASD pan · Scroll zoom · Q/E height
 			</div>
 			<div class="edit-create-modal" id="edit-create-modal" hidden>
 				<div class="edit-create-dialog" role="dialog" aria-labelledby="edit-create-title">
@@ -147,6 +178,8 @@ export class EditModeUI {
 		this.topBar = this.root.querySelector("#edit-top-bar")!;
 		this.leftBar = this.root.querySelector("#edit-left-bar")!;
 		this.meshPanel = this.root.querySelector("#edit-mesh-panel")!;
+		this.meshCats = this.root.querySelector("#edit-mesh-cats")!;
+		this.meshGrid = this.root.querySelector("#edit-mesh-grid")!;
 		this.roadPanel = this.root.querySelector("#edit-road-panel")!;
 		this.cameraPanel = this.root.querySelector("#edit-camera-panel")!;
 		this.selectPanel = this.root.querySelector("#edit-select-panel")!;
@@ -191,6 +224,12 @@ export class EditModeUI {
 			this.options.onDeleteSelected();
 		});
 
+		this.selectPanel.querySelectorAll<HTMLButtonElement>("[data-xform]").forEach((btn) => {
+			btn.addEventListener("click", () => {
+				this.setTransformMode(btn.dataset.xform as EditTransformMode);
+			});
+		});
+
 		this.leftBar.querySelectorAll<HTMLButtonElement>("[data-tool]").forEach((btn) => {
 			btn.addEventListener("click", () => {
 				this.setTool(btn.dataset.tool as EditTool);
@@ -203,9 +242,9 @@ export class EditModeUI {
 			});
 		});
 
-		this.meshPanel.querySelectorAll<HTMLButtonElement>("[data-mesh]").forEach((btn) => {
+		this.meshCats.querySelectorAll<HTMLButtonElement>("[data-mesh-cat]").forEach((btn) => {
 			btn.addEventListener("click", () => {
-				this.setMesh(btn.dataset.mesh as EditMeshId);
+				this.setMeshCategory(btn.dataset.meshCat as EditMeshCategoryId);
 			});
 		});
 
@@ -232,6 +271,7 @@ export class EditModeUI {
 		strength.addEventListener("input", emitBrush);
 		emitBrush();
 
+		this.renderMeshGrid();
 		this.syncPanels();
 	}
 
@@ -245,6 +285,10 @@ export class EditModeUI {
 
 	get currentMeshId() {
 		return this.meshId;
+	}
+
+	get currentTransformMode() {
+		return this.transformMode;
 	}
 
 	get currentRoadStyle() {
@@ -303,6 +347,21 @@ export class EditModeUI {
 		this.redoBtn.disabled = !canRedo;
 	}
 
+	setHint(text: string) {
+		this.hint.textContent = text;
+	}
+
+	setTransformMode(mode: EditTransformMode) {
+		this.transformMode = mode;
+		this.selectPanel.querySelectorAll("[data-xform]").forEach((el) => {
+			el.classList.toggle(
+				"is-active",
+				(el as HTMLElement).dataset.xform === mode
+			);
+		});
+		this.options.onTransformModeChange(mode);
+	}
+
 	private openCreateWorldModal() {
 		this.createModal.hidden = false;
 	}
@@ -350,6 +409,7 @@ export class EditModeUI {
 			(this.tool === "sculpt" ||
 				this.tool === "paint-road" ||
 				this.tool === "paint-water");
+		const showOptions = showMeshes || showRoad || showCamera || showSelect;
 
 		this.meshPanel.hidden = !showMeshes;
 		this.meshPanel.classList.toggle("is-open", showMeshes);
@@ -361,6 +421,11 @@ export class EditModeUI {
 		this.selectPanel.classList.toggle("is-open", showSelect);
 		this.topBar.classList.toggle("is-sculpt-active", showSculpt);
 		this.topBar.classList.toggle("is-brush-active", showBrush);
+		this.leftBar.classList.toggle("has-options", showOptions);
+		this.leftBar.classList.toggle("has-mesh-browser", showMeshes);
+		this.root
+			.querySelector("#edit-options-sheet")
+			?.classList.toggle("has-options", showOptions);
 
 		const sizeLabel = this.root.querySelector<HTMLElement>("#edit-brush-size-label");
 		if (sizeLabel) {
@@ -373,9 +438,45 @@ export class EditModeUI {
 		}
 	}
 
+	private setMeshCategory(category: EditMeshCategoryId) {
+		this.meshCategory = category;
+		this.meshCats.querySelectorAll("[data-mesh-cat]").forEach((el) => {
+			el.classList.toggle(
+				"is-active",
+				(el as HTMLElement).dataset.meshCat === category
+			);
+		});
+		const items = getEditMeshesByCategory(category);
+		if (items.length && !items.some((e) => e.id === this.meshId)) {
+			this.setMesh(items[0]!.id);
+		}
+		this.renderMeshGrid();
+	}
+
+	private renderMeshGrid() {
+		const items = getEditMeshesByCategory(this.meshCategory);
+		this.meshGrid.innerHTML = items
+			.map(
+				(entry) => `
+			<button type="button" data-mesh="${entry.id}" class="edit-mesh-thumb${
+					entry.id === this.meshId ? " is-active" : ""
+				}" title="${entry.name}">
+				<img src="${entry.preview}" alt="${entry.name}" loading="lazy" draggable="false" />
+				<span>${entry.label}</span>
+			</button>`
+			)
+			.join("");
+
+		this.meshGrid.querySelectorAll<HTMLButtonElement>("[data-mesh]").forEach((btn) => {
+			btn.addEventListener("click", () => {
+				this.setMesh(btn.dataset.mesh as EditMeshId);
+			});
+		});
+	}
+
 	private setMesh(meshId: EditMeshId) {
 		this.meshId = meshId;
-		this.meshPanel.querySelectorAll("[data-mesh]").forEach((el) => {
+		this.meshGrid.querySelectorAll("[data-mesh]").forEach((el) => {
 			el.classList.toggle("is-active", (el as HTMLElement).dataset.mesh === meshId);
 		});
 		this.options.onMeshChange(meshId);

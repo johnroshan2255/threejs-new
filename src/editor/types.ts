@@ -68,11 +68,14 @@ export type PaintWaterOp = WorldEditOpBase & {
 
 export type PlaceMeshOp = WorldEditOpBase & {
 	type: "place-mesh";
-	meshId: "tree" | "stone";
+	/** Catalog id — see meshCatalog (tree, stone, stone-stone_smallA, …). */
+	meshId: string;
 	x: number;
 	z: number;
 	scale: number;
 	rotationY: number;
+	/** Optional absolute Y; omitted = snap to terrain on place. */
+	y?: number;
 };
 
 export type ForestTreeSpec = {
@@ -101,6 +104,19 @@ export type DeleteEntityOp = WorldEditOpBase & {
 	entityId: string;
 };
 
+/** Blender-like transform of a placed tree / stone. */
+export type TransformEntityOp = WorldEditOpBase & {
+	type: "transform-entity";
+	entityId: string;
+	x: number;
+	y: number;
+	z: number;
+	scale: number;
+	rotationY: number;
+	rotationX?: number;
+	rotationZ?: number;
+};
+
 export type WorldEditOp =
 	| SculptOp
 	| PlaceTreeOp
@@ -111,7 +127,8 @@ export type WorldEditOp =
 	| PaintWaterOp
 	| PaintForestOp
 	| RebuildColliderOp
-	| DeleteEntityOp;
+	| DeleteEntityOp
+	| TransformEntityOp;
 
 export type WorldEditDocument = {
 	version: 1;

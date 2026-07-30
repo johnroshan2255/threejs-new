@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
 import type { Socket } from "socket.io-client";
 import type { TreeHandle } from "../entities/tree";
 import type { PlacedStoneHandle } from "../entities/stone/placeStone";
@@ -9,11 +10,12 @@ import type { TerrainSculptTarget } from "./TerrainSculpt";
 import {
 	EditModeUI,
 	type EditTool,
+	type EditTransformMode,
 	type EditViewMode,
 	type RoadStyle,
 	type SculptType,
 } from "../ui/EditModeUI";
-import type { EditMeshId } from "./meshCatalog";
+import { pickPlaceScale, resolveEditMesh, type EditMeshId } from "./meshCatalog";
 import type { TerrainColliderHandle } from "../physics/terrainCollider";
 import { createTerrainHeightfieldCollider } from "../physics/terrainCollider";
 import { WorldEditStore } from "./WorldEditStore";
@@ -111,6 +113,9 @@ export class EditModeController {
 	private lastPaintAt = 0;
 	private selectedEntityId: string | null = null;
 	private selectionHelper: THREE.BoxHelper | null = null;
+	private transformControls: TransformControls | null = null;
+	private transformMode: EditTransformMode = "translate";
+	private transformDragging = false;
 	private autosaveTimer: number | null = null;
 	private applyingRemote = false;
 	private remoteColliderTimer: number | null = null;
@@ -198,6 +203,23 @@ export class EditModeController {
 		this.brushHelper.renderOrder = 10;
 		this.host.scene.add(this.brushHelper);
 
+		this.transformControls = new TransformControls(
+			this.ortho,
+			this.host.canvas
+		);
+		this.transformControls.visible = false;
+		this.transformControls.enabled = false;
+		this.transformControls.setSize(0.9);
+		this.transformControls.addEventListener("dragging-changed", (event) => {
+			this.transformDragging = Boolean(
+				(event as { value?: boolean }).value
+			);
+			if (!this.transformDragging) {
+				void this.commitSelectionTransform();
+			}
+		});
+		this.host.scene.add(this.transformControls);
+
 		this.ui = new EditModeUI({
 			onToggleEdit: (on) => this.setEnabled(on),
 			onToolChange: (tool) => {
@@ -208,6 +230,8 @@ export class EditModeController {
 				if (tool === "camera" && this.viewMode === "orbit") {
 					this.syncOrbit();
 				}
+				this.syncTransformControlsCamera();
+				this.refreshHint();
 			},
 			onSculptChange: (sculpt) => {
 				this.sculpt = sculpt;
@@ -226,6 +250,8 @@ export class EditModeController {
 				} else {
 					this.syncOrtho();
 				}
+				this.syncTransformControlsCamera();
+				this.refreshHint();
 			},
 			onMeshChange: (meshId) => {
 				this.meshId = meshId;
@@ -233,6 +259,9 @@ export class EditModeController {
 			onRoadStyleChange: (style) => {
 				this.roadStyle = style;
 				this.updateBrushColor();
+			},
+			onTransformModeChange: (mode) => {
+				this.setTransformMode(mode);
 			},
 			onSave: () => this.saveEdits(),
 			onCreateWorld: (sizeKm) => {
@@ -314,6 +343,14 @@ export class EditModeController {
 		this.clearSelection();
 		this.brushHelper.visible = enabled && this.isBrushTool(this.tool);
 
+		if (this.transformControls) {
+			this.transformControls.enabled = enabled && this.tool === "select";
+			if (!enabled) {
+				this.transformControls.detach();
+				this.transformControls.visible = false;
+			}
+		}
+
 		if (enabled) {
 			// Edit mode: basin digs only — hide simulated water so strokes can merge.
 			this.applier.setSpawnWaterSurfaces(false);
@@ -322,6 +359,7 @@ export class EditModeController {
 			this.recenterCameraOnTerrain();
 			this.syncBrushToWorld();
 			if (!this.terrainBaselineHeights) this.captureTerrainBaseline();
+			this.refreshHint();
 		} else {
 			this.applier.setSpawnWaterSurfaces(true);
 			void this.applyBakedWaterSurfaces().finally(() => {
@@ -362,6 +400,46 @@ export class EditModeController {
 		this.brushHelper.scale.setScalar(this.brushRadius);
 	}
 
+	private refreshHint() {
+		if (this.tool === "select") {
+			this.ui.setHint(
+				"Select mesh · G move · R rotate · S scale · drag gizmo · Delete removes"
+			);
+			return;
+		}
+		if (this.tool === "place-mesh") {
+			this.ui.setHint(
+				"Pick a thumbnail, click terrain to place · Select tool to move / rotate / scale"
+			);
+			return;
+		}
+		if (this.viewMode === "orbit") {
+			this.ui.setHint(
+				"Orbit: drag to rotate around target · Shift-drag / WASD pan · Scroll zoom · Q/E height · click to focus"
+			);
+			return;
+		}
+		if (this.tool === "paint-water") {
+			this.ui.setHint(
+				"Water: dig basin only · Save World fills continuous water · Exit Edit to see it"
+			);
+			return;
+		}
+		this.ui.setHint(
+			"Top view: drag / WASD pan · Scroll zoom · switch to Orbit to look around hills"
+		);
+	}
+
+	private setTransformMode(mode: EditTransformMode) {
+		this.transformMode = mode;
+		this.transformControls?.setMode(mode);
+	}
+
+	private syncTransformControlsCamera() {
+		if (!this.transformControls) return;
+		this.transformControls.camera = this.activeCamera;
+	}
+
 	private sampleTerrainY(x: number, z: number): number | null {
 		const mesh = this.host.getTerrainMesh();
 		const heights = this.host.getTerrainHeights();
@@ -386,6 +464,7 @@ export class EditModeController {
 		this.updateCameraKeys();
 		if (this.viewMode === "top") this.syncOrtho();
 		else this.syncOrbit();
+		this.syncTransformControlsCamera();
 		if (this.selectionHelper && this.selectedEntityId) {
 			const obj = this.applier.getEntityObject(this.selectedEntityId);
 			if (obj) this.selectionHelper.setFromObject(obj);
@@ -860,6 +939,24 @@ export class EditModeController {
 				void this.deleteSelected();
 				return;
 			}
+			if (this.tool === "select" && this.selectedEntityId) {
+				const k = event.key.toLowerCase();
+				if (k === "g") {
+					event.preventDefault();
+					this.ui.setTransformMode("translate");
+					return;
+				}
+				if (k === "r") {
+					event.preventDefault();
+					this.ui.setTransformMode("rotate");
+					return;
+				}
+				if (k === "s" && !(event.metaKey || event.ctrlKey)) {
+					event.preventDefault();
+					this.ui.setTransformMode("scale");
+					return;
+				}
+			}
 			if (this.tool !== "camera") return;
 			const key = event.key.toLowerCase();
 			if (["w", "a", "s", "d", "q", "e"].includes(key)) {
@@ -906,6 +1003,7 @@ export class EditModeController {
 			"pointerdown",
 			(event) => {
 				if (!this.enabled) return;
+				if (this.transformDragging) return;
 
 				// Blender-like navigation (any tool):
 				//   MMB / Alt+LMB / RMB = orbit   ·   Shift+drag those = pan
@@ -934,18 +1032,25 @@ export class EditModeController {
 
 				if (event.button !== 0) return;
 
-				// Camera tool: LMB drag pans; short click snaps focus to surface hit.
+				// Camera tool: LMB drag orbits (look around hills); Shift+LMB pans.
+				// Short click still snaps focus to the surface hit.
 				if (this.tool === "camera") {
 					this.lastPan.set(event.clientX, event.clientY);
 					this.pointerDownPos.set(event.clientX, event.clientY);
 					this.cameraClickFocus = true;
-					this.panning = true;
+					if (this.viewMode === "orbit" && !event.shiftKey) {
+						this.orbiting = true;
+					} else {
+						this.panning = true;
+					}
 					el.setPointerCapture(event.pointerId);
 					event.preventDefault();
 					return;
 				}
 
 				if (this.tool === "select") {
+					// Let TransformControls own the pointer when hovering a gizmo axis.
+					if (this.transformControls?.axis) return;
 					this.handleSelectClick(event.clientX, event.clientY);
 					event.preventDefault();
 					return;
@@ -978,6 +1083,7 @@ export class EditModeController {
 
 		el.addEventListener("pointermove", (event) => {
 			if (!this.enabled) return;
+			if (this.transformDragging) return;
 
 			if (this.orbiting) {
 				const dx = event.clientX - this.lastPan.x;
@@ -1211,16 +1317,57 @@ export class EditModeController {
 		this.selectionHelper = new THREE.BoxHelper(obj, 0xffe08a);
 		this.selectionHelper.name = "edit-selection";
 		this.host.scene.add(this.selectionHelper);
+
+		if (this.transformControls && this.applier.canTransformEntity(entityId)) {
+			this.syncTransformControlsCamera();
+			this.transformControls.setMode(this.transformMode);
+			this.transformControls.attach(obj);
+			this.transformControls.enabled = this.tool === "select";
+			this.transformControls.visible = true;
+		} else {
+			this.transformControls?.detach();
+			if (this.transformControls) this.transformControls.visible = false;
+		}
+		this.refreshHint();
 	}
 
 	private clearSelection() {
 		this.selectedEntityId = null;
+		this.transformDragging = false;
+		if (this.transformControls) {
+			this.transformControls.detach();
+			this.transformControls.visible = false;
+			this.transformControls.enabled = false;
+		}
 		if (this.selectionHelper) {
 			this.host.scene.remove(this.selectionHelper);
 			(this.selectionHelper.geometry as THREE.BufferGeometry | undefined)?.dispose();
 			(this.selectionHelper.material as THREE.Material | undefined)?.dispose();
 			this.selectionHelper = null;
 		}
+	}
+
+	private async commitSelectionTransform() {
+		if (!this.selectedEntityId || !this.applier.canTransformEntity(this.selectedEntityId)) {
+			return;
+		}
+		const obj = this.applier.getEntityObject(this.selectedEntityId);
+		if (!obj) return;
+		const scale = (obj.scale.x + obj.scale.y + obj.scale.z) / 3;
+		await this.commitOp(
+			this.store.createOp({
+				type: "transform-entity",
+				entityId: this.selectedEntityId,
+				x: obj.position.x,
+				y: obj.position.y,
+				z: obj.position.z,
+				scale: Math.max(0.05, scale),
+				rotationY: obj.rotation.y,
+				rotationX: obj.rotation.x,
+				rotationZ: obj.rotation.z,
+			})
+		);
+		this.selectionHelper?.setFromObject(obj);
 	}
 
 	private async deleteSelected() {
@@ -1239,16 +1386,14 @@ export class EditModeController {
 		if (this.placeBusy || this.tool !== "place-mesh") return;
 		this.placeBusy = true;
 		try {
-			const isStone = this.meshId === "stone";
+			const entry = resolveEditMesh(this.meshId);
 			await this.commitOp(
 				this.store.createOp({
 					type: "place-mesh",
-					meshId: this.meshId,
+					meshId: entry.id,
 					x: point.x,
 					z: point.z,
-					scale: isStone
-						? 2.2 + Math.random() * 0.8
-						: 0.9 + Math.random() * 0.35,
+					scale: pickPlaceScale(entry),
 					rotationY: Math.random() * Math.PI * 2,
 				})
 			);

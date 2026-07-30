@@ -224,6 +224,12 @@ export class FluffyGrass {
 	private initializationPromise: Promise<void>;
 	private currentFogRadius = 65;
 	private volumetricFog: VolumetricFogSystem | null = null;
+	/** Snapshot while edit/map mode disables fog so top view stays readable. */
+	private editFogBackup: {
+		density: number;
+		bg: THREE.Color;
+		volVisible: boolean;
+	} | null = null;
 	private lastFrameTime = performance.now();
 	private frameFireflyIntensity = 0;
 	private frameHeadAmount = 0;
@@ -1801,6 +1807,10 @@ export class FluffyGrass {
 			this.dayNightGui.hour = this.dayNight.hour;
 			this.dayNightGui.period = this.dayNight.period;
 			this.dayNightGui.auto = this.dayNight.auto;
+			if (this.sceneProps.mapMode) {
+				// Day/night re-applies FogExp2 every frame — keep it off in edit top-down.
+				this.suppressFogForEditMode();
+			}
 			if (now - this.lastSettingsSync >= 200) {
 				this.lastSettingsSync = now;
 				this.settings.setHour(this.dayNight.hour);
@@ -2725,6 +2735,7 @@ export class FluffyGrass {
 				this.sceneProps.mapMode = enabled;
 				if (this.carInput) this.carInput.isEnabled = !enabled && this.isGameActive;
 				if (this.humanInput) this.humanInput.isEnabled = !enabled && this.isGameActive;
+				this.applyEditMapAtmosphere(enabled);
 			},
 			addEditorTree: (tree) => {
 				this.trees.push(tree);
@@ -3127,6 +3138,57 @@ export class FluffyGrass {
 			this.grassMaterial.uniforms.baseColor.value.set(0x3e524e);
 			this.grassMaterial.uniforms.tipColor1.value.set(0x799894);
 			this.grassMaterial.uniforms.tipColor2.value.set(0x56726e);
+		}
+		if (this.sceneProps.mapMode) this.suppressFogForEditMode();
+	}
+
+	/** Ortho top cam sits hundreds of units up — FogExp2 turns the map pure white. */
+	private suppressFogForEditMode() {
+		if (this.scene.fog instanceof THREE.FogExp2) {
+			this.scene.fog.density = 0;
+			this.scene.fog.color.setHex(0x3d3d3d);
+		}
+		if (this.scene.background instanceof THREE.Color) {
+			this.scene.background.setHex(0x3d3d3d);
+		}
+		if (this.volumetricFog) this.volumetricFog.group.visible = false;
+	}
+
+	private applyEditMapAtmosphere(enabled: boolean) {
+		if (enabled) {
+			const bg =
+				this.scene.background instanceof THREE.Color
+					? this.scene.background.clone()
+					: new THREE.Color(this.sceneProps.fogColor);
+			const density =
+				this.scene.fog instanceof THREE.FogExp2
+					? this.scene.fog.density
+					: this.sceneProps.fogDensity;
+			this.editFogBackup = {
+				density,
+				bg,
+				volVisible: this.volumetricFog?.group.visible ?? false,
+			};
+			this.suppressFogForEditMode();
+			return;
+		}
+
+		const backup = this.editFogBackup;
+		this.editFogBackup = null;
+		if (!backup) {
+			this.applyWorldEnvironment(this.currentWorld);
+			return;
+		}
+		if (this.scene.background instanceof THREE.Color) {
+			this.scene.background.copy(backup.bg);
+		}
+		if (this.scene.fog instanceof THREE.FogExp2) {
+			this.scene.fog.color.copy(backup.bg);
+			this.scene.fog.density = backup.density;
+		}
+		if (this.volumetricFog) {
+			this.volumetricFog.group.visible =
+				backup.volVisible && this.graphicsQuality !== "Low";
 		}
 	}
 

@@ -2,21 +2,26 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { getWorldTerrainY } from "../../terrain/islandHeight";
 
-const STONE_URL = "/stone/stone_smallC.glb";
+const DEFAULT_STONE_URL = "/stone/stone_smallC.glb";
 
 export type PlacedStoneHandle = {
 	group: THREE.Group;
 	dispose: () => void;
 };
 
-let templatePromise: Promise<THREE.Group> | null = null;
+const templateCache = new Map<string, Promise<THREE.Group>>();
 
-function loadStoneTemplate(manager?: THREE.LoadingManager): Promise<THREE.Group> {
-	if (!templatePromise) {
-		templatePromise = new Promise((resolve, reject) => {
+function loadStoneTemplate(
+	url: string,
+	manager?: THREE.LoadingManager
+): Promise<THREE.Group> {
+	const key = url || DEFAULT_STONE_URL;
+	let pending = templateCache.get(key);
+	if (!pending) {
+		pending = new Promise((resolve, reject) => {
 			const loader = new GLTFLoader(manager);
 			loader.load(
-				STONE_URL,
+				key,
 				(gltf) => {
 					const root = gltf.scene;
 					root.traverse((child) => {
@@ -30,22 +35,31 @@ function loadStoneTemplate(manager?: THREE.LoadingManager): Promise<THREE.Group>
 				reject
 			);
 		});
+		templateCache.set(key, pending);
 	}
-	return templatePromise;
+	return pending;
 }
 
 export async function placeStone(options: {
 	position: THREE.Vector3;
 	scale?: number;
 	rotationY?: number;
+	/** Optional absolute Y; defaults to terrain height. */
+	y?: number;
+	assetUrl?: string;
 	manager?: THREE.LoadingManager;
 }): Promise<PlacedStoneHandle> {
-	const template = await loadStoneTemplate(options.manager);
+	const template = await loadStoneTemplate(
+		options.assetUrl ?? DEFAULT_STONE_URL,
+		options.manager
+	);
 	const group = template.clone(true);
 	const scale = options.scale ?? 2.2 + Math.random() * 0.8;
 	group.scale.setScalar(scale);
 	group.rotation.y = options.rotationY ?? Math.random() * Math.PI * 2;
-	const y = getWorldTerrainY(options.position.x, options.position.z);
+	const y =
+		options.y ??
+		getWorldTerrainY(options.position.x, options.position.z);
 	group.position.set(options.position.x, y, options.position.z);
 	group.name = "PlacedStone";
 

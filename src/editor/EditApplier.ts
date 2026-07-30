@@ -28,6 +28,7 @@ import {
 	type BasinSpec,
 } from "./basinWater";
 import type { WorldEditOp } from "./types";
+import { resolveEditMesh } from "./meshCatalog";
 
 /** Default dig radius when placing water on flat ground. */
 export const DEFAULT_WATER_RADIUS = 10;
@@ -128,6 +129,16 @@ export class EditApplier {
 		return entry.pond.mesh;
 	}
 
+	getEntityKind(entityId: string): "tree" | "stone" | "pond" | null {
+		return this.entities.get(entityId)?.kind ?? null;
+	}
+
+	/** True for meshes that support Blender-like transform gizmos. */
+	canTransformEntity(entityId: string): boolean {
+		const kind = this.getEntityKind(entityId);
+		return kind === "tree" || kind === "stone";
+	}
+
 	async apply(op: WorldEditOp): Promise<boolean> {
 		if (this.applied.has(op.id)) return false;
 		this.applied.add(op.id);
@@ -163,11 +174,14 @@ export class EditApplier {
 				return true;
 			}
 			case "place-mesh": {
-				if (op.meshId === "stone") {
+				const catalog = resolveEditMesh(op.meshId);
+				if (catalog.kind === "stone") {
 					const stone = await placeStone({
 						position: new THREE.Vector3(op.x, 0, op.z),
 						scale: op.scale,
 						rotationY: op.rotationY,
+						y: op.y,
+						assetUrl: catalog.assetUrl,
 					});
 					this.tagEntity(stone.group, op.id);
 					this.host.worldGroup.add(stone.group);
@@ -176,8 +190,11 @@ export class EditApplier {
 					return true;
 				}
 				const tree = await createTree({
-					position: [op.x, 0, op.z],
-					placeOnTerrain: true,
+					position:
+						op.y != null
+							? [op.x, op.y, op.z]
+							: [op.x, 0, op.z],
+					placeOnTerrain: op.y == null,
 					scale: op.scale,
 					rotationY: op.rotationY,
 					leafColor: "#3f6d21",
@@ -266,6 +283,18 @@ export class EditApplier {
 			}
 			case "delete-entity": {
 				this.removeEntity(op.entityId);
+				return true;
+			}
+			case "transform-entity": {
+				const obj = this.getEntityObject(op.entityId);
+				if (!obj || !this.canTransformEntity(op.entityId)) return false;
+				obj.position.set(op.x, op.y, op.z);
+				obj.rotation.x = op.rotationX ?? 0;
+				obj.rotation.y = op.rotationY;
+				obj.rotation.z = op.rotationZ ?? 0;
+				const s = Math.max(0.05, op.scale);
+				obj.scale.setScalar(s);
+				obj.updateMatrixWorld(true);
 				return true;
 			}
 			case "rebuild-collider": {
