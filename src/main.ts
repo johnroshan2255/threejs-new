@@ -70,6 +70,15 @@ import {
 	type LampFireflyGlow,
 } from "./environment/lampFireflyGlow";
 import { VolumetricFogSystem } from "./environment/VolumetricFogSystem";
+import {
+	VolumetricFogPass,
+	PLAYER_FOG_BAND,
+	PLAYER_FOG_RADIUS,
+	fogDensityForWorld,
+	fogDensityScaleForHour,
+	fogFollowsPlayer,
+	fogRadiusForWorld,
+} from "./environment/VolumetricFogPass";
 import { SmokeTrailSystem } from "./environment/smokeTrail";
 import { ExplosionSystem } from "./environment/ExplosionSystem";
 import { BombSound } from "./audio/BombSound";
@@ -257,12 +266,22 @@ export class FluffyGrass {
 	private valleySpawn = new THREE.Vector3(0, 4, 5);
 	private initializationPromise: Promise<void>;
 	private currentFogRadius = 65;
+	private volumetricFogDensity = 0.022;
+	private fogFollowPlayer = false;
 	private volumetricFog: VolumetricFogSystem | null = null;
+	private volumetricFogPass: VolumetricFogPass | null = null;
+	/** Residual FogExp2 while the screen-space pass does the heavy lifting. */
+	private residualFogDensity = 0.0008;
+	/** Full FogExp2 density to restore when the volumetric pass is off. */
+	private atmosphereFogDensity = 0.012;
+	private readonly _fogCenter = new THREE.Vector3();
+	private readonly _fogColorTmp = new THREE.Color();
 	/** Snapshot while edit/map mode disables fog so top view stays readable. */
 	private editFogBackup: {
 		density: number;
 		bg: THREE.Color;
 		volVisible: boolean;
+		passEnabled: boolean;
 	} | null = null;
 	/** Day/night state while editing — editor uses fixed noon; peers keep their own cycle. */
 	private editDayNightBackup: { auto: boolean; hour: number } | null = null;
@@ -339,6 +358,13 @@ export class FluffyGrass {
 		this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 		this.scene.frustumCulled = true;
 
+		this.volumetricFogPass = new VolumetricFogPass();
+		this.volumetricFogPass.setSize(
+			window.innerWidth * this.renderer.getPixelRatio(),
+			window.innerHeight * this.renderer.getPixelRatio()
+		);
+		this.volumetricFogPass.setQuality(this.graphicsQuality);
+
 		this.grassMaterial = new GrassMaterial();
 		this.terrainMat = new THREE.MeshPhongMaterial({
 			color: this.sceneProps.terrainColor,
@@ -374,8 +400,10 @@ export class FluffyGrass {
 			await this.setupCar();
 			await this.setupHuman();
 
-			// Initialize Volumetric Fog
-			this.volumetricFog = new VolumetricFogSystem(300);
+			// Billboard fog kept only as a Low-quality fallback (hidden when the
+			// screen-space volumetric pass is active).
+			this.volumetricFog = new VolumetricFogSystem(180);
+			this.volumetricFog.group.visible = false;
 			this.scene.add(this.volumetricFog.group);
 
 			await this.createLobbyModels();
@@ -1847,7 +1875,9 @@ export class FluffyGrass {
 		this.Uniforms.uTime.value += this.clock.getDelta();
 
 		if (this.car) {
-			const fogCenter = this.currentWorld === "valley" ? this.car.mesh.position : undefined;
+			const fogCenter = this.fogFollowPlayer
+				? this.car.mesh.position
+				: undefined;
 			const fogUpdateInterval = this.graphicsQuality === "High" ? 2 : 3;
 			if (
 				this.volumetricFog?.group.visible &&
@@ -1989,6 +2019,8 @@ export class FluffyGrass {
 			if (this.sceneProps.mapMode) {
 				// Day/night re-applies FogExp2 every frame — keep it off in edit top-down.
 				this.suppressFogForEditMode();
+			} else {
+				this.syncVolumetricFogFrame(now * 0.001);
 			}
 			if (now - this.lastSettingsSync >= 200) {
 				this.lastSettingsSync = now;
@@ -2411,7 +2443,8 @@ export class FluffyGrass {
 			}
 		}
 
-		this.renderer.render(
+		this.volumetricFogPass?.render(
+			this.renderer,
 			this.scene,
 			this.editMode?.isEnabled ? this.editMode.activeCamera : this.camera
 		);
@@ -2500,8 +2533,94 @@ export class FluffyGrass {
 		this.editorWaterFrameCounter = 0;
 		this.editorWaterDeltaAccumulator = 0;
 		this.resizePondTargets();
+		const pr = this.renderer.getPixelRatio();
+		this.volumetricFogPass?.setSize(
+			window.innerWidth * pr,
+			window.innerHeight * pr
+		);
+		this.syncVolumetricFogQuality();
+	}
+
+	/** Screen-space fog on Medium/High; billboard fallback only on Low. */
+	private syncVolumetricFogQuality() {
+		const quality = this.graphicsQuality;
+		const pass = this.volumetricFogPass;
+		const billboards = this.volumetricFog;
+		const inEdit = this.sceneProps.mapMode;
+
+		if (pass) {
+			pass.setQuality(quality);
+			pass.enabled = !inEdit && quality !== "Low";
+		}
+		if (billboards) {
+			billboards.group.visible = !inEdit && quality === "Low";
+		}
+		if (pass?.enabled && this.scene.fog instanceof THREE.FogExp2) {
+			this.scene.fog.density = this.residualFogDensity;
+		} else if (!inEdit && this.scene.fog instanceof THREE.FogExp2) {
+			this.scene.fog.density = this.atmosphereFogDensity;
+		}
+	}
+
+	/**
+	 * Feed day/night (or world-override) atmosphere into the raymarch pass and
+	 * keep FogExp2 as a light residual so materials don't double-fog.
+	 */
+	private syncVolumetricFogFrame(timeSec: number) {
+		const pass = this.volumetricFogPass;
+		if (!pass?.enabled || !this.dayNight) return;
+
+		// Always center the fog ring on the player.
+		if (this.activePlayer === "human" && this.human?.mesh) {
+			this._fogCenter.copy(this.human.mesh.position);
+		} else if (this.car?.mesh) {
+			this._fogCenter.copy(this.car.mesh.position);
+		} else {
+			this._fogCenter.copy(this.camera.position);
+		}
+
+		const override = this.dayNight.overrideColors;
+		const fogColor = override
+			? this.scene.fog instanceof THREE.FogExp2
+				? this.scene.fog.color
+				: this._fogColorTmp.set(this.sceneProps.fogColor)
+			: this.dayNight.getFogColor();
+
+		const timeScale = fogDensityScaleForHour(this.dayNight.hour);
+		// Lower base than before; morning ≈ this amount, noon clearer, night a bit more.
+		const baseDensity = override
+			? this.volumetricFogDensity
+			: Math.max(
+					this.volumetricFogDensity * 0.55,
+					this.dayNight.getFogDensity() * 0.65
+				);
+		const tableDensity = baseDensity * timeScale;
+
+		const key = this.dayNight.lights.keyLight;
+		const sunDir = this.dayNight.getSunDirection();
+
+		pass.setParams({
+			fogColor,
+			fogDensity: tableDensity,
+			fogCenter: this._fogCenter,
+			fogRadius: PLAYER_FOG_RADIUS,
+			fogRadiusSoft: PLAYER_FOG_BAND,
+			fogHeight: 0,
+			// ln(2)/15 ≈ half density on ~15m hills
+			heightFalloff: Math.LN2 / 15,
+			sunDirection: sunDir,
+			sunColor: key.color,
+			sunIntensity: Math.min(0.85, key.intensity * 0.16),
+			time: timeSec,
+		});
+
+		// Almost no global FogExp2 — volume is local to the player ring.
+		if (this.scene.fog instanceof THREE.FogExp2) {
+			this.scene.fog.color.copy(fogColor);
+			this.scene.fog.density = this.residualFogDensity * 0.35 * timeScale;
+		}
 		if (this.volumetricFog) {
-			this.volumetricFog.group.visible = quality !== "Low";
+			this.volumetricFog.setColor(fogColor);
 		}
 	}
 
@@ -3584,6 +3703,10 @@ export class FluffyGrass {
 	private applyWorldEnvironment(world: GameWorldId) {
 		const sky = this.scene.getObjectByName("sky-dome");
 		const def = this.knownWorldDefinition(world);
+		this.currentFogRadius = fogRadiusForWorld(def);
+		this.volumetricFogDensity = fogDensityForWorld(def);
+		this.fogFollowPlayer = fogFollowsPlayer(def);
+
 		if (world === "island" || def.kind === "custom") {
 			this.grassMaterial.setTerrainSize(def.size);
 			if (this.dayNight) {
@@ -3591,16 +3714,19 @@ export class FluffyGrass {
 				this.dayNight.setHour(this.dayNightGui.hour);
 			}
 			if (sky) sky.visible = true;
-			this.currentFogRadius = def.kind === "custom" ? 90 : 65;
 			this.grassMaterial.uniforms.baseColor.value.set("#313f1b");
 			this.grassMaterial.uniforms.tipColor1.value.set("#5e875e");
 			this.grassMaterial.uniforms.tipColor2.value.set("#1f352a");
 			this.scene.background = new THREE.Color(
 				def.kind === "custom" ? "#87a4c0" : this.sceneProps.fogColor
 			);
+			this.atmosphereFogDensity =
+				def.kind === "custom" ? 0.0035 : this.sceneProps.fogDensity;
 			if (this.scene.fog instanceof THREE.FogExp2) {
 				this.scene.fog.color.copy(this.scene.background as THREE.Color);
-				this.scene.fog.density = def.kind === "custom" ? 0.0035 : this.sceneProps.fogDensity;
+				this.scene.fog.density = this.volumetricFogPass?.enabled
+					? this.residualFogDensity
+					: this.atmosphereFogDensity;
 			}
 		} else {
 			this.grassMaterial.setTerrainSize(200);
@@ -3608,16 +3734,19 @@ export class FluffyGrass {
 			if (sky) sky.visible = false;
 			const color = new THREE.Color(0x1e2b2f);
 			this.scene.background = color.clone();
+			this.atmosphereFogDensity = 0.005;
 			if (this.scene.fog instanceof THREE.FogExp2) {
 				this.scene.fog.color.copy(color);
-				this.scene.fog.density = 0.005;
+				this.scene.fog.density = this.volumetricFogPass?.enabled
+					? this.residualFogDensity
+					: this.atmosphereFogDensity;
 			}
-			this.currentFogRadius = 250;
 			this.grassMaterial.uniforms.baseColor.value.set(0x3e524e);
 			this.grassMaterial.uniforms.tipColor1.value.set(0x799894);
 			this.grassMaterial.uniforms.tipColor2.value.set(0x56726e);
 		}
 		if (this.sceneProps.mapMode) this.suppressFogForEditMode();
+		else this.syncVolumetricFogQuality();
 	}
 
 	/** Ortho top cam sits hundreds of units up — FogExp2 turns the map pure white. */
@@ -3630,6 +3759,7 @@ export class FluffyGrass {
 			this.scene.background.setHex(0x3d3d3d);
 		}
 		if (this.volumetricFog) this.volumetricFog.group.visible = false;
+		if (this.volumetricFogPass) this.volumetricFogPass.enabled = false;
 	}
 
 	private applyEditMapAtmosphere(enabled: boolean) {
@@ -3640,12 +3770,13 @@ export class FluffyGrass {
 					: new THREE.Color(this.sceneProps.fogColor);
 			const density =
 				this.scene.fog instanceof THREE.FogExp2
-					? this.scene.fog.density
+					? this.atmosphereFogDensity
 					: this.sceneProps.fogDensity;
 			this.editFogBackup = {
 				density,
 				bg,
 				volVisible: this.volumetricFog?.group.visible ?? false,
+				passEnabled: this.volumetricFogPass?.enabled ?? false,
 			};
 			// Local editor only: lock noon lighting. Other clients keep their own day/night.
 			if (this.dayNight && !this.editDayNightBackup) {
@@ -3686,10 +3817,8 @@ export class FluffyGrass {
 			this.scene.fog.color.copy(backup.bg);
 			this.scene.fog.density = backup.density;
 		}
-		if (this.volumetricFog) {
-			this.volumetricFog.group.visible =
-				backup.volVisible && this.graphicsQuality !== "Low";
-		}
+		this.atmosphereFogDensity = backup.density;
+		this.syncVolumetricFogQuality();
 	}
 
 	private disposeIslandWorld() {
@@ -3984,6 +4113,11 @@ export class FluffyGrass {
 		this.camera.updateProjectionMatrix();
 		this.renderer.setSize(window.innerWidth, window.innerHeight);
 		this.resizePondTargets();
+		const pr = this.renderer.getPixelRatio();
+		this.volumetricFogPass?.setSize(
+			window.innerWidth * pr,
+			window.innerHeight * pr
+		);
 	}
 }
 

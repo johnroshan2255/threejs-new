@@ -348,6 +348,12 @@ export type DayNightCycle = {
 	update: (dt: number) => number;
 	getFireflyIntensity: () => number;
 	getGrassLight: () => number;
+	/** Current lerped fog color from the day/night table. */
+	getFogColor: () => THREE.Color;
+	/** Current lerped FogExp2-style density from the day/night table. */
+	getFogDensity: () => number;
+	/** Unit sun direction (points toward the sun). */
+	getSunDirection: () => THREE.Vector3;
 	dispose: () => void;
 	overrideColors: boolean;
 };
@@ -549,6 +555,9 @@ export function createDayNightCycle(
 		},
 		getFireflyIntensity: () => fireflyIntensity,
 		getGrassLight: () => grassLight,
+		getFogColor: () => sample.fog,
+		getFogDensity: () => sample.fogDensity,
+		getSunDirection: () => sunDir,
 		dispose() {
 			group.removeFromParent();
 			sky.geometry.dispose();

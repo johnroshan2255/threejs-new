@@ -43,8 +43,8 @@ export class VolumetricFogSystem {
             map: texture,
             transparent: true,
             depthWrite: false,
-            opacity: 0.8,
-            color: 0xffffff,
+            opacity: 0.35,
+            color: 0xdce6f0,
             blending: THREE.NormalBlending,
         });
 
