@@ -27,6 +27,7 @@ import {
 } from "./entities/car/carHeadlights";
 import { CAR_CONFIG } from "./entities/car/carConfig";
 import { EngineSound } from "./entities/car/EngineSound";
+import { VehicleGrapple } from "./entities/car/vehicleGrapple";
 import { updateChaseCamera, updateHumanCamera } from "./three/chaseCamera";
 import { ChaseCameraInput } from "./three/chaseCameraInput";
 import { HumanEntity } from "./entities/human/HumanEntity";
@@ -195,6 +196,7 @@ export class FluffyGrass {
 	private car: CarEntity | null = null;
 	private carInput: CarInput | null = null;
 	private carController: CarController | null = null;
+	private vehicleGrapple: VehicleGrapple | null = null;
 	private chaseCameraInput: ChaseCameraInput | null = null;
 	private engineSound: EngineSound | null = null;
 	private carOutOfWorldTimer = 0;
@@ -554,342 +556,342 @@ export class FluffyGrass {
 		this.socket = io(SERVER_URL, {
 			transports: ["websocket"],
 			upgrade: false
-		  });
+		});
 		this.editMode?.attachSocket(this.socket);
 
-			this.socket.on("room-updated", (players: any[]) => {
-				for (let i = 0; i < 4; i++) {
-					const slot = document.querySelector(`#player-slot-${i} .slot-content`);
-					if (slot) {
-						if (i < players.length) {
-							slot.textContent = players[i].user.username;
-							slot.classList.remove("empty");
-							slot.classList.add("filled");
-							if (this.lobbyModels[i]) this.lobbyModels[i].visible = !this.isGameActive;
-						} else {
-							slot.textContent = "Waiting...";
-							slot.classList.remove("filled");
-							slot.classList.add("empty");
-							if (this.lobbyModels[i]) this.lobbyModels[i].visible = false;
-						}
-					}
-				}
-
-				// Enable Start Game if host and >= 2 players
-				const startBtn = document.getElementById("start-game-btn") as HTMLButtonElement;
-				if (startBtn && this.socket?.id === players[0]?.socketId) {
-					if (players.length >= 2) {
-						startBtn.disabled = false;
-						startBtn.textContent = "Start Game";
+		this.socket.on("room-updated", (players: any[]) => {
+			for (let i = 0; i < 4; i++) {
+				const slot = document.querySelector(`#player-slot-${i} .slot-content`);
+				if (slot) {
+					if (i < players.length) {
+						slot.textContent = players[i].user.username;
+						slot.classList.remove("empty");
+						slot.classList.add("filled");
+						if (this.lobbyModels[i]) this.lobbyModels[i].visible = !this.isGameActive;
 					} else {
-						startBtn.disabled = true;
-						startBtn.textContent = "Waiting for players...";
+						slot.textContent = "Waiting...";
+						slot.classList.remove("filled");
+						slot.classList.add("empty");
+						if (this.lobbyModels[i]) this.lobbyModels[i].visible = false;
 					}
 				}
-			});
+			}
 
-			this.socket.on("host-migrated", (newHostId: string) => {
-				if (newHostId === this.socket?.id) {
-					const startBtn = document.getElementById("start-game-btn");
-					if (startBtn) startBtn.style.display = "block";
+			// Enable Start Game if host and >= 2 players
+			const startBtn = document.getElementById("start-game-btn") as HTMLButtonElement;
+			if (startBtn && this.socket?.id === players[0]?.socketId) {
+				if (players.length >= 2) {
+					startBtn.disabled = false;
+					startBtn.textContent = "Start Game";
+				} else {
+					startBtn.disabled = true;
+					startBtn.textContent = "Waiting for players...";
 				}
-			});
+			}
+		});
 
-			this.socket.on("room-closed", () => {
-				this.roomCode = "";
-				for (const [id, rp] of this.remotePlayers.entries()) {
-					if (rp.carGroup) this.scene.remove(rp.carGroup);
-					if (rp.humanGroup) this.scene.remove(rp.humanGroup);
-					if (rp.carBody) getWorld().removeRigidBody(rp.carBody);
-					if (rp.humanBody) getWorld().removeRigidBody(rp.humanBody);
-					if (rp.engineSound) rp.engineSound.dispose();
-					if (rp.hornSound) rp.hornSound.stop();
-				}
-				this.remotePlayers.clear();
-			});
+		this.socket.on("host-migrated", (newHostId: string) => {
+			if (newHostId === this.socket?.id) {
+				const startBtn = document.getElementById("start-game-btn");
+				if (startBtn) startBtn.style.display = "block";
+			}
+		});
 
-			this.socket.on("player-left", (socketId: string) => {
-				const rp = this.remotePlayers.get(socketId);
-				if (rp) {
-					if (rp.carGroup) this.scene.remove(rp.carGroup);
-					if (rp.humanGroup) this.scene.remove(rp.humanGroup);
-					if (rp.engineSound) rp.engineSound.dispose();
-					if (rp.hornSound) rp.hornSound.stop();
-					this.remotePlayers.delete(socketId);
-				}
-			});
+		this.socket.on("room-closed", () => {
+			this.roomCode = "";
+			for (const [id, rp] of this.remotePlayers.entries()) {
+				if (rp.carGroup) this.scene.remove(rp.carGroup);
+				if (rp.humanGroup) this.scene.remove(rp.humanGroup);
+				if (rp.carBody) getWorld().removeRigidBody(rp.carBody);
+				if (rp.humanBody) getWorld().removeRigidBody(rp.humanBody);
+				if (rp.engineSound) rp.engineSound.dispose();
+				if (rp.hornSound) rp.hornSound.stop();
+			}
+			this.remotePlayers.clear();
+		});
 
-			this.socket.on("game-started", (players: any[]) => {
-				if (players) {
-					const idx = players.findIndex(p => p.socketId === this.socket?.id);
-					if (idx !== -1) this.mySlotIndex = idx;
-				}
-				document.getElementById("lobby-panel")!.style.display = "none";
-				const proceedPlay = (window as any).proceedPlayFn; // We will attach proceed to window in start()
-				if (proceedPlay) {
-					proceedPlay("play", this.userData);
-				}
-			});
-
-			this.socket.on("bomb-picked-up", (data: any) => {
-				const { socketId, bombId } = data;
-				const rp = this.remotePlayers.get(socketId);
-				const bombData = this.bombs.find(b => b.id === bombId);
-
-				if (rp && rp.loaded && bombData) {
-					bombData.isFlying = false;
-					// Remove physics body
-					if (bombData.body) {
-						getWorld().removeRigidBody(bombData.body);
-						bombData.body = null;
-					}
-
-					let hand: THREE.Object3D | null = null;
-					rp.humanGroup.traverse((child: any) => {
-						if (child.name.toLowerCase().includes("righthand") && !hand) hand = child;
-					});
-
-					if (hand) {
-						bombData.mesh.position.set(0, 0.1, 0);
-						hand.add(bombData.mesh);
-					} else {
-						bombData.mesh.position.set(0, 0.5, 0.5);
-						rp.humanGroup.add(bombData.mesh);
-					}
-				}
-			});
-
-			this.socket.on("bomb-thrown", (data: any) => {
-				const { bombId, position, velocity } = data;
-				const bombData = this.bombs.find(b => b.id === bombId);
-
-				if (bombData) {
-					// Add back to scene
-					this.scene.add(bombData.mesh);
-					bombData.mesh.position.set(position.x, position.y, position.z);
-
-					// Recreate physics
-					const rbDesc = RAPIER.RigidBodyDesc.dynamic()
-						.setTranslation(position.x, position.y, position.z)
-						.setLinearDamping(0.1)
-						.setAngularDamping(0.5);
-					const body = getWorld().createRigidBody(rbDesc);
-
-					const colDesc = RAPIER.ColliderDesc.ball(0.5).setMass(10);
-					getWorld().createCollider(colDesc, body);
-
-					bombData.body = body;
-					bombData.isFlying = true;
-					bombData.flightTime = 0;
-					body.applyImpulse(velocity, true);
-
-					BombSound.playThrowSound(bombData.mesh.position);
-				}
-			});
-
-			this.socket.on("player-picked-up", (data: any) => {
-				const { socketId, targetSocketId } = data;
-				if (targetSocketId === this.socket?.id) {
-					// We are being carried!
-					this.isBeingCarriedBy = socketId;
-				}
-				
-				// Update remote player state
-				const carrier = this.remotePlayers.get(socketId);
-				if (carrier) carrier.isCarryingPlayer = true;
-				
-				const target = this.remotePlayers.get(targetSocketId);
-				if (target) target.isBeingCarried = true;
-			});
-
-			this.socket.on("player-thrown", (data: any) => {
-				const { socketId, targetSocketId, position, velocity } = data;
-				if (targetSocketId === this.socket?.id) {
-					// We were thrown!
-					this.isBeingCarriedBy = null;
-					if (this.human && this.humanInput) {
-						this.human.body.setTranslation(position, true);
-						this.humanInput.applyKnockback(new THREE.Vector3(velocity.x, velocity.y, velocity.z));
-						this.humanInput.startRecoverySequence();
-					}
-				}
-				
-				// Update remote player state
-				const carrier = this.remotePlayers.get(socketId);
-				if (carrier) carrier.isCarryingPlayer = false;
-				
-				const target = this.remotePlayers.get(targetSocketId);
-				if (target) target.isBeingCarried = false;
-			});
-
-			this.socket.on("player-state-updated", async (data: any) => {
-				const { socketId, state } = data;
-
-				// Ensure remote player object exists
-				let rp = this.remotePlayers.get(socketId);
-				if (!rp) {
-					// Async load the remote models
-					rp = {
-						loaded: false,
-						targetHumanPosition: new THREE.Vector3(),
-						targetHumanQuaternion: new THREE.Quaternion(),
-						targetCarPosition: new THREE.Vector3(),
-						targetCarQuaternion: new THREE.Quaternion()
-					};
-					this.remotePlayers.set(socketId, rp);
-
-					const humanGltf = await this.loadGltfFull("/poutine.glb");
-					const humanGroup = humanGltf.scene;
-					humanGroup.scale.setScalar(this.sceneProps.humanScale);
-					this.scene.add(humanGroup);
-
-					const mixer = new THREE.AnimationMixer(humanGroup);
-					const animations = new Map<string, THREE.AnimationAction>();
-					humanGltf.animations.forEach((clip: any) => {
-						const nameLower = clip.name.toLowerCase();
-						if (nameLower.includes("walk") || nameLower.includes("run")) {
-							clip.tracks.forEach((track: any) => {
-								if (track.name.toLowerCase().includes(".position")) {
-									const values = track.values;
-									const startX = values[0];
-									const startZ = values[2];
-									for (let i = 0; i < values.length; i += 3) {
-										values[i] = startX;
-										values[i + 2] = startZ;
-									}
-								}
-							});
-						}
-						const action = mixer.clipAction(clip);
-						if (nameLower === "being carried" || nameLower === "fall down" || nameLower === "sit to stand" || nameLower === "sweep fall" || nameLower === "stand to sit") {
-							action.setLoop(THREE.LoopOnce, 1);
-							action.clampWhenFinished = true;
-						} else {
-							action.setLoop(THREE.LoopRepeat, Infinity);
-						}
-						animations.set(nameLower, action);
-					});
-
-					const layout = await loadKenneySuvVisual(CAR_CONFIG.colliderYOffset, this.loadingManager);
-					const carGroup = new THREE.Group();
-					carGroup.add(layout.body);
-					layout.physicsWheelPositions.forEach(pos => {
-						const wheel = layout.wheelTemplate.clone();
-						wheel.position.set(pos[0], pos[1], pos[2]);
-						carGroup.add(wheel);
-					});
-					this.scene.add(carGroup);
-
-					// Create Kinematic Physics Bodies
-					const humanRadius = 0.45;
-					const humanHalfHeight = 1.5;
-					const humanDesc = RAPIER.RigidBodyDesc.kinematicPositionBased();
-					const humanBody = getWorld().createRigidBody(humanDesc);
-					const humanCollider = RAPIER.ColliderDesc.capsule(humanHalfHeight, humanRadius)
-						.setTranslation(0, HumanEntity.MESH_Y_OFFSET, 0); // Offset upwards from feet
-					getWorld().createCollider(humanCollider, humanBody);
-
-					const hx = Math.max(0.1, (layout.chassisSize.x / 2) - CAR_CONFIG.colliderRoundness);
-					const hy = layout.chassisSize.y / 2;
-					const hz = Math.max(0.1, (layout.chassisSize.z / 2) - CAR_CONFIG.colliderRoundness);
-					const colliderHy = Math.max(0.1, (hy * CAR_CONFIG.colliderHeightScale) - CAR_CONFIG.colliderRoundness);
-					const colliderLocalY = CAR_CONFIG.colliderYOffset + hy * CAR_CONFIG.colliderLocalYFactor;
-
-					const carDesc = RAPIER.RigidBodyDesc.kinematicPositionBased();
-					const carBody = getWorld().createRigidBody(carDesc);
-					const carCollider = RAPIER.ColliderDesc.roundCuboid(hx, colliderHy, hz, CAR_CONFIG.colliderRoundness)
-						.setTranslation(0, colliderLocalY, 0);
-					getWorld().createCollider(carCollider, carBody);
-
-					rp.loaded = true;
-					rp.humanGroup = humanGroup;
-					rp.carGroup = carGroup;
-					rp.humanBody = humanBody;
-					rp.carBody = carBody;
-					rp.mixer = mixer;
-					rp.animations = animations;
-					rp.currentAction = null;
-
-					// Avoid overwriting if they disconnected while loading
-					if (!this.remotePlayers.has(socketId)) {
-						this.scene.remove(humanGroup);
-						this.scene.remove(carGroup);
-						getWorld().removeRigidBody(humanBody);
-						getWorld().removeRigidBody(carBody);
-						return;
-					}
-				}
-
-				if (!rp.loaded) return;
-
-				// Apply State Target
-				if (state.humanPosition) {
-					rp.targetHumanPosition.set(state.humanPosition.x, state.humanPosition.y, state.humanPosition.z);
-					rp.targetHumanQuaternion.set(state.humanQuaternion.x, state.humanQuaternion.y, state.humanQuaternion.z, state.humanQuaternion.w);
-				}
-				if (state.carPosition) {
-					rp.targetCarPosition.set(state.carPosition.x, state.carPosition.y, state.carPosition.z);
-					rp.targetCarQuaternion.set(state.carQuaternion.x, state.carQuaternion.y, state.carQuaternion.z, state.carQuaternion.w);
-				}
-
-				if (!rp.engineSound) {
-					rp.engineSound = new EngineSound(true);
-					rp.engineSound.init();
-				}
-				if (!rp.hornSound) {
-					rp.hornSound = new HornSound();
-				}
-
-				if (state.honking && !rp.hornSound.isPlaying) {
-					rp.hornSound.play();
-				} else if (!state.honking && rp.hornSound.isPlaying) {
-					rp.hornSound.stop();
-				}
-
-				rp.benchSeat =
-					state.benchSeat === 0 || state.benchSeat === 1 ? state.benchSeat : null;
-
-				if (state.activeEntity === "human") {
-					rp.carGroup.visible = true; // Wait, actually should carGroup be true here? Yes, if they left it. But humanGroup should be true too!
-					rp.humanGroup.visible = true;
-					rp.engineSound.update(0, 0, rp.carGroup.position, true);
-
-					// Handle Animation
-					if (rp.isBeingCarried && rp.animations.has("being carried")) {
-						if (rp.currentAction !== rp.animations.get("being carried")) {
-							if (rp.currentAction) rp.currentAction.fadeOut(0.2);
-							rp.currentAction = rp.animations.get("being carried");
-							rp.currentAction!.reset().fadeIn(0.2).play();
-						}
-					} else if (state.animation && rp.animations.has(state.animation)) {
-						if (rp.currentAction !== rp.animations.get(state.animation)) {
-							if (rp.currentAction) rp.currentAction.fadeOut(0.2);
-							rp.currentAction = rp.animations.get(state.animation);
-							rp.currentAction!.reset().fadeIn(0.2).play();
-						}
-					}
-				} else if (state.activeEntity === "car") {
-					rp.humanGroup.visible = false;
-					rp.carGroup.visible = true;
-					rp.engineSound.update(
-						state.speed || 0,
-						state.throttle || 0,
-						rp.carGroup.position
-					);
-				}
-			});
-
-			this.socket.on("user-disconnected", (socketId: string) => {
-				const rp = this.remotePlayers.get(socketId);
-				if (rp && rp.loaded) {
-					this.scene.remove(rp.humanGroup!);
-					this.scene.remove(rp.carGroup!);
-					if (rp.carBody) getWorld().removeRigidBody(rp.carBody);
-					if (rp.humanBody) getWorld().removeRigidBody(rp.humanBody);
-					if (rp.engineSound) rp.engineSound.dispose();
-				}
+		this.socket.on("player-left", (socketId: string) => {
+			const rp = this.remotePlayers.get(socketId);
+			if (rp) {
+				if (rp.carGroup) this.scene.remove(rp.carGroup);
+				if (rp.humanGroup) this.scene.remove(rp.humanGroup);
+				if (rp.engineSound) rp.engineSound.dispose();
+				if (rp.hornSound) rp.hornSound.stop();
 				this.remotePlayers.delete(socketId);
-			});
+			}
+		});
+
+		this.socket.on("game-started", (players: any[]) => {
+			if (players) {
+				const idx = players.findIndex(p => p.socketId === this.socket?.id);
+				if (idx !== -1) this.mySlotIndex = idx;
+			}
+			document.getElementById("lobby-panel")!.style.display = "none";
+			const proceedPlay = (window as any).proceedPlayFn; // We will attach proceed to window in start()
+			if (proceedPlay) {
+				proceedPlay("play", this.userData);
+			}
+		});
+
+		this.socket.on("bomb-picked-up", (data: any) => {
+			const { socketId, bombId } = data;
+			const rp = this.remotePlayers.get(socketId);
+			const bombData = this.bombs.find(b => b.id === bombId);
+
+			if (rp && rp.loaded && bombData) {
+				bombData.isFlying = false;
+				// Remove physics body
+				if (bombData.body) {
+					getWorld().removeRigidBody(bombData.body);
+					bombData.body = null;
+				}
+
+				let hand: THREE.Object3D | null = null;
+				rp.humanGroup.traverse((child: any) => {
+					if (child.name.toLowerCase().includes("righthand") && !hand) hand = child;
+				});
+
+				if (hand) {
+					bombData.mesh.position.set(0, 0.1, 0);
+					hand.add(bombData.mesh);
+				} else {
+					bombData.mesh.position.set(0, 0.5, 0.5);
+					rp.humanGroup.add(bombData.mesh);
+				}
+			}
+		});
+
+		this.socket.on("bomb-thrown", (data: any) => {
+			const { bombId, position, velocity } = data;
+			const bombData = this.bombs.find(b => b.id === bombId);
+
+			if (bombData) {
+				// Add back to scene
+				this.scene.add(bombData.mesh);
+				bombData.mesh.position.set(position.x, position.y, position.z);
+
+				// Recreate physics
+				const rbDesc = RAPIER.RigidBodyDesc.dynamic()
+					.setTranslation(position.x, position.y, position.z)
+					.setLinearDamping(0.1)
+					.setAngularDamping(0.5);
+				const body = getWorld().createRigidBody(rbDesc);
+
+				const colDesc = RAPIER.ColliderDesc.ball(0.5).setMass(10);
+				getWorld().createCollider(colDesc, body);
+
+				bombData.body = body;
+				bombData.isFlying = true;
+				bombData.flightTime = 0;
+				body.applyImpulse(velocity, true);
+
+				BombSound.playThrowSound(bombData.mesh.position);
+			}
+		});
+
+		this.socket.on("player-picked-up", (data: any) => {
+			const { socketId, targetSocketId } = data;
+			if (targetSocketId === this.socket?.id) {
+				// We are being carried!
+				this.isBeingCarriedBy = socketId;
+			}
+
+			// Update remote player state
+			const carrier = this.remotePlayers.get(socketId);
+			if (carrier) carrier.isCarryingPlayer = true;
+
+			const target = this.remotePlayers.get(targetSocketId);
+			if (target) target.isBeingCarried = true;
+		});
+
+		this.socket.on("player-thrown", (data: any) => {
+			const { socketId, targetSocketId, position, velocity } = data;
+			if (targetSocketId === this.socket?.id) {
+				// We were thrown!
+				this.isBeingCarriedBy = null;
+				if (this.human && this.humanInput) {
+					this.human.body.setTranslation(position, true);
+					this.humanInput.applyKnockback(new THREE.Vector3(velocity.x, velocity.y, velocity.z));
+					this.humanInput.startRecoverySequence();
+				}
+			}
+
+			// Update remote player state
+			const carrier = this.remotePlayers.get(socketId);
+			if (carrier) carrier.isCarryingPlayer = false;
+
+			const target = this.remotePlayers.get(targetSocketId);
+			if (target) target.isBeingCarried = false;
+		});
+
+		this.socket.on("player-state-updated", async (data: any) => {
+			const { socketId, state } = data;
+
+			// Ensure remote player object exists
+			let rp = this.remotePlayers.get(socketId);
+			if (!rp) {
+				// Async load the remote models
+				rp = {
+					loaded: false,
+					targetHumanPosition: new THREE.Vector3(),
+					targetHumanQuaternion: new THREE.Quaternion(),
+					targetCarPosition: new THREE.Vector3(),
+					targetCarQuaternion: new THREE.Quaternion()
+				};
+				this.remotePlayers.set(socketId, rp);
+
+				const humanGltf = await this.loadGltfFull("/poutine.glb");
+				const humanGroup = humanGltf.scene;
+				humanGroup.scale.setScalar(this.sceneProps.humanScale);
+				this.scene.add(humanGroup);
+
+				const mixer = new THREE.AnimationMixer(humanGroup);
+				const animations = new Map<string, THREE.AnimationAction>();
+				humanGltf.animations.forEach((clip: any) => {
+					const nameLower = clip.name.toLowerCase();
+					if (nameLower.includes("walk") || nameLower.includes("run")) {
+						clip.tracks.forEach((track: any) => {
+							if (track.name.toLowerCase().includes(".position")) {
+								const values = track.values;
+								const startX = values[0];
+								const startZ = values[2];
+								for (let i = 0; i < values.length; i += 3) {
+									values[i] = startX;
+									values[i + 2] = startZ;
+								}
+							}
+						});
+					}
+					const action = mixer.clipAction(clip);
+					if (nameLower === "being carried" || nameLower === "fall down" || nameLower === "sit to stand" || nameLower === "sweep fall" || nameLower === "stand to sit") {
+						action.setLoop(THREE.LoopOnce, 1);
+						action.clampWhenFinished = true;
+					} else {
+						action.setLoop(THREE.LoopRepeat, Infinity);
+					}
+					animations.set(nameLower, action);
+				});
+
+				const layout = await loadKenneySuvVisual(CAR_CONFIG.colliderYOffset, this.loadingManager);
+				const carGroup = new THREE.Group();
+				carGroup.add(layout.body);
+				layout.physicsWheelPositions.forEach(pos => {
+					const wheel = layout.wheelTemplate.clone();
+					wheel.position.set(pos[0], pos[1], pos[2]);
+					carGroup.add(wheel);
+				});
+				this.scene.add(carGroup);
+
+				// Create Kinematic Physics Bodies
+				const humanRadius = 0.45;
+				const humanHalfHeight = 1.5;
+				const humanDesc = RAPIER.RigidBodyDesc.kinematicPositionBased();
+				const humanBody = getWorld().createRigidBody(humanDesc);
+				const humanCollider = RAPIER.ColliderDesc.capsule(humanHalfHeight, humanRadius)
+					.setTranslation(0, HumanEntity.MESH_Y_OFFSET, 0); // Offset upwards from feet
+				getWorld().createCollider(humanCollider, humanBody);
+
+				const hx = Math.max(0.1, (layout.chassisSize.x / 2) - CAR_CONFIG.colliderRoundness);
+				const hy = layout.chassisSize.y / 2;
+				const hz = Math.max(0.1, (layout.chassisSize.z / 2) - CAR_CONFIG.colliderRoundness);
+				const colliderHy = Math.max(0.1, (hy * CAR_CONFIG.colliderHeightScale) - CAR_CONFIG.colliderRoundness);
+				const colliderLocalY = CAR_CONFIG.colliderYOffset + hy * CAR_CONFIG.colliderLocalYFactor;
+
+				const carDesc = RAPIER.RigidBodyDesc.kinematicPositionBased();
+				const carBody = getWorld().createRigidBody(carDesc);
+				const carCollider = RAPIER.ColliderDesc.roundCuboid(hx, colliderHy, hz, CAR_CONFIG.colliderRoundness)
+					.setTranslation(0, colliderLocalY, 0);
+				getWorld().createCollider(carCollider, carBody);
+
+				rp.loaded = true;
+				rp.humanGroup = humanGroup;
+				rp.carGroup = carGroup;
+				rp.humanBody = humanBody;
+				rp.carBody = carBody;
+				rp.mixer = mixer;
+				rp.animations = animations;
+				rp.currentAction = null;
+
+				// Avoid overwriting if they disconnected while loading
+				if (!this.remotePlayers.has(socketId)) {
+					this.scene.remove(humanGroup);
+					this.scene.remove(carGroup);
+					getWorld().removeRigidBody(humanBody);
+					getWorld().removeRigidBody(carBody);
+					return;
+				}
+			}
+
+			if (!rp.loaded) return;
+
+			// Apply State Target
+			if (state.humanPosition) {
+				rp.targetHumanPosition.set(state.humanPosition.x, state.humanPosition.y, state.humanPosition.z);
+				rp.targetHumanQuaternion.set(state.humanQuaternion.x, state.humanQuaternion.y, state.humanQuaternion.z, state.humanQuaternion.w);
+			}
+			if (state.carPosition) {
+				rp.targetCarPosition.set(state.carPosition.x, state.carPosition.y, state.carPosition.z);
+				rp.targetCarQuaternion.set(state.carQuaternion.x, state.carQuaternion.y, state.carQuaternion.z, state.carQuaternion.w);
+			}
+
+			if (!rp.engineSound) {
+				rp.engineSound = new EngineSound(true);
+				rp.engineSound.init();
+			}
+			if (!rp.hornSound) {
+				rp.hornSound = new HornSound();
+			}
+
+			if (state.honking && !rp.hornSound.isPlaying) {
+				rp.hornSound.play();
+			} else if (!state.honking && rp.hornSound.isPlaying) {
+				rp.hornSound.stop();
+			}
+
+			rp.benchSeat =
+				state.benchSeat === 0 || state.benchSeat === 1 ? state.benchSeat : null;
+
+			if (state.activeEntity === "human") {
+				rp.carGroup.visible = true; // Wait, actually should carGroup be true here? Yes, if they left it. But humanGroup should be true too!
+				rp.humanGroup.visible = true;
+				rp.engineSound.update(0, 0, rp.carGroup.position, true);
+
+				// Handle Animation
+				if (rp.isBeingCarried && rp.animations.has("being carried")) {
+					if (rp.currentAction !== rp.animations.get("being carried")) {
+						if (rp.currentAction) rp.currentAction.fadeOut(0.2);
+						rp.currentAction = rp.animations.get("being carried");
+						rp.currentAction!.reset().fadeIn(0.2).play();
+					}
+				} else if (state.animation && rp.animations.has(state.animation)) {
+					if (rp.currentAction !== rp.animations.get(state.animation)) {
+						if (rp.currentAction) rp.currentAction.fadeOut(0.2);
+						rp.currentAction = rp.animations.get(state.animation);
+						rp.currentAction!.reset().fadeIn(0.2).play();
+					}
+				}
+			} else if (state.activeEntity === "car") {
+				rp.humanGroup.visible = false;
+				rp.carGroup.visible = true;
+				rp.engineSound.update(
+					state.speed || 0,
+					state.throttle || 0,
+					rp.carGroup.position
+				);
+			}
+		});
+
+		this.socket.on("user-disconnected", (socketId: string) => {
+			const rp = this.remotePlayers.get(socketId);
+			if (rp && rp.loaded) {
+				this.scene.remove(rp.humanGroup!);
+				this.scene.remove(rp.carGroup!);
+				if (rp.carBody) getWorld().removeRigidBody(rp.carBody);
+				if (rp.humanBody) getWorld().removeRigidBody(rp.humanBody);
+				if (rp.engineSound) rp.engineSound.dispose();
+			}
+			this.remotePlayers.delete(socketId);
+		});
 	}
 
 	private async tryOpenSharedWorldFromUrl() {
@@ -1260,10 +1262,10 @@ export class FluffyGrass {
 					if (steepness < 0.7 && Math.random() > 0.15) continue;
 					const clusterNoise =
 						Math.sin(position.x * 0.4 + position.z * 0.3) *
-							Math.cos(position.z * 0.5 - position.x * 0.2) +
+						Math.cos(position.z * 0.5 - position.x * 0.2) +
 						Math.sin(position.x * 0.8 + 2.1) *
-							Math.cos(position.z * 0.7 + 1.3) *
-							0.5;
+						Math.cos(position.z * 0.7 + 1.3) *
+						0.5;
 					if (clusterNoise < 0.2) continue;
 				} else if (normal.y < minNormalY) {
 					continue;
@@ -1347,7 +1349,7 @@ export class FluffyGrass {
 			let foundGrass = false;
 			grassScene.traverse((child) => {
 				if (child instanceof THREE.Mesh && child.name.includes("LOD00")) {
-					child.geometry.scale(5, 1, 5);
+					child.geometry.scale(5, 5, 5);
 					this.grassGeometry = child.geometry;
 					foundGrass = true;
 				}
@@ -1581,6 +1583,10 @@ export class FluffyGrass {
 			}
 		});
 
+		this.vehicleGrapple?.dispose();
+		this.vehicleGrapple = new VehicleGrapple(car);
+		assignCarLightingLayer(this.vehicleGrapple.group);
+
 		this.mobileControls = createMobileControls(() => {
 			if (this.car && this.carController) {
 				resetCarUpright(this.car, this.carController);
@@ -1757,7 +1763,7 @@ export class FluffyGrass {
 			if (!this.human) return null;
 			let nearestPlayerId: string | null = null;
 			let minDst = Infinity;
-			
+
 			for (const [socketId, rp] of this.remotePlayers.entries()) {
 				if (!rp.loaded || !rp.humanGroup) continue;
 				if (rp.humanGroup.visible) {
@@ -1786,19 +1792,19 @@ export class FluffyGrass {
 			forward.applyQuaternion(this.human.mesh.quaternion);
 			forward.y = 0;
 			forward.normalize();
-			
+
 			const worldPos = new THREE.Vector3();
 			worldPos.copy(this.human.mesh.position);
-			worldPos.y += 1.5; 
+			worldPos.y += 1.5;
 			worldPos.y += HumanEntity.MESH_Y_OFFSET; // Account for physics body offset so they don't spawn underground!
 			worldPos.addScaledVector(forward, 1.5);
-			
+
 			const vel = {
 				x: forward.x * 3, // Toss them gently forward
 				y: 3,             // and slightly upward
 				z: forward.z * 3
 			};
-			
+
 			if (this.socket && this.roomCode) {
 				this.socket.emit("player-throw", {
 					roomCode: this.roomCode,
@@ -1807,7 +1813,7 @@ export class FluffyGrass {
 					velocity: vel
 				});
 			}
-			
+
 			const target = this.remotePlayers.get(socketId);
 			if (target) target.isBeingCarried = false;
 		};
@@ -2061,7 +2067,18 @@ export class FluffyGrass {
 			if (playAllowed) {
 				if (this.activePlayer === "car") {
 					this.carInput.applyInput(dt);
+					if (this.vehicleGrapple) {
+						const justPressed = this.carInput.consumeGrapplePress();
+						const detachPressed = this.carInput.consumeGrappleDetach();
+						this.vehicleGrapple.update(
+							dt,
+							this.carInput.isGrappleHeld,
+							justPressed,
+							detachPressed
+						);
+					}
 				} else {
+					this.vehicleGrapple?.release();
 					if (!this.isBeingCarriedBy && this.sitState === "none") {
 						this.humanInput.isEnabled = true;
 						this.humanInput.update(dt, this.camera);
@@ -2076,16 +2093,16 @@ export class FluffyGrass {
 				if (carrier && carrier.loaded && carrier.humanGroup) {
 					const forward = new THREE.Vector3(0, 0, 1).applyQuaternion(carrier.humanGroup.quaternion).normalize();
 					const right = new THREE.Vector3(-1, 0, 0).applyQuaternion(carrier.humanGroup.quaternion).normalize();
-					
+
 					const worldPos = new THREE.Vector3();
 					carrier.humanGroup.getWorldPosition(worldPos);
 					worldPos.addScaledVector(forward, 0.65); // Move forward into hands (increased distance)
 					worldPos.addScaledVector(right, 0.7); // Move to the right side (centered slightly more)
 					worldPos.y += 1.4; // Hands height for mesh
 					worldPos.y += HumanEntity.MESH_Y_OFFSET; // Add physics body offset
-					
+
 					this.human.body.setTranslation(worldPos, true);
-					this.human.body.setLinvel({x:0, y:0, z:0}, true);
+					this.human.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
 				}
 				this.human.playAnimation("being carried");
 			}
@@ -2095,6 +2112,9 @@ export class FluffyGrass {
 			if (playAllowed) {
 				if (this.activePlayer === "car") {
 					this.carInput.afterPhysics(dt);
+					if (this.vehicleGrapple?.isAttached()) {
+						this.vehicleGrapple.afterPhysics(dt);
+					}
 				}
 				this.human.update(dt);
 			}
@@ -2427,20 +2447,20 @@ export class FluffyGrass {
 					// We are carrying this player! Snap them to our hands locally!
 					const forward = new THREE.Vector3(0, 0, 1).applyQuaternion(this.human.mesh.quaternion).normalize();
 					const right = new THREE.Vector3(-1, 0, 0).applyQuaternion(this.human.mesh.quaternion).normalize();
-					
+
 					const worldPos = new THREE.Vector3();
 					this.human.mesh.getWorldPosition(worldPos);
 					worldPos.addScaledVector(forward, 0.65); // Move forward into hands
 					worldPos.addScaledVector(right, 0.7); // Move to the right side
 					worldPos.y += 1.4; // Hands height
-					
+
 					rp.humanGroup.position.copy(worldPos);
 					rp.humanGroup.quaternion.copy(this.human.mesh.quaternion);
 				} else {
 					rp.humanGroup.position.lerp(rp.targetHumanPosition, lerpFactor);
 					rp.humanGroup.quaternion.slerp(rp.targetHumanQuaternion, lerpFactor);
 				}
-				
+
 				if (rp.humanBody) {
 					if (isCarriedByMe || rp.isBeingCarried) {
 						// Move their physics body far away so it doesn't push us into the sky!
@@ -2619,9 +2639,9 @@ export class FluffyGrass {
 		const baseDensity = override
 			? this.volumetricFogDensity
 			: Math.max(
-					this.volumetricFogDensity * 0.55,
-					this.dayNight.getFogDensity() * 0.65
-				);
+				this.volumetricFogDensity * 0.55,
+				this.dayNight.getFogDensity() * 0.65
+			);
 		const tableDensity = baseDensity * timeScale;
 
 		const key = this.dayNight.lights.keyLight;
@@ -3101,7 +3121,7 @@ export class FluffyGrass {
 				mat.color.setHex(0xffffff);
 				mat.needsUpdate = true;
 			},
-	setMapMode: (enabled) => {
+			setMapMode: (enabled) => {
 				this.sceneProps.mapMode = enabled;
 				if (this.carInput) {
 					this.carInput.isEnabled =
@@ -3530,6 +3550,7 @@ export class FluffyGrass {
 		if (this.activePlayer === "car") {
 			// Switch to human (can exit car anytime)
 			this.activePlayer = "human";
+			this.vehicleGrapple?.release();
 			if (this.carInput) {
 				this.carInput.isEnabled = false;
 				this.carInput.releaseControls();
@@ -3588,6 +3609,9 @@ export class FluffyGrass {
 
 	private async switchWorld(target: GameWorldId) {
 		if (target === this.currentWorld || this.isWorldSwitching) return;
+
+		// Drop any hook anchored in the world we are leaving.
+		this.vehicleGrapple?.release();
 
 		const previous = this.currentWorld;
 		const previousDef = this.activeWorldDef;

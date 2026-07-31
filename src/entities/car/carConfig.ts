@@ -29,7 +29,7 @@ export const CAR_CONFIG = {
 	},
 
 	drive: {
-		engineForce: 520,
+		engineForce: 800,
 		reverseForce: 260,
 		/** 0 = RWD (needed for rear-spin drift). */
 		frontDriveRatio: 0,
@@ -63,5 +63,42 @@ export const CAR_CONFIG = {
 		yawTorque: 55,
 		spinDriveScale: 0.85,
 		smokeRate: 12,
+	},
+
+	/**
+	 * Front winch / grappling hook (T while driving).
+	 * Mount sits on the front number-plate / bumper for any chassis size.
+	 */
+	grapple: {
+		maxRange: 30,
+		/** Steady reel-in speed while holding T (~5 mph). */
+		reelSpeed: 2.235,
+		/** Kill sideways bounce while winching. */
+		lateralDamp: 6.0,
+		/** Soften spinning / hopping while reeled. */
+		angularDampBoost: 3.0,
+		/** Release when this close to the anchor. */
+		arriveDistance: 2.5,
+		/** Only ease speed inside this distance from the anchor. */
+		arriveSlowRadius: 3.5,
+		/** Aim pitches for the attach fan (negative = down, positive = up steep faces). */
+		aimPitches: [-0.4, -0.2, 0, 0.25, 0.5, 0.85, 1.2, 1.7, 2.2],
+		/** Slight left/right yaw so we still catch offset cliff faces. */
+		aimYaws: [0, -0.18, 0.18],
+		/** On steep / near-vertical hills, prefer a latch up to this many meters above the bumper. */
+		steepAttachHeight: 5,
+		/** Minimum useful attach distance. */
+		minAttachDist: 1.0,
+		/**
+		 * Bumper number-plate local offset from chassis size.
+		 * Y low on the bumper; Z at the front face.
+		 */
+		mountYFactor: 0.12,
+		mountZFactor: 0.5,
+		/** Extra world nudge so the winch sits on the plate, not inside the bumper. */
+		mountYNudge: 0.08,
+		mountZNudge: 0.12,
+		ropeColor: 0x2a241c,
+		hookColor: 0x6a6e74,
 	},
 };

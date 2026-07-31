@@ -4,12 +4,28 @@ import type { MobileControls } from "../../ui/mobileControls";
 import { HornSound } from "../../audio/HornSound";
 import { isGameKeyBlocked } from "../../ui/gameInputFocus";
 
-const GAME_KEYS = new Set(["KeyW", "KeyA", "KeyS", "KeyD", "Space", "KeyR", "KeyE"]);
+const GAME_KEYS = new Set([
+	"KeyW",
+	"KeyA",
+	"KeyS",
+	"KeyD",
+	"Space",
+	"KeyR",
+	"KeyE",
+	"KeyT",
+	"KeyH",
+]);
 
 export class CarInput {
 	public isEnabled = false;
 	private mobile: MobileControls | null = null;
 	private horn: HornSound;
+	/** True while T is held (vehicle grapple reel). */
+	private grappleHeld = false;
+	/** Latched true for one applyInput frame after T goes down. */
+	private grappleJustPressed = false;
+	/** Latched true for one applyInput frame after H goes down (detach). */
+	private grappleDetachPressed = false;
 
 	constructor(
 		private controller: CarController,
@@ -23,6 +39,24 @@ export class CarInput {
 
 	public get isHonking() {
 		return this.horn.isPlaying;
+	}
+
+	public get isGrappleHeld() {
+		return this.grappleHeld;
+	}
+
+	/** Consumes the edge-triggered press for this frame. */
+	public consumeGrapplePress(): boolean {
+		const pressed = this.grappleJustPressed;
+		this.grappleJustPressed = false;
+		return pressed;
+	}
+
+	/** Consumes H-detach press for this frame. */
+	public consumeGrappleDetach(): boolean {
+		const pressed = this.grappleDetachPressed;
+		this.grappleDetachPressed = false;
+		return pressed;
 	}
 
 	/** Call when leaving the car so the horn can't keep blaring. */
@@ -66,6 +100,17 @@ export class CarInput {
 			return;
 		}
 
+		if (e.code === "KeyT") {
+			this.grappleHeld = true;
+			this.grappleJustPressed = true;
+			return;
+		}
+
+		if (e.code === "KeyH") {
+			this.grappleDetachPressed = true;
+			return;
+		}
+
 		this.set(e, true);
 	};
 
@@ -80,6 +125,16 @@ export class CarInput {
 			return;
 		}
 
+		if (e.code === "KeyT") {
+			this.grappleHeld = false;
+			this.grappleJustPressed = false;
+			return;
+		}
+
+		if (e.code === "KeyH") {
+			return;
+		}
+
 		if (!this.isEnabled) return;
 		this.set(e, false);
 	};
@@ -91,6 +146,9 @@ export class CarInput {
 		this.keys.a = false;
 		this.keys.d = false;
 		this.keys.space = false;
+		this.grappleHeld = false;
+		this.grappleJustPressed = false;
+		this.grappleDetachPressed = false;
 	};
 
 	private set(e: KeyboardEvent, val: boolean) {

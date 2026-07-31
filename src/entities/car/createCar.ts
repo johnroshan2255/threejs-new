@@ -5,6 +5,7 @@ import { getWorldTerrainY } from "../../terrain/islandHeight";
 import { getWorld } from "../../physics/world";
 import { CAR_CONFIG } from "./carConfig";
 import { loadKenneySuvVisual } from "./kenneyCarVisual";
+import { computeGrappleMountLocal } from "./vehicleGrapple";
 
 export type CarEntity = {
 	body: RAPIER.RigidBody;
@@ -15,6 +16,8 @@ export type CarEntity = {
 	driveFrontAxleIndices: number[];
 	driveRearAxleIndices: number[];
 	steeringWheelIndices: number[];
+	/** Front bumper mount in chassis local space (any future car mesh). */
+	grappleMountLocal: THREE.Vector3;
 };
 
 export async function createCar(
@@ -137,5 +140,6 @@ export async function createCar(
 		driveFrontAxleIndices,
 		driveRearAxleIndices,
 		steeringWheelIndices,
+		grappleMountLocal: computeGrappleMountLocal(chassisSize, layout.body),
 	};
 }
