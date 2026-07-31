@@ -1,6 +1,4 @@
 import {
-	WORLD_EDIT_DOCS_KEY,
-	WORLD_EDIT_STORAGE_KEY,
 	type WorldEditDocument,
 	type WorldEditOp,
 } from "./types";
@@ -25,6 +23,25 @@ export function getOrCreateClientId(): string {
 	}
 }
 
+/**
+ * Worlds used to be mirrored into localStorage. They now live in RAM until
+ * saved to the DB, so evict the old copies once on boot.
+ */
+export function purgeLegacyWorldStorage() {
+	const legacyKeys = [
+		"the-car-game:world-edit-draft:v1",
+		"the-car-game:world-edit-docs:v1",
+		"the-car-game:custom-worlds:v1",
+	];
+	for (const key of legacyKeys) {
+		try {
+			localStorage.removeItem(key);
+		} catch {
+			/* private mode */
+		}
+	}
+}
+
 export type CreateEmptyDocOptions = {
 	worldId: string;
 	worldName?: string;
@@ -33,8 +50,9 @@ export type CreateEmptyDocOptions = {
 };
 
 /**
- * In-memory append-only edit log. Serializable to JSON for later DB save.
- * Drafts are stored per worldId.
+ * In-memory append-only edit log — the only copy of in-progress edits.
+ * Serialized to JSON on Save World and PUT to the DB; never written to
+ * localStorage, so unsaved edits die with the tab.
  */
 export class WorldEditStore {
 	readonly clientId = getOrCreateClientId();
@@ -255,58 +273,5 @@ export class WorldEditStore {
 
 	private emit() {
 		for (const listener of this.listeners) listener();
-	}
-
-	persistDraftLocal() {
-		try {
-			localStorage.setItem(WORLD_EDIT_STORAGE_KEY, this.toJSONString(false));
-			const all = WorldEditStore.loadAllDocs();
-			all[this.document.worldId] = this.toJSON();
-			localStorage.setItem(WORLD_EDIT_DOCS_KEY, JSON.stringify(all));
-		} catch {
-			/* quota / private mode */
-		}
-	}
-
-	static loadAllDocs(): Record<string, WorldEditDocument> {
-		try {
-			const raw = localStorage.getItem(WORLD_EDIT_DOCS_KEY);
-			if (!raw) return {};
-			return JSON.parse(raw) as Record<string, WorldEditDocument>;
-		} catch {
-			return {};
-		}
-	}
-
-	static loadDocForWorld(worldId: string): WorldEditDocument | null {
-		return WorldEditStore.loadAllDocs()[worldId] ?? null;
-	}
-
-	/** Drop a polluted / hub draft so island edits cannot leak across sessions. */
-	static clearDocForWorld(worldId: string) {
-		try {
-			const all = WorldEditStore.loadAllDocs();
-			if (!(worldId in all)) return;
-			delete all[worldId];
-			localStorage.setItem(WORLD_EDIT_DOCS_KEY, JSON.stringify(all));
-			const draft = WorldEditStore.loadDraftLocal();
-			if (draft?.worldId === worldId) {
-				localStorage.removeItem(WORLD_EDIT_STORAGE_KEY);
-			}
-		} catch {
-			/* quota / private mode */
-		}
-	}
-
-	static loadDraftLocal(): WorldEditDocument | null {
-		try {
-			const raw = localStorage.getItem(WORLD_EDIT_STORAGE_KEY);
-			if (!raw) return null;
-			const parsed = JSON.parse(raw) as WorldEditDocument;
-			if (parsed?.version !== 1 || !Array.isArray(parsed.ops)) return null;
-			return parsed;
-		} catch {
-			return null;
-		}
 	}
 }

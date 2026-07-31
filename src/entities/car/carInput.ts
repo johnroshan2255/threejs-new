@@ -2,6 +2,7 @@ import { CarController } from "./carController";
 import type { DriveInput } from "./carController";
 import type { MobileControls } from "../../ui/mobileControls";
 import { HornSound } from "../../audio/HornSound";
+import { isGameKeyBlocked } from "../../ui/gameInputFocus";
 
 const GAME_KEYS = new Set(["KeyW", "KeyA", "KeyS", "KeyD", "Space", "KeyR", "KeyE"]);
 
@@ -43,6 +44,11 @@ export class CarInput {
 
 	private onKeyDown = (e: KeyboardEvent) => {
 		if (!this.isEnabled) return;
+		// Typing in a form (login, etc.) must never steer the car.
+		if (isGameKeyBlocked(e)) {
+			this.clearKeys();
+			return;
+		}
 		if (e.code === "KeyR") {
 			e.preventDefault();
 			if (e.repeat) return;
@@ -65,7 +71,9 @@ export class CarInput {
 
 	private onKeyUp = (e: KeyboardEvent) => {
 		if (!GAME_KEYS.has(e.code)) return;
-		e.preventDefault();
+		// Releases always clear (a key held when a form opens must not stick),
+		// but a form's keystrokes are left alone.
+		if (!isGameKeyBlocked(e)) e.preventDefault();
 
 		if (e.code === "KeyE") {
 			if (this.isEnabled) this.horn.stop();

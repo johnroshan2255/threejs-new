@@ -406,7 +406,11 @@ export class EditModeUI {
 						? `${(world.terrainSize / 1000).toFixed(1)} km`
 						: `${Math.round(world.terrainSize)} m`
 					: "";
-			const date = new Date(world.updatedAt).toLocaleDateString();
+			// Worlds created this session live in RAM only until the first save.
+			const date =
+				world.updatedAt > 0
+					? new Date(world.updatedAt).toLocaleDateString()
+					: "Not saved yet";
 			btn.innerHTML = `<strong>${escapeHtml(world.worldName)}</strong><span>${escapeHtml(
 				[sizeLabel, date].filter(Boolean).join(" · ")
 			)}</span>`;

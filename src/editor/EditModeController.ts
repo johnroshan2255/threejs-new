@@ -25,6 +25,7 @@ import { EditApplier } from "./EditApplier";
 import { EditSyncTransport } from "../net/EditSyncTransport";
 import type { WorldEditDocument, WorldEditOp } from "./types";
 import type { WorldDefinition } from "../worlds/worldTypes";
+import { isGameKeyBlocked } from "../ui/gameInputFocus";
 
 export type EditModeHost = {
 	scene: THREE.Scene;
@@ -38,13 +39,10 @@ export type EditModeHost = {
 	setTerrainHandle: (handle: TerrainColliderHandle | null) => void;
 	getGrassField: () => GrassChunkField | null;
 	getActiveWorldDefinition: () => WorldDefinition;
-	/** Resolve any known world def (island / valley / custom catalog). */
+	/** Resolve any world def known this session (island / valley / custom). */
 	getWorldDefinitionById: (worldId: string) => WorldDefinition | null;
-	/** Ensure a custom def exists locally (e.g. after fetching a shared world). */
-	ensureWorldDefinition: (
-		definition: WorldDefinition,
-		options?: { persist?: boolean }
-	) => void;
+	/** Register a custom def in the in-memory catalog (e.g. after a DB fetch). */
+	ensureWorldDefinition: (definition: WorldDefinition) => void;
 	enableTerrainVertexColors: () => void;
 	setMapMode: (enabled: boolean) => void;
 	addEditorTree: (tree: TreeHandle) => void;
@@ -59,21 +57,24 @@ export type EditModeHost = {
 	createNewLargeWorld: (sizeKm: number) => Promise<void>;
 	/** Switch active world (used when joining a room bound to a worldId). */
 	switchToWorldId: (worldId: string) => Promise<void>;
-	/** Local custom world defs (drafts / not yet saved to API). */
+	/** In-memory custom world defs (created this session, not yet in the DB). */
 	listLocalCustomWorlds: () => WorldDefinition[];
 	/** Rebuild fluffy grass from the current terrain (used after undo/redo). */
 	rebuildEditGrass: () => void;
+	/** Lift car / human out of terrain that rose over them. */
+	liftPlayersAboveTerrain?: () => void;
+	/** The DB's saved-world list changed (e.g. after Save World). */
+	onWorldsChanged?: () => void;
 	getAuthToken: () => string | null;
 	getAuthUser: () => { id?: string; username?: string } | null;
 	getServerUrl: () => string;
 };
 
 const PAINT_MIN_INTERVAL_MS = 40;
-const AUTOSAVE_MS = 800;
 
 /**
  * Edit mode: Camera navigate, sculpt, light-mud roads, meshes, water → Pond.
- * Save writes world-edit JSON to localStorage (API later for logged-in users).
+ * Edits live in RAM (WorldEditStore) and are written to the DB on Save World.
  */
 export class EditModeController {
 	readonly ui: EditModeUI;
@@ -121,19 +122,26 @@ export class EditModeController {
 	private transformControls: TransformControls | null = null;
 	private transformMode: EditTransformMode = "translate";
 	private transformDragging = false;
-	private autosaveTimer: number | null = null;
 	private applyingRemote = false;
 	private remoteColliderTimer: number | null = null;
 	/** Skip echo of our own Save World publish. */
 	private lastPublishedAt = 0;
 	private applyingPublished = false;
 	/**
-	 * When opening a remote document right after switchWorld, skip bindStore's
-	 * localStorage replay so ops are not applied twice.
+	 * When opening a fetched document right after switchWorld, skip bindStore's
+	 * cached replay so ops are not applied twice.
 	 */
 	private skipNextBindApply = false;
 	/** Bumps on each terrain rebuild so stale async applyMany calls abort. */
 	private terrainApplyGeneration = 0;
+	/**
+	 * Per-world edit docs kept in RAM for this tab only, so switching worlds
+	 * mid-session does not lose unsaved edits. Never persisted to the browser.
+	 */
+	private readonly sessionDocs = new Map<string, WorldEditDocument>();
+	/** In-flight world bind (edit replay), so callers can await final terrain. */
+	private bindTask: Promise<void> | null = null;
+	private bindTaskWorldId: string | null = null;
 
 	constructor(private readonly host: EditModeHost) {
 		const def = host.getActiveWorldDefinition();
@@ -340,7 +348,7 @@ export class EditModeController {
 		const canEdit = active && Boolean(user?.id);
 		this.ui.setVisible(canEdit);
 		if (!canEdit && this.enabled) void this.exitEditToHub();
-		if (active) this.bindStoreToActiveWorld();
+		if (active) void this.bindStoreToActiveWorld();
 		this.refreshStatus();
 	}
 
@@ -349,9 +357,13 @@ export class EditModeController {
 		this.onGameActiveChanged(this.host.isGameActive());
 	}
 
-	/** Call after switching island / valley / custom world. */
-	onActiveWorldChanged() {
-		this.bindStoreToActiveWorld();
+	/**
+	 * Call after switching island / valley / custom world.
+	 * Resolves once the world's saved edits are on the terrain — callers must
+	 * await this before sampling ground height (spawn placement).
+	 */
+	async onActiveWorldChanged(): Promise<void> {
+		const applied = this.bindStoreToActiveWorld();
 		this.sync.watchWorld(this.host.getActiveWorldDefinition().id);
 		this.refreshStatus();
 		this.syncBrushToWorld();
@@ -361,6 +373,7 @@ export class EditModeController {
 		} else if (this.enabled) {
 			this.recenterCameraOnTerrain();
 		}
+		await applied;
 	}
 
 	onRoomJoined() {
@@ -419,7 +432,7 @@ export class EditModeController {
 		try {
 			const remote = await this.persistence.loadRemoteWorld(worldId);
 			if (remote?.definition.kind === "custom") {
-				this.host.ensureWorldDefinition(remote.definition, { persist: true });
+				this.host.ensureWorldDefinition(remote.definition);
 				this.skipNextBindApply = true;
 				await this.host.switchToWorldId(remote.definition.id);
 				await this.applyPublishedDocument(remote.document, { silent: true });
@@ -632,6 +645,7 @@ export class EditModeController {
 
 		// Push saved world to anyone playing this worldId (same room / watchers).
 		if (result.syncedToBackend) {
+			this.host.onWorldsChanged?.();
 			const def = this.host.getActiveWorldDefinition();
 			this.lastPublishedAt = result.document.updatedAt;
 			this.sync.broadcastWorldSaved({
@@ -712,6 +726,7 @@ export class EditModeController {
 		this.restoreTerrainBaseline();
 		if (!doc.ops.length) {
 			this.rebuildCollider();
+			this.onTerrainSettled();
 			this.refreshStatus();
 			return;
 		}
@@ -720,20 +735,45 @@ export class EditModeController {
 			await this.applier.applyMany(doc.ops);
 			if (generation !== this.terrainApplyGeneration) return;
 			this.rebuildCollider();
+			this.onTerrainSettled();
 		} finally {
 			this.applyingRemote = false;
 		}
 		this.refreshStatus();
 	}
 
-	private bindStoreToActiveWorld() {
+	/**
+	 * Rebind the store to the active world and replay its edits.
+	 * Returns a promise that resolves when the terrain is final.
+	 */
+	private bindStoreToActiveWorld(): Promise<void> {
 		const def = this.host.getActiveWorldDefinition();
+		// switchWorld calls onGameActiveChanged and onActiveWorldChanged back to
+		// back; without this, two replays race over the same heights array and the
+		// second captures a half-sculpted baseline as "pristine".
+		if (this.bindTask && this.bindTaskWorldId === def.id) return this.bindTask;
+
+		const task = this.runBindToActiveWorld(def);
+		this.bindTask = task;
+		this.bindTaskWorldId = def.id;
+		void task.finally(() => {
+			if (this.bindTask === task) {
+				this.bindTask = null;
+				this.bindTaskWorldId = null;
+			}
+		});
+		return task;
+	}
+
+	private async runBindToActiveWorld(def: WorldDefinition): Promise<void> {
 		const isHub = def.kind === "island" || def.kind === "valley";
-		// Hub worlds are not editable — drop any leaked sculpt drafts onto island.
+		// Hub worlds are not editable — drop any sculpt doc that leaked onto them.
 		if (isHub) {
-			WorldEditStore.clearDocForWorld(def.id);
+			this.sessionDocs.delete(def.id);
 		}
-		const existing = isHub ? null : WorldEditStore.loadDocForWorld(def.id);
+		// Park the outgoing world's in-progress edits in RAM before rebinding.
+		this.stashActiveDoc();
+		const existing = isHub ? null : this.sessionDocs.get(def.id) ?? null;
 		const skipApply = this.skipNextBindApply;
 		this.skipNextBindApply = false;
 
@@ -761,11 +801,25 @@ export class EditModeController {
 		}
 
 		const generation = ++this.terrainApplyGeneration;
-		void this.applier.applyMany(existing.ops).then(() => {
-			if (generation !== this.terrainApplyGeneration) return;
-			this.rebuildCollider();
-			this.refreshStatus();
-		});
+		await this.applier.applyMany(existing.ops);
+		if (generation !== this.terrainApplyGeneration) return;
+		this.rebuildCollider();
+		// Grass was generated from the pristine procedural heights when the
+		// world was built — resample it onto the sculpted terrain.
+		this.onTerrainSettled();
+		this.refreshStatus();
+	}
+
+	/**
+	 * Snapshot the store into the RAM cache, so re-binding (world switch, login,
+	 * game start) never rolls the live document back. Hubs are never cached.
+	 */
+	private stashActiveDoc() {
+		if (this.store.opCount === 0) return;
+		const currentId = this.store.worldId;
+		const currentDef = this.host.getWorldDefinitionById(currentId);
+		if (currentDef && currentDef.kind !== "custom") return;
+		this.sessionDocs.set(currentId, this.store.toJSON());
 	}
 
 	private isBrushTool(tool: EditTool) {
@@ -866,7 +920,8 @@ export class EditModeController {
 		}
 
 		setIslandTerrain(mesh);
-		this.host.rebuildEditGrass();
+		// Grass is NOT rebuilt here — every caller applies edit ops next, and the
+		// rebuild has to happen after that or blades match the flat baseline.
 	}
 
 	private async rebuildFromOps() {
@@ -886,6 +941,7 @@ export class EditModeController {
 		}
 		if (generation !== this.terrainApplyGeneration) return;
 		this.rebuildCollider();
+		this.onTerrainSettled();
 		this.refreshStatus();
 	}
 
@@ -895,7 +951,6 @@ export class EditModeController {
 		try {
 			if (!this.store.undo()) return;
 			await this.rebuildFromOps();
-			this.scheduleAutosave();
 			if (!this.applyingRemote) {
 				this.sync.broadcastSnapshot(this.store.toJSON());
 			}
@@ -911,7 +966,6 @@ export class EditModeController {
 			const batch = this.store.redo();
 			if (!batch) return;
 			await this.rebuildFromOps();
-			this.scheduleAutosave();
 			if (!this.applyingRemote) {
 				this.sync.broadcastSnapshot(this.store.toJSON());
 			}
@@ -920,19 +974,10 @@ export class EditModeController {
 		}
 	}
 
-	private scheduleAutosave() {
-		if (this.autosaveTimer != null) window.clearTimeout(this.autosaveTimer);
-		this.autosaveTimer = window.setTimeout(() => {
-			this.persistence.autosaveDraft();
-			this.autosaveTimer = null;
-		}, AUTOSAVE_MS);
-	}
-
 	private async commitOp(op: WorldEditOp) {
 		if (!this.store.append(op)) return;
 		await this.applier.apply(op);
 		if (!this.applyingRemote) this.sync.broadcastOp(op);
-		this.scheduleAutosave();
 		this.refreshStatus();
 	}
 
@@ -955,7 +1000,6 @@ export class EditModeController {
 			this.store.append(op, { trackHistory: false });
 			await this.applier.apply(op);
 			if (op.type === "sculpt") this.scheduleRemoteColliderFlush();
-			this.scheduleAutosave();
 		} finally {
 			this.applyingRemote = false;
 		}
@@ -967,6 +1011,9 @@ export class EditModeController {
 		this.remoteColliderTimer = window.setTimeout(() => {
 			this.applier.flushColliderIfNeeded();
 			this.rebuildCollider();
+			// Debounce doubles as "remote stroke ended" — one resample per burst,
+			// so a peer's hills do not swallow our grass.
+			this.onTerrainSettled();
 			this.remoteColliderTimer = null;
 		}, 120);
 	}
@@ -1010,8 +1057,7 @@ export class EditModeController {
 		}
 
 		if (payload.definition?.kind === "custom") {
-			// Already in this world — keep def in memory only (avoid catalog pollution).
-			this.host.ensureWorldDefinition(payload.definition, { persist: false });
+			this.host.ensureWorldDefinition(payload.definition);
 		}
 
 		await this.applyPublishedDocument(payload.document, { silent: true });
@@ -1040,7 +1086,7 @@ export class EditModeController {
 			this.applier.clearEntities();
 			this.applier.clearApplied();
 			this.store.loadDocument(doc);
-			this.persistence.autosaveDraft();
+			this.sessionDocs.set(this.store.worldId, this.store.toJSON());
 			if (!this.terrainBaselineHeights) this.captureTerrainBaseline();
 			this.restoreTerrainBaseline();
 			if (doc.ops.length) {
@@ -1048,7 +1094,7 @@ export class EditModeController {
 			}
 			if (generation !== this.terrainApplyGeneration) return;
 			this.rebuildCollider();
-			this.host.rebuildEditGrass();
+			this.onTerrainSettled();
 		} finally {
 			this.applyingRemote = false;
 			this.applyingPublished = false;
@@ -1072,7 +1118,7 @@ export class EditModeController {
 			if (!def) {
 				const remote = await this.persistence.loadRemoteWorld(worldId);
 				if (remote) {
-					this.host.ensureWorldDefinition(remote.definition, { persist: true });
+					this.host.ensureWorldDefinition(remote.definition);
 					def = remote.definition;
 					this.skipNextBindApply = true;
 					await this.host.switchToWorldId(def.id);
@@ -1091,7 +1137,30 @@ export class EditModeController {
 		return this.host.getActiveWorldDefinition().id;
 	}
 
-	/** Publish current world JSON (local + API when logged in). */
+	/** The logged-in user's worlds from the DB (never from browser storage). */
+	async listMyWorlds() {
+		return this.persistence.listMineWorlds();
+	}
+
+	/** Drop RAM-cached edit docs (logout) so the next account starts clean. */
+	forgetCachedWorlds(keepWorldId?: string) {
+		for (const worldId of [...this.sessionDocs.keys()]) {
+			if (worldId !== keepWorldId) this.sessionDocs.delete(worldId);
+		}
+	}
+
+	/**
+	 * Fetch a saved world from the DB so the host can switch into it.
+	 * Its edit document is cached in RAM so the following bind replays it.
+	 */
+	async loadWorldFromDb(worldId: string): Promise<WorldDefinition | null> {
+		const remote = await this.persistence.loadRemoteWorld(worldId);
+		if (!remote) return null;
+		this.sessionDocs.set(remote.definition.id, remote.document);
+		return remote.definition;
+	}
+
+	/** Publish current world JSON to the DB (requires login). */
 	async publishWorld() {
 		return this.saveEdits();
 	}
@@ -1159,12 +1228,22 @@ export class EditModeController {
 	private commitRebuildCollider() {
 		this.applier.flushColliderIfNeeded();
 		const op = this.store.createOp({ type: "rebuild-collider" });
-		void this.commitOp(op).then(() => {
-			// Resample grass onto sculpted hills (skip only slopes steeper than 65°).
-			this.host.rebuildEditGrass();
-			// Re-mask roads / water after a full grass rebuild.
-			void this.reapplyGrassMasksOnly();
-		});
+		void this.commitOp(op).then(() => this.onTerrainSettled());
+	}
+
+	/**
+	 * The heightfield is final — re-fit everything that was placed against the
+	 * old surface. Must run AFTER edit ops are applied.
+	 *
+	 * Grass positions are baked into instance matrices, so without this, blades
+	 * sit inside raised terrain (visible through the hollow underside) or float
+	 * over dug ground. Same for the player, who can be left inside a hill.
+	 */
+	private onTerrainSettled() {
+		// Slopes steeper than 65° stay bare — the filter re-runs on every rebuild.
+		this.host.rebuildEditGrass();
+		void this.reapplyGrassMasksOnly();
+		this.host.liftPlayersAboveTerrain?.();
 	}
 
 	/** After grass rebuild, re-apply road/water grass clears without resetting terrain. */
@@ -1193,6 +1272,11 @@ export class EditModeController {
 	private bindKeys() {
 		window.addEventListener("keydown", (event) => {
 			if (!this.enabled) return;
+			// Editor shortcuts must not fire while a form / field has focus.
+			if (isGameKeyBlocked(event)) {
+				this.keys.clear();
+				return;
+			}
 			const key = (event.key ?? "").toLowerCase();
 			const mod = event.metaKey || event.ctrlKey;
 			if (mod && key === "z") {

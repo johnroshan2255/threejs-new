@@ -1,6 +1,11 @@
 import * as THREE from "three";
 import type { HumanEntity } from "./HumanEntity";
 import { type MobileControls } from "../../ui/mobileControls";
+import {
+	isGameKeyBlocked,
+	isTextEntryTarget,
+	isUiPointerTarget,
+} from "../../ui/gameInputFocus";
 
 export class HumanInput {
     public isEnabled = false;
@@ -78,8 +83,20 @@ export class HumanInput {
         this.mobileControls = mc;
     }
 
+    /** Drop every held key / button (form focus, leaving the game). */
+    public releaseControls() {
+        this.keys = {};
+        this.isLeftMouseDown = false;
+        this.isRightMouseDown = false;
+    }
+
     private onKeyDown = (e: KeyboardEvent) => {
         if (!this.isEnabled || !e.key) return;
+        // Typing in a form (login, etc.) must never move or act.
+        if (isGameKeyBlocked(e)) {
+            this.releaseControls();
+            return;
+        }
         const k = e.key.toLowerCase();
         this.keys[k] = true;
         if (k === "t") this.triggerPickup();
@@ -93,13 +110,18 @@ export class HumanInput {
 
     private onRightClick = (e: MouseEvent) => {
         if (!this.isEnabled) return;
+        // Keep the native menu over forms (paste into the login field).
+        if (isUiPointerTarget(e.target) || isTextEntryTarget(e.target)) return;
         e.preventDefault();
     };
 
     private onMouseDown = (e: MouseEvent) => {
         if (!this.isEnabled) return;
+        // Clicking a form / modal / nav button is UI, not a punch. Alt is the
+        // cursor-mode modifier, so Alt+click is pointing, not fighting.
+        if (isUiPointerTarget(e.target) || e.altKey) return;
         if (this.isCarryingPlayer) return; // Disable punches when carrying a player
-        
+
         if (e.button === 0) { // left
             this.isLeftMouseDown = true;
             this.leftMouseDownTime = performance.now();

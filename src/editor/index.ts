@@ -3,7 +3,7 @@ export type {
 	WorldEditDocument,
 	SculptBrush,
 } from "./types";
-export { WORLD_EDIT_SOCKET, WORLD_EDIT_STORAGE_KEY } from "./types";
+export { WORLD_EDIT_SOCKET } from "./types";
 export { WorldEditStore, getOrCreateClientId } from "./WorldEditStore";
 export { WorldEditPersistence } from "./WorldEditPersistence";
 export { WorldEditApi } from "./WorldEditApi";

@@ -6,9 +6,7 @@ import { WorldEditApi, type WorldVisibility } from "./WorldEditApi";
 export type SaveWorldEditResult = {
 	ok: boolean;
 	document: WorldEditDocument;
-	savedLocally: boolean;
 	syncedToBackend: boolean;
-	pendingBackend: boolean;
 	message: string;
 };
 
@@ -20,9 +18,9 @@ export type WorldEditPersistenceOptions = {
 };
 
 /**
- * Persistence facade.
- * - Always writes JSON to localStorage (draft / offline).
- * - When logged in, PUTs SavedWorldPayload to /api/worlds/:id (owned by user).
+ * Persistence facade. The DB is the only store for world edits.
+ * - Edits live in WorldEditStore (RAM) until Save World.
+ * - Save PUTs SavedWorldPayload to /api/worlds/:id (owned by user).
  * - Multiplayer peers sync live via socket ops/snapshots (EditSyncTransport).
  */
 export class WorldEditPersistence {
@@ -31,13 +29,8 @@ export class WorldEditPersistence {
 		private readonly options: WorldEditPersistenceOptions
 	) {}
 
-	autosaveDraft() {
-		this.store.persistDraftLocal();
-	}
-
 	async save(options?: { download?: boolean }): Promise<SaveWorldEditResult> {
 		const doc = this.store.toJSON();
-		this.store.persistDraftLocal();
 
 		if (options?.download === true) {
 			this.downloadJson(doc);
@@ -48,9 +41,7 @@ export class WorldEditPersistence {
 			return {
 				ok: false,
 				document: doc,
-				savedLocally: true,
 				syncedToBackend: false,
-				pendingBackend: true,
 				message: "Log in to save this world to your account.",
 			};
 		}
@@ -61,15 +52,13 @@ export class WorldEditPersistence {
 		const message = backend.synced
 			? "Saved to your account."
 			: backend.error
-				? `Draft kept locally (${backend.error})`
-				: "Saved to localStorage.";
+				? `Not saved — ${backend.error} Edits stay in this tab only.`
+				: "Not saved. Edits stay in this tab only.";
 
 		return {
 			ok: backend.ok,
 			document: doc,
-			savedLocally: true,
 			syncedToBackend: backend.synced,
-			pendingBackend: !backend.synced,
 			message,
 		};
 	}

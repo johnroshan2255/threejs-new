@@ -52,13 +52,13 @@ import {
 	createProceduralTerrain,
 	grassCountForSize,
 	ISLAND_GRASS_DENSITY,
-	ISLAND_TERRAIN_CELL,
 	ISLAND_WORLD,
 	paintTerrainMudShore,
 	VALLEY_WORLD,
 	type WorldDefinition,
 } from "./worlds";
-import { CUSTOM_WORLDS_KEY } from "./editor/types";
+import type { WorldListItem } from "./editor/WorldEditApi";
+import { purgeLegacyWorldStorage } from "./editor/WorldEditStore";
 import {
 	createDayNightCycle,
 	type DayNightCycle,
@@ -75,7 +75,17 @@ import { ExplosionSystem } from "./environment/ExplosionSystem";
 import { BombSound } from "./audio/BombSound";
 import { HornSound } from "./audio/HornSound";
 import { ProceduralBridge } from "./environment/ProceduralBridge";
-import { createMobileControls, type MobileControls } from "./ui/mobileControls";
+import {
+	createMobileControls,
+	isMobileDevice,
+	type MobileControls,
+} from "./ui/mobileControls";
+import {
+	isGameKeyBlocked,
+	isKeyboardCapturedByUi,
+	isTextEntryFocused,
+	isTextEntryTarget,
+} from "./ui/gameInputFocus";
 import { createOrientationGate, type OrientationGate } from "./ui/orientationGate";
 import { AuthService, type AuthUser } from "./auth/AuthService";
 import { GameNavigation } from "./ui/GameNavigation";
@@ -153,7 +163,10 @@ export class FluffyGrass {
 	private customHeights: Float32Array | null = null;
 	private customTerrainHandle: TerrainColliderHandle | null = null;
 	private activeWorldDef: WorldDefinition = ISLAND_WORLD;
+	/** Custom world defs known this session (created here or fetched from the DB). */
 	private customWorldDefs: WorldDefinition[] = [];
+	/** Last GET /api/worlds?mine=1 result — the source of truth for the picker. */
+	private savedWorldList: WorldListItem[] = [];
 	private graphicsQuality: GraphicsQuality = "High";
 	private waterUpdateInterval = 1;
 	private waterFrameCounter = 0;
@@ -300,7 +313,7 @@ export class FluffyGrass {
 		this.scene.add(this.customWorldGroup);
 		this.newWorldGroup.visible = false;
 		this.customWorldGroup.visible = false;
-		this.loadCustomWorldDefs();
+		purgeLegacyWorldStorage();
 
 		this.audioListener = new THREE.AudioListener();
 		this.camera.add(this.audioListener);
@@ -432,6 +445,7 @@ export class FluffyGrass {
 				onUserChanged: (user) => {
 					this.userData = user;
 					this.editMode?.onAuthChanged();
+					void this.refreshSavedWorldList();
 				},
 				onHost: () => this.connectSocket("host"),
 				onJoin: () => this.fetchRooms(),
@@ -442,6 +456,7 @@ export class FluffyGrass {
 			const restoredUser = await this.authService.restoreSession();
 			this.userData = restoredUser;
 			this.gameNavigation.setUser(restoredUser);
+			void this.refreshSavedWorldList();
 
 			this.loadingScreenController = new LoadingScreenController({
 				auth: this.authService,
@@ -450,6 +465,7 @@ export class FluffyGrass {
 					this.userData = user;
 					this.gameNavigation?.setUser(user);
 					this.editMode?.onAuthChanged();
+					void this.refreshSavedWorldList();
 				},
 			});
 			this.loadingScreenController.initialize();
@@ -864,7 +880,7 @@ export class FluffyGrass {
 
 		if (action === "host") {
 			const worldId = this.editMode?.getActiveWorldId() ?? this.activeWorldDef.id;
-			const worldDefinition = this.resolveWorldDefinition(worldId);
+			const worldDefinition = this.knownWorldDefinition(worldId);
 			this.socket!.emit(
 				"create-room",
 				{
@@ -1141,18 +1157,29 @@ export class FluffyGrass {
 			const spacing = Math.sqrt(1 / ISLAND_GRASS_DENSITY);
 			const fullCount = (size * size) * ISLAND_GRASS_DENSITY;
 			const keepProb = Math.min(1, this.grassCount / Math.max(1, fullCount));
+			const stride = nrows + 1;
+			/**
+			 * Bilinear over the terrain grid. The rendered surface interpolates
+			 * between vertices, so nearest-vertex snapping would sink blades into
+			 * slopes (or float them) by up to half a cell × tan(slope) — metres on
+			 * big worlds, where cells reach ~39 m at the 254-segment cap.
+			 */
 			const sampleH = (x: number, z: number) => {
-				const col = THREE.MathUtils.clamp(
-					Math.round(((x + half) / size) * ncols),
-					0,
-					ncols
-				);
-				const row = THREE.MathUtils.clamp(
-					Math.round(((z + half) / size) * nrows),
-					0,
-					nrows
-				);
-				return heights[row + col * (nrows + 1)]!;
+				const fx = THREE.MathUtils.clamp(((x + half) / size) * ncols, 0, ncols);
+				const fz = THREE.MathUtils.clamp(((z + half) / size) * nrows, 0, nrows);
+				const col0 = Math.floor(fx);
+				const row0 = Math.floor(fz);
+				const col1 = Math.min(col0 + 1, ncols);
+				const row1 = Math.min(row0 + 1, nrows);
+				const tx = fx - col0;
+				const tz = fz - row0;
+				const h00 = heights[row0 + col0 * stride]!;
+				const h10 = heights[row0 + col1 * stride]!;
+				const h01 = heights[row1 + col0 * stride]!;
+				const h11 = heights[row1 + col1 * stride]!;
+				const hRow0 = h00 + (h10 - h00) * tx;
+				const hRow1 = h01 + (h11 - h01) * tx;
+				return hRow0 + (hRow1 - hRow0) * tz;
 			};
 			const sampleN = (x: number, z: number, out: THREE.Vector3) => {
 				const e = Math.max(spacing * 0.5, size / ncols);
@@ -1163,13 +1190,20 @@ export class FluffyGrass {
 				).normalize();
 			};
 
-			for (let gz = -half + spacing * 0.5; gz < half; gz += spacing) {
+			let rowIndex = 0;
+			for (let gz = -half + spacing * 0.5; gz < half; gz += spacing, rowIndex++) {
 				if (matrices.length >= this.grassCount) break;
-				for (let gx = -half + spacing * 0.5; gx < half; gx += spacing) {
+				// Offset every other row by half a cell (hex-style packing). A square
+				// lattice lines blades up in axis-aligned rows, and the seam between
+				// rows reads as a bare stripe on any hillside seen face-on.
+				const rowShift = (rowIndex & 1) * spacing * 0.5;
+				for (let gx = -half + spacing * 0.5 + rowShift; gx < half; gx += spacing) {
 					if (matrices.length >= this.grassCount) break;
 					if (keepProb < 1 && Math.random() > keepProb) continue;
-					const x = gx + (Math.random() - 0.5) * spacing * 0.9;
-					const z = gz + (Math.random() - 0.5) * spacing * 0.9;
+					// Full-cell jitter (stratified). At 0.9 every cell kept a 5%
+					// no-blade margin, and those margins joined up into grid lines.
+					const x = gx + (Math.random() - 0.5) * spacing;
+					const z = gz + (Math.random() - 0.5) * spacing;
 					if (x < -half || x > half || z < -half || z > half) continue;
 					sampleN(x, z, normal);
 					// Only bare on steep slopes (> maxSlopeDeg). Gentle hills keep grass.
@@ -1522,7 +1556,19 @@ export class FluffyGrass {
 		});
 		this.carInput.setMobileControls(this.mobileControls);
 
-		this.chaseCameraInput = new ChaseCameraInput(this.canvas);
+		this.chaseCameraInput = new ChaseCameraInput(this.canvas, {
+			// Mouse-look only while actually driving / walking: never in the
+			// lobby, never in edit mode (needs the cursor), never on touch.
+			isFreeLookAllowed: () =>
+				this.isGameActive &&
+				!this.isWorldSwitching &&
+				!this.sceneProps.mapMode &&
+				!this.editMode?.isEnabled &&
+				// A login / logout form or the room list needs a usable cursor.
+				!isKeyboardCapturedByUi() &&
+				!isTextEntryFocused() &&
+				!isMobileDevice(),
+		});
 		syncCar(car);
 	}
 
@@ -1930,6 +1976,10 @@ export class FluffyGrass {
 				mixer.update(dt);
 			}
 		}
+
+		// Hand the cursor back the moment mouse-look stops being allowed
+		// (lobby, edit mode, world switch).
+		this.chaseCameraInput?.syncFreeLook();
 
 		if (this.dayNight) {
 			const fireflyIntensity = this.dayNight.update(dt);
@@ -2862,14 +2912,12 @@ export class FluffyGrass {
 				if (worldId === "valley") return VALLEY_WORLD;
 				return this.customWorldDefs.find((w) => w.id === worldId) ?? null;
 			},
-			ensureWorldDefinition: (definition, options) => {
+			ensureWorldDefinition: (definition) => {
 				if (definition.kind !== "custom") return;
-				if (this.customWorldDefs.some((w) => w.id === definition.id)) return;
-				this.customWorldDefs.push(definition);
-				if (options?.persist !== false) {
-					this.persistCustomWorldDefs();
-					this.settings.setWorldOptions(this.getWorldSelectOptions());
-				}
+				const index = this.customWorldDefs.findIndex((w) => w.id === definition.id);
+				if (index >= 0) this.customWorldDefs[index] = definition;
+				else this.customWorldDefs.push(definition);
+				this.refreshWorldSelectOptions();
 			},
 			enableTerrainVertexColors: () => {
 				const mesh = this.activeWorldDef.kind === "custom"
@@ -2930,58 +2978,70 @@ export class FluffyGrass {
 			rebuildEditGrass: () => {
 				this.rebuildActiveEditGrass();
 			},
+			liftPlayersAboveTerrain: () => {
+				this.liftPlayersAboveTerrain();
+			},
+			onWorldsChanged: () => {
+				void this.refreshSavedWorldList();
+			},
 			getAuthToken: () => this.authService.getToken(),
 			getAuthUser: () => this.userData,
 			getServerUrl: () => SERVER_URL,
 		});
 	}
 
-	private loadCustomWorldDefs() {
-		try {
-			const raw = localStorage.getItem(CUSTOM_WORLDS_KEY);
-			if (!raw) return;
-			const parsed = JSON.parse(raw) as WorldDefinition[];
-			if (!Array.isArray(parsed)) return;
-			let dirty = false;
-			this.customWorldDefs = parsed.map((def) => {
-				if (def.kind !== "custom") return def;
-				let next = def;
-				const expectedSegs = Math.min(
-					900,
-					Math.max(64, Math.round(def.size / ISLAND_TERRAIN_CELL))
-				);
-				if (Math.abs((def.segments ?? 0) - expectedSegs) > 8) {
-					next = { ...next, segments: expectedSegs };
-					dirty = true;
-				}
-				const minGrass = grassCountForSize(def.size);
-				if ((def.grassCount ?? 0) < minGrass) {
-					next = { ...next, grassCount: minGrass };
-					dirty = true;
-				}
-				return next;
-			});
-			if (dirty) this.persistCustomWorldDefs();
-		} catch {
-			this.customWorldDefs = [];
+	/**
+	 * Refresh the saved-world list from the DB (GET /api/worlds?mine=1).
+	 * Logged-out players only ever see the built-in hubs.
+	 */
+	private async refreshSavedWorldList() {
+		const loggedIn = Boolean(this.authService.getToken() && this.userData?.id);
+		if (!loggedIn) {
+			// A logged-out tab keeps nothing: no list, no other account's worlds.
+			this.savedWorldList = [];
+			this.customWorldDefs = this.customWorldDefs.filter(
+				(def) => def.id === this.activeWorldDef.id
+			);
+			this.editMode?.forgetCachedWorlds(this.activeWorldDef.id);
+			this.refreshWorldSelectOptions();
+			return;
 		}
+		if (!this.editMode) return;
+		try {
+			this.savedWorldList = await this.editMode.listMyWorlds();
+		} catch (error) {
+			console.warn("[world] Failed to list saved worlds", error);
+			this.savedWorldList = [];
+		}
+		this.refreshWorldSelectOptions();
 	}
 
-	private persistCustomWorldDefs() {
-		try {
-			localStorage.setItem(CUSTOM_WORLDS_KEY, JSON.stringify(this.customWorldDefs));
-		} catch {
-			/* ignore */
-		}
+	private refreshWorldSelectOptions() {
+		if (!this.settings) return;
+		this.settings.setWorldOptions(this.getWorldSelectOptions());
+		this.settings.setWorld(this.currentWorld);
 	}
 
+	/**
+	 * Built-in hubs + every world the DB knows about, plus any world created
+	 * this session that has not been saved yet.
+	 */
 	private getWorldSelectOptions(): Record<string, string> {
+		const names = new Map<string, string>();
+		for (const def of this.customWorldDefs) names.set(def.id, def.name);
+		// DB names win — another device may have renamed the world.
+		for (const item of this.savedWorldList) {
+			names.set(item.worldId, item.worldName || item.worldId);
+		}
+
 		const options: Record<string, string> = {
 			Island: "island",
 			Valley: "valley",
 		};
-		for (const def of this.customWorldDefs) {
-			options[def.name] = def.id;
+		for (const [worldId, name] of names) {
+			// dat.GUI keys on the label, so keep duplicate names distinguishable.
+			const label = name in options ? `${name} (${worldId.slice(-4)})` : name;
+			options[label] = worldId;
 		}
 		return options;
 	}
@@ -2989,13 +3049,11 @@ export class FluffyGrass {
 	private async createAndEnterCustomWorld(sizeKm = 1) {
 		const kmLabel =
 			sizeKm >= 1 ? `${sizeKm.toFixed(sizeKm % 1 === 0 ? 0 : 1)}km` : `${Math.round(sizeKm * 1000)}m`;
-		const def = createLargeBlankWorld(
-			`World ${this.customWorldDefs.length + 1} (${kmLabel})`,
-			sizeKm
-		);
+		const worldNumber =
+			Math.max(this.customWorldDefs.length, this.savedWorldList.length) + 1;
+		const def = createLargeBlankWorld(`World ${worldNumber} (${kmLabel})`, sizeKm);
 		this.customWorldDefs.push(def);
-		this.persistCustomWorldDefs();
-		this.settings.setWorldOptions(this.getWorldSelectOptions());
+		this.refreshWorldSelectOptions();
 		await this.switchWorld(def.id);
 	}
 
@@ -3139,8 +3197,26 @@ export class FluffyGrass {
 			console.log(this.renderer.info.render);
 		});
 
+		// A form taking focus (login, etc.) drops whatever the player was holding,
+		// so the car does not keep driving while they type.
+		window.addEventListener("focusin", (e) => {
+			if (!isTextEntryTarget(e.target)) return;
+			this.carInput?.releaseControls();
+			this.humanInput?.releaseControls();
+		});
+
+		// Clicking the world hands the keyboard back to the game — settings number
+		// fields keep focus otherwise and would keep swallowing WASD.
+		this.canvas.addEventListener("pointerdown", () => {
+			if (isTextEntryFocused()) {
+				(document.activeElement as HTMLElement | null)?.blur();
+			}
+		});
+
 		window.addEventListener("keydown", (e) => {
 			if (!this.isGameActive) return;
+			// "u" / "e" are common letters — never hijack them while typing.
+			if (isGameKeyBlocked(e)) return;
 			const key = (e.key ?? "").toLowerCase();
 			if (key === "u") {
 				this.tryTogglePlayer();
@@ -3320,12 +3396,28 @@ export class FluffyGrass {
 		}
 	}
 
-	private resolveWorldDefinition(id: GameWorldId): WorldDefinition {
+	/** Def already in memory this session; falls back to Island. */
+	private knownWorldDefinition(id: GameWorldId): WorldDefinition {
+		if (id === "valley") return VALLEY_WORLD;
+		if (id === "island") return ISLAND_WORLD;
+		return this.customWorldDefs.find((w) => w.id === id) ?? ISLAND_WORLD;
+	}
+
+	/**
+	 * Resolve a world def, fetching it from the DB when this session has not
+	 * seen it yet (e.g. picked from the list after a reload).
+	 */
+	private async resolveWorldDefinition(
+		id: GameWorldId
+	): Promise<WorldDefinition | null> {
 		if (id === "island") return ISLAND_WORLD;
 		if (id === "valley") return VALLEY_WORLD;
-		const custom = this.customWorldDefs.find((w) => w.id === id);
-		if (custom) return custom;
-		return ISLAND_WORLD;
+		const known = this.customWorldDefs.find((w) => w.id === id);
+		if (known) return known;
+		const fetched = (await this.editMode?.loadWorldFromDb(id)) ?? null;
+		if (!fetched) return null;
+		this.customWorldDefs.push(fetched);
+		return fetched;
 	}
 
 	private async switchWorld(target: GameWorldId) {
@@ -3333,8 +3425,18 @@ export class FluffyGrass {
 
 		const previous = this.currentWorld;
 		const previousDef = this.activeWorldDef;
-		const targetDef = this.resolveWorldDefinition(target);
+		// Claim the switch before awaiting the DB fetch so no second switch races in.
 		this.isWorldSwitching = true;
+		const targetDef = await this.resolveWorldDefinition(target).catch(() => null);
+		if (!targetDef) {
+			this.isWorldSwitching = false;
+			this.settings.setWorld(previous);
+			this.worldLoading.show(String(target));
+			this.worldLoading.showError(
+				"That world could not be loaded from your account."
+			);
+			throw new Error(`World "${target}" not found.`);
+		}
 		this.worldLoading.show(targetDef.name);
 
 		try {
@@ -3360,6 +3462,18 @@ export class FluffyGrass {
 			this.customWorldGroup.visible = targetDef.kind === "custom";
 			this.applyWorldEnvironment(target);
 
+			this.worldLoading.setProgress(78, "Restoring world edits...");
+			this.editMode?.onGameActiveChanged(this.isGameActive);
+			// Saved sculpt edits MUST land before the spawn height is sampled —
+			// otherwise the player is placed on the pristine procedural surface and
+			// the replayed hill closes over them.
+			try {
+				await this.editMode?.onActiveWorldChanged();
+			} catch (error) {
+				// A failed replay must not roll back an otherwise loaded world.
+				console.warn("[world] Failed to restore saved edits", error);
+			}
+
 			this.worldLoading.setProgress(82, "Placing player safely...");
 			this.teleportPlayerToCurrentTerrain(target);
 
@@ -3373,8 +3487,6 @@ export class FluffyGrass {
 
 			this.renderer.renderLists.dispose();
 			this.settings.setWorld(target);
-			this.editMode?.onGameActiveChanged(this.isGameActive);
-			this.editMode?.onActiveWorldChanged();
 
 			this.worldLoading.setProgress(100, "Ready");
 			await this.nextFrame();
@@ -3398,6 +3510,28 @@ export class FluffyGrass {
 		}
 	}
 
+	/**
+	 * Terrain changed under the players — sculpting a hill, or replaying a saved
+	 * world's edits, can close the surface over a body. Only bodies whose origin
+	 * is below the surface are moved, so normal driving / walking is untouched.
+	 */
+	private liftPlayersAboveTerrain() {
+		const lift = (body: RAPIER.RigidBody, clearance: number) => {
+			const at = body.translation();
+			const groundY = getWorldTerrainY(at.x, at.z);
+			if (at.y >= groundY) return;
+			body.setTranslation({ x: at.x, y: groundY + clearance, z: at.z }, true);
+			body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+			body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+		};
+
+		if (this.car) lift(this.car.body, CAR_CONFIG.spawn.clearance);
+		// Human sits deep underground while riding — never yank it out then.
+		if (this.human && this.activePlayer === "human" && this.sitState === "none") {
+			lift(this.human.body, 2);
+		}
+	}
+
 	private teleportPlayerToCurrentTerrain(target: GameWorldId) {
 		const x = 0;
 		const z = target === "valley" ? this.valleySpawn.z : 0;
@@ -3415,14 +3549,20 @@ export class FluffyGrass {
 		}
 
 		if (this.human) {
-			this.human.body.setTranslation({ x: x + 3, y: groundY + 3, z }, true);
+			// Sample at the human's own spot — 3 m away the hill may be metres higher.
+			const humanX = x + 3;
+			const humanGroundY = getWorldTerrainY(humanX, z);
+			this.human.body.setTranslation(
+				{ x: humanX, y: humanGroundY + 3, z },
+				true
+			);
 			this.human.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
 		}
 	}
 
 	private applyWorldEnvironment(world: GameWorldId) {
 		const sky = this.scene.getObjectByName("sky-dome");
-		const def = this.resolveWorldDefinition(world);
+		const def = this.knownWorldDefinition(world);
 		if (world === "island" || def.kind === "custom") {
 			this.grassMaterial.setTerrainSize(def.size);
 			if (this.dayNight) {

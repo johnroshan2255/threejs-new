@@ -8,7 +8,7 @@ export type BasinCellSpec = {
 };
 
 /**
- * Serializable basin footprint — saved in paint-water ops for localStorage / DB / multiplayer.
+ * Serializable basin footprint — saved in paint-water ops for the DB / multiplayer.
  * Water is rebuilt ONLY from these cells (never a world-wide flood fill).
  */
 export type BasinSpec = {
