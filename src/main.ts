@@ -2602,8 +2602,6 @@ export class FluffyGrass {
 			return;
 		}
 		if (now < this.nextAmbientRippleAt) return;
-		// Next event in ~1.5–5.5 s (occasional, not constant chop).
-		this.nextAmbientRippleAt = now + 1500 + Math.random() * 4000;
 
 		const candidates: Pond[] = [];
 		if (
@@ -2617,7 +2615,16 @@ export class FluffyGrass {
 		for (const pond of this.editorPonds) {
 			if (pond.mesh.visible) candidates.push(pond);
 		}
-		if (candidates.length === 0) return;
+		if (candidates.length === 0) {
+			// Retry soon rather than idling a full interval before water exists.
+			this.nextAmbientRippleAt = now + 800;
+			return;
+		}
+
+		// One pond gets a drip per event, so more water needs more events — a
+		// single pond keeps the tuned ~1.5–5.5 s cadence.
+		const spread = Math.min(3, candidates.length);
+		this.nextAmbientRippleAt = now + (1500 + Math.random() * 4000) / spread;
 
 		const pond = candidates[Math.floor(Math.random() * candidates.length)]!;
 		this.spawnNaturalRipples(pond);
@@ -2638,7 +2645,22 @@ export class FluffyGrass {
 		// Island pond is circular 20×20 with no userData — treat as circle of r≈9.
 		const useCircle = circular || (halfW === halfD && !pond.mesh.userData.waterHalfW);
 
-		const drops = Math.random() < 0.4 ? 2 + Math.floor(Math.random() * 2) : 1;
+		// Scale activity with surface area — a fixed 1–3 drips is a lively pond at
+		// 20 m and an almost still sheet on a 100 m lake. Reference pond keeps 1–3.
+		const surface = useCircle
+			? Math.PI * halfW * halfW
+			: halfW * 2 * (halfD * 2);
+		const areaDrops = THREE.MathUtils.clamp(Math.round(surface / 400), 1, 6);
+		const drops =
+			areaDrops +
+			(Math.random() < 0.4 ? 1 + Math.floor(Math.random() * 2) : 0);
+		// Stamp size follows the pond too: a 0.85 m dimple on a big lake covers
+		// only a couple of simulation texels and dies before it is visible.
+		const stampScale = THREE.MathUtils.clamp(
+			Math.max(halfW, halfD) / 10,
+			1,
+			4
+		);
 		const baseX = useCircle
 			? cx + (Math.random() * 2 - 1) * halfW * 0.55
 			: cx + (Math.random() * 2 - 1) * halfW * 0.7;
@@ -2647,7 +2669,8 @@ export class FluffyGrass {
 			: cz + (Math.random() * 2 - 1) * halfD * 0.7;
 
 		for (let i = 0; i < drops; i++) {
-			const jitter = i === 0 ? 0 : 0.4 + Math.random() * 1.2;
+			// Spread the cluster wider on big water so drips are not all in one spot.
+			const jitter = i === 0 ? 0 : (0.4 + Math.random() * 1.2) * stampScale;
 			const ang = Math.random() * Math.PI * 2;
 			let x = baseX + Math.cos(ang) * jitter;
 			let z = baseZ + Math.sin(ang) * jitter;
@@ -2664,8 +2687,8 @@ export class FluffyGrass {
 			}
 			pond.createRipple({
 				position: { x, z },
-				strength: 0.05 + Math.random() * 0.09,
-				radius: 0.55 + Math.random() * 1.0,
+				strength: (0.05 + Math.random() * 0.09) * stampScale,
+				radius: (0.55 + Math.random() * 1.0) * stampScale,
 			});
 		}
 	}
@@ -3173,11 +3196,7 @@ export class FluffyGrass {
 	}
 
 	private disposeCustomWorld() {
-		for (const pond of this.editorPonds) {
-			pond.mesh.removeFromParent();
-			pond.dispose();
-		}
-		this.editorPonds = [];
+		this.disposeEditorPondsIn(this.customWorldGroup);
 		for (const stone of this.editorStones) stone.dispose();
 		this.editorStones = [];
 		this.customGrassField?.dispose();
@@ -3462,7 +3481,18 @@ export class FluffyGrass {
 			this.customWorldGroup.visible = targetDef.kind === "custom";
 			this.applyWorldEnvironment(target);
 
-			this.worldLoading.setProgress(78, "Restoring world edits...");
+			// Unload BEFORE replaying edits: the dispose paths clear editor ponds,
+			// so ponds spawned by the replay would be destroyed right after birth.
+			this.worldLoading.setProgress(74, "Unloading previous world...");
+			await this.nextFrame();
+			if (previous === "island") this.disposeIslandWorld();
+			else if (previous === "valley") this.disposeValleyWorld();
+			else if (previousDef.kind === "custom" && targetDef.kind !== "custom") {
+				this.disposeCustomWorld();
+			}
+			this.renderer.renderLists.dispose();
+
+			this.worldLoading.setProgress(82, "Restoring world edits...");
 			this.editMode?.onGameActiveChanged(this.isGameActive);
 			// Saved sculpt edits MUST land before the spawn height is sampled —
 			// otherwise the player is placed on the pristine procedural surface and
@@ -3474,18 +3504,9 @@ export class FluffyGrass {
 				console.warn("[world] Failed to restore saved edits", error);
 			}
 
-			this.worldLoading.setProgress(82, "Placing player safely...");
+			this.worldLoading.setProgress(92, "Placing player safely...");
 			this.teleportPlayerToCurrentTerrain(target);
 
-			this.worldLoading.setProgress(92, "Unloading previous world...");
-			await this.nextFrame();
-			if (previous === "island") this.disposeIslandWorld();
-			else if (previous === "valley") this.disposeValleyWorld();
-			else if (previousDef.kind === "custom" && targetDef.kind !== "custom") {
-				this.disposeCustomWorld();
-			}
-
-			this.renderer.renderLists.dispose();
 			this.settings.setWorld(target);
 
 			this.worldLoading.setProgress(100, "Ready");
@@ -3676,11 +3697,7 @@ export class FluffyGrass {
 		this.pond?.dispose();
 		this.pond = undefined;
 
-		for (const pond of this.editorPonds) {
-			pond.mesh.removeFromParent();
-			pond.dispose();
-		}
-		this.editorPonds = [];
+		this.disposeEditorPondsIn(this.worldGroup);
 
 		for (const stone of this.editorStones) stone.dispose();
 		this.editorStones = [];
@@ -3715,7 +3732,37 @@ export class FluffyGrass {
 		this.disposeWorldGroup(this.worldGroup);
 	}
 
+	/**
+	 * Dispose only the editor ponds living under `group`.
+	 *
+	 * editorPonds is one flat list across every world, so disposing it wholesale
+	 * destroys the incoming world's water when unloading the outgoing one.
+	 */
+	private disposeEditorPondsIn(group: THREE.Object3D) {
+		const kept: Pond[] = [];
+		for (const pond of this.editorPonds) {
+			let node: THREE.Object3D | null = pond.mesh;
+			let owned = false;
+			while (node) {
+				if (node === group) {
+					owned = true;
+					break;
+				}
+				node = node.parent;
+			}
+			if (!owned) {
+				kept.push(pond);
+				continue;
+			}
+			pond.mesh.removeFromParent();
+			pond.dispose();
+		}
+		this.editorPonds = kept;
+		this.resizePondTargets();
+	}
+
 	private disposeValleyWorld() {
+		this.disposeEditorPondsIn(this.newWorldGroup);
 		this.valleyGrassField?.dispose();
 		this.valleyGrassField = null;
 		if (this.valleyTerrainBody) {

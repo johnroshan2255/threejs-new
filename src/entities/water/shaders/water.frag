@@ -13,6 +13,8 @@ uniform float uHasDepthMap;
 uniform float uDistortionScale;
 uniform vec3 uSunDirection;
 uniform vec2 uTexelSize;
+uniform vec2 uWaveTiles;
+uniform float uSlopeGain;
 uniform float uCameraNear;
 uniform float uCameraFar;
 uniform vec3 uAbsorption;
@@ -36,7 +38,7 @@ vec3 normalFromHeightMap(vec2 uv) {
   float hR = texture2D(uHeightMap, uv + vec2(uTexelSize.x, 0.0)).r;
   float hD = texture2D(uHeightMap, uv - vec2(0.0, uTexelSize.y)).r;
   float hU = texture2D(uHeightMap, uv + vec2(0.0, uTexelSize.y)).r;
-  return normalize(vec3((hL - hR) * 8.0, 1.0, (hD - hU) * 8.0));
+  return normalize(vec3((hL - hR) * uSlopeGain, 1.0, (hD - hU) * uSlopeGain));
 }
 
 void main() {
@@ -70,7 +72,8 @@ void main() {
 
   vec3 viewDir = normalize(vViewPosition);
 
-  vec2 wave = animatedRippleOffset(vUv * 2.5, uTime) * 0.04;
+  // Tiling comes from world size, so a wave cycle stays ~8 m on any pond.
+  vec2 wave = animatedRippleOffset(vUv * uWaveTiles, uTime) * 0.04;
   vec3 normal = normalize(vec3(wave.x, 1.0, wave.y));
   if (uHasHeightMap > 0.5) {
     normal = normalize(mix(normal, normalFromHeightMap(vUv), 0.95));

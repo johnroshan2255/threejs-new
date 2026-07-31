@@ -6,6 +6,27 @@ export const DEFAULT_SEGMENTS = 64;
 /** Default heightfield resolution (pixels per side). */
 export const DEFAULT_SIMULATION_RESOLUTION = 256;
 
+/**
+ * World length of one base wave cycle (metres).
+ *
+ * The look was tuned on a 20 m pond showing 2.5 cycles, so 20 / 2.5 = 8. Wave
+ * tiling is derived from this and the pond's world size; a fixed UV tiling
+ * stretches waves on large ponds until the surface reads as a flat plane.
+ */
+export const WAVE_PERIOD_METERS = 8;
+
+/**
+ * Simulation texels per metre on the reference pond (256 px over 20 m).
+ * Keeps ripple detail the same physical size as ponds grow.
+ */
+export const REFERENCE_TEXELS_PER_METER = DEFAULT_SIMULATION_RESOLUTION / 20;
+
+/** Height-derivative gain tuned at {@link REFERENCE_TEXELS_PER_METER}. */
+export const REFERENCE_SLOPE_GAIN = 8;
+
+/** Cap on slope compensation once simulation resolution is maxed out. */
+export const MAX_SLOPE_GAIN = 24;
+
 /** Default wave damping coefficient. */
 export const DEFAULT_DAMPING = 0.992;
 

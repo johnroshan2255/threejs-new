@@ -26,6 +26,7 @@ import { EditSyncTransport } from "../net/EditSyncTransport";
 import type { WorldEditDocument, WorldEditOp } from "./types";
 import type { WorldDefinition } from "../worlds/worldTypes";
 import { isGameKeyBlocked } from "../ui/gameInputFocus";
+import { debugLine } from "../ui/debugOverlay";
 
 export type EditModeHost = {
 	scene: THREE.Scene;
@@ -683,6 +684,17 @@ export class EditModeController {
 		if (!stamps.length) return;
 
 		const basins = this.applier.collectBasinsFromStamps(stamps);
+		// TEMPORARY diagnostic: stamps → basins is where a huge painted area can
+		// collapse into one flat sheet (or none at all).
+		debugLine(
+			`[water] bake stamps=${stamps.length} basins=${basins.length}` +
+				basins
+					.map(
+						(b, i) =>
+							`\n         #${i + 1} ${b.width.toFixed(0)}x${b.depth.toFixed(0)}m y=${b.waterY.toFixed(2)} cells=${b.cells.length}`
+					)
+					.join("")
+		);
 		for (const basin of basins) {
 			const op = this.store.createOp({
 				type: "paint-water",
@@ -704,6 +716,19 @@ export class EditModeController {
 
 	/** Spawn Pond meshes from baked createSurface ops (play mode). */
 	private async applyBakedWaterSurfaces() {
+		// TEMPORARY diagnostic: zero fills here means the bake never produced any,
+		// so nothing can render regardless of the water mesh itself.
+		const ops = this.store.toJSON().ops;
+		const fills = ops.filter(
+			(op) => op.type === "paint-water" && op.createSurface
+		).length;
+		const digs = ops.filter(
+			(op) => op.type === "paint-water" && !op.createSurface
+		).length;
+		debugLine(
+			`[water] apply fills=${fills} digs=${digs}` +
+				`${fills === 0 ? "  <-- NOTHING TO RENDER (save the world to bake fills)" : ""}`
+		);
 		this.applyingRemote = true;
 		try {
 			for (const op of this.store.toJSON().ops) {

@@ -1,7 +1,12 @@
 import * as THREE from "three";
 import { createTree, type TreeHandle } from "../entities/tree";
 import { placeStone, type PlacedStoneHandle } from "../entities/stone/placeStone";
-import { Pond, REFERENCE_WATER_LOOK } from "../entities/water";
+import {
+	Pond,
+	REFERENCE_TEXELS_PER_METER,
+	REFERENCE_WATER_LOOK,
+} from "../entities/water";
+import { debugLine } from "../ui/debugOverlay";
 import { getWorldTerrainY, setIslandTerrain } from "../terrain/islandHeight";
 import {
 	paintTerrainMud,
@@ -446,7 +451,12 @@ export class EditApplier {
 			this.colliderDirty = true;
 		}
 
-		if (!basin?.cells?.length) return;
+		if (!basin?.cells?.length) {
+			debugLine(
+				`[water] NO CELLS at ${options.x.toFixed(0)},${options.z.toFixed(0)} r=${options.radius ?? "-"}`
+			);
+			return;
+		}
 		// Hard safety: never build a world-scale water sheet.
 		const maxCells = 4500;
 		if (basin.cells.length > maxCells) {
@@ -479,7 +489,28 @@ export class EditApplier {
 				refillBasinToRim(target, basin, pondRadius) ??
 				footprintFromBasinSpec(basin, cellSize);
 		}
-		if (!footprint || footprint.cells.length < 3) return;
+		if (!footprint || footprint.cells.length < 3) {
+			debugLine(
+				`[water] NO FOOTPRINT cells=${basin?.cells?.length ?? 0} exact=${exactShape}`
+			);
+			return;
+		}
+
+		// TEMPORARY diagnostic: a sheet is invisible when its single flat waterY
+		// sits under the ground, which happens on very large painted basins.
+		const groundAtCenter = getWorldTerrainY(
+			footprint.centerX,
+			footprint.centerZ
+		);
+		const buried = groundAtCenter - footprint.waterY;
+		debugLine(
+			`[water] pond ${footprint.width.toFixed(0)}x${footprint.depth.toFixed(0)}m` +
+				` cell=${cellSize.toFixed(2)} cells=${footprint.cells.length}` +
+				`${(options.basin?.cells?.length ?? 0) > maxCells ? " TRUNCATED" : ""}\n` +
+				`         waterY=${footprint.waterY.toFixed(2)} ground=${groundAtCenter.toFixed(2)}` +
+				` buried=${buried > 0 ? "+" : ""}${buried.toFixed(2)}m` +
+				`${buried > 0.3 ? "  <-- SHEET IS UNDER THE GROUND" : ""}`
+		);
 
 		// Clear grass over the basin footprint (circle around AABB is fine for mask).
 		const grassR = Math.max(footprint.width, footprint.depth) * 0.55 + 1;
@@ -518,11 +549,21 @@ export class EditApplier {
 			}
 		}
 
+		// Hold the reference pond's texel density instead of stretching a fixed
+		// 256² over the whole basin. Capped at 512 — every pond also owns
+		// screen-sized reflection / refraction targets.
+		const waterExtent = Math.max(footprint.width, footprint.depth, 4);
+		const simResolution = THREE.MathUtils.clamp(
+			2 ** Math.round(Math.log2(waterExtent * REFERENCE_TEXELS_PER_METER)),
+			256,
+			512
+		);
+
 		const pond = new Pond({
 			width: Math.max(footprint.width, 4),
 			height: Math.max(footprint.depth, 4),
 			segments: 96,
-			resolution: 256,
+			resolution: simResolution,
 			circular: false,
 			geometry: footprint.geometry,
 			...REFERENCE_WATER_LOOK,

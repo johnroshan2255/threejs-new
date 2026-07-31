@@ -241,9 +241,11 @@ function geometryFromSmoothedShore(
 	const fill = offsetRing(smoothed, -expand);
 	if (fill.length < 3 || ringArea(fill) < 0) return null;
 
+	// ~3.5 verts/m (the reference pond runs 6.4). The vertex shader displaces the
+	// surface by the heightfield, so a coarse plane has no real wave relief.
 	const segs = Math.min(
-		96,
-		Math.max(40, Math.round(Math.max(width, depth) * 1.6))
+		220,
+		Math.max(48, Math.round(Math.max(width, depth) * 3.5))
 	);
 	const geometry = new THREE.PlaneGeometry(width, depth, segs, segs);
 	geometry.rotateX(-Math.PI / 2);
@@ -265,7 +267,9 @@ function geometryFromSmoothedShore(
 		}
 		const dist = distToPolyEdge(lx, lz, localPoly);
 		// Soft band near edge; interior stays fully wet for waves.
-		const soft = Math.max(0.35, cellSize * 0.45);
+		// Capped in metres: scaling with cellSize made the whole pond "rim" on big
+		// worlds, and the shader damps refraction distortion to 35% inside the band.
+		const soft = Math.min(1.0, Math.max(0.35, cellSize * 0.45));
 		shores[i] = THREE.MathUtils.clamp(dist / soft, 0, 1);
 		if (shores[i]! < 0.15) shores[i] = 0.15; // keep slightly opaque at rim
 	}
