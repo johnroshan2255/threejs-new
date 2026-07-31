@@ -1454,6 +1454,7 @@ export class EditModeController {
 						void this.brushAt(hit);
 						el.setPointerCapture(event.pointerId);
 					}
+					event.preventDefault();
 					return;
 				}
 
