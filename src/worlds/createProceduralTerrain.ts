@@ -109,6 +109,7 @@ export function createProceduralTerrain(
 	geometry.computeVertexNormals();
 	geometry.computeBoundingBox();
 	geometry.computeBoundingSphere();
+	geometry.computeBoundsTree();
 
 	const mesh = new THREE.Mesh(geometry, material);
 	mesh.name = `terrain-${definition.id}`;

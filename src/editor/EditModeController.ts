@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { TransformControls } from "three/examples/jsm/controls/TransformControls.js";
+import { MeshBVHHelper } from "three-mesh-bvh";
 import type { Socket } from "socket.io-client";
 import type { TreeHandle } from "../entities/tree";
 import type { PlacedStoneHandle } from "../entities/stone/placeStone";
@@ -111,6 +112,7 @@ export class EditModeController {
 	private orbiting = false;
 	private lastPan = new THREE.Vector2();
 	private pointerDownPos = new THREE.Vector2();
+	private bvhVisualizer: MeshBVHHelper | null = null;
 	private cameraClickFocus = false;
 	private placeBusy = false;
 	private historyBusy = false;
@@ -286,6 +288,34 @@ export class EditModeController {
 				}
 				this.syncTransformControlsCamera();
 				this.refreshHint();
+			},
+			onToggleWireframe: (enabled) => {
+				const mesh = this.host.getTerrainMesh();
+				if (mesh) {
+					if (Array.isArray(mesh.material)) {
+						mesh.material.forEach(m => m.wireframe = enabled);
+					} else {
+						mesh.material.wireframe = enabled;
+					}
+				}
+			},
+			onToggleBVH: (enabled) => {
+				if (enabled) {
+					if (!this.bvhVisualizer) {
+						const mesh = this.host.getTerrainMesh();
+						if (mesh) {
+							this.bvhVisualizer = new MeshBVHHelper(mesh, 10);
+							this.bvhVisualizer.update();
+							this.host.getEditWorldGroup().add(this.bvhVisualizer);
+						}
+					}
+				} else {
+					if (this.bvhVisualizer) {
+						this.host.getEditWorldGroup().remove(this.bvhVisualizer);
+						this.bvhVisualizer.dispose();
+						this.bvhVisualizer = null;
+					}
+				}
 			},
 			onMeshChange: (meshId) => {
 				this.meshId = meshId;
@@ -527,6 +557,12 @@ export class EditModeController {
 				this.commitRebuildCollider();
 			});
 		}
+
+		const grassField = this.host.getGrassField();
+		if (grassField) {
+			grassField.group.visible = !enabled;
+		}
+
 		this.refreshStatus();
 	}
 
@@ -1635,6 +1671,7 @@ export class EditModeController {
 				strength: this.brushStrength,
 			});
 			await this.commitOp(op);
+			if (this.bvhVisualizer) this.bvhVisualizer.update();
 			return;
 		}
 

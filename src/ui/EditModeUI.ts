@@ -38,6 +38,8 @@ export type EditModeUIOptions = {
 	onSculptChange: (sculpt: SculptType) => void;
 	onBrushChange: (radius: number, strength: number) => void;
 	onViewModeChange: (mode: EditViewMode) => void;
+	onToggleWireframe: (enabled: boolean) => void;
+	onToggleBVH: (enabled: boolean) => void;
 	onMeshChange: (meshId: EditMeshId) => void;
 	onRoadStyleChange: (style: RoadStyle) => void;
 	onTransformModeChange: (mode: EditTransformMode) => void;
@@ -155,6 +157,8 @@ export class EditModeUI {
 						<div class="edit-bar-label">View</div>
 						<button type="button" data-view="top" class="edit-asset is-active"><span>Top</span></button>
 						<button type="button" data-view="orbit" class="edit-asset"><span>Orbit</span></button>
+						<button type="button" data-view="wireframe" class="edit-asset"><span>Wireframe</span></button>
+						<button type="button" data-view="bvh" class="edit-asset"><span>BVH</span></button>
 					</div>
 					<div class="edit-sub-panel" id="edit-road-panel" hidden>
 						<div class="edit-bar-label">Road</div>
@@ -284,7 +288,16 @@ export class EditModeUI {
 
 		this.leftBar.querySelectorAll<HTMLButtonElement>("[data-view]").forEach((btn) => {
 			btn.addEventListener("click", () => {
-				this.setViewMode(btn.dataset.view as EditViewMode);
+				const view = btn.dataset.view;
+				if (view === "wireframe") {
+					btn.classList.toggle("is-active");
+					this.options.onToggleWireframe(btn.classList.contains("is-active"));
+				} else if (view === "bvh") {
+					btn.classList.toggle("is-active");
+					this.options.onToggleBVH(btn.classList.contains("is-active"));
+				} else {
+					this.setViewMode(view as EditViewMode);
+				}
 			});
 		});
 
