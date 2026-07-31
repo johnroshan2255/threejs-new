@@ -31,7 +31,8 @@ export const CAR_CONFIG = {
 	drive: {
 		engineForce: 520,
 		reverseForce: 260,
-		frontDriveRatio: 0.85,
+		/** 0 = RWD (needed for rear-spin drift). */
+		frontDriveRatio: 0,
 		brakeForce: 28,
 		maxSteerAngle: 0.42,
 		steerSmoothing: 10,
@@ -42,5 +43,25 @@ export const CAR_CONFIG = {
 		moveImpulse: 0.35,
 		climbBoost: 4,
 		hillAssistY: 0.55,
+	},
+
+	/**
+	 * W + Space burnout drift: front brakes lock, rear drive spins,
+	 * A/D steers a slow slide + tire smoke on BOTH rear tires.
+	 */
+	drift: {
+		blendSpeed: 8,
+		steerBoost: 1.55,
+		frontBrakeForce: 70,
+		maxDriftSpeed: 6.5,
+		normalFriction: 12,
+		normalSideStiffness: 0.8,
+		driftFriction: 1.2,
+		driftSideStiffness: 0.12,
+		frontDriftFriction: 11,
+		frontDriftSideStiffness: 0.85,
+		yawTorque: 55,
+		spinDriveScale: 0.85,
+		smokeRate: 12,
 	},
 };

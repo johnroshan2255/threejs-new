@@ -1,64 +1,104 @@
-import * as THREE from 'three';
+import * as THREE from "three";
 
 interface Particle {
 	position: THREE.Vector3;
 	life: number;
 	maxLife: number;
-	scale: number;
+	/** Peak visual size. */
+	peakScale: number;
 	drift: THREE.Vector3;
 	rotationAxis: THREE.Vector3;
 	rotationSpeed: number;
 	rotationAngle: number;
+	/** 0 = bomb puff, 1 = tire fog (softer fade). */
+	kind: 0 | 1;
 }
 
 export class SmokeTrailSystem {
 	public mesh: THREE.InstancedMesh;
 	private count: number;
 	private activeParticles: Particle[] = [];
-	private maxLife = 0.5; // Half second trail
+	private maxLife = 0.55;
 	private readonly dummy = new THREE.Object3D();
 	private readonly colorWhite = new THREE.Color(0xffffff);
-	private readonly colorGrey = new THREE.Color(0x999999);
+	private readonly colorGrey = new THREE.Color(0xaaaaaa);
+	private readonly colorFog = new THREE.Color(0xc8c8c8);
 	private readonly particleColor = new THREE.Color();
 
 	constructor(maxParticles = 500) {
 		this.count = maxParticles;
-		
-		// Use a low-poly geometry (Icosahedron with 0 detail) to match Kenney style
-		const geometry = new THREE.IcosahedronGeometry(0.3, 0);
-		
-		const material = new THREE.MeshLambertMaterial({
-			color: 0xffffff, // White cartoon smoke
+
+		const geometry = new THREE.IcosahedronGeometry(0.28, 0);
+
+		const material = new THREE.MeshBasicMaterial({
+			color: 0xffffff,
 			transparent: true,
-			opacity: 0.8,
-			flatShading: true, // Matches low-poly look
-			depthWrite: false, 
+			opacity: 0.45,
+			depthWrite: false,
+			blending: THREE.NormalBlending,
 		});
-		
+
 		this.mesh = new THREE.InstancedMesh(geometry, material, maxParticles);
 		this.mesh.count = 0;
 		this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-		this.mesh.frustumCulled = false; // MUST be false since instances are moved far from origin
+		this.mesh.frustumCulled = false;
+		this.mesh.renderOrder = 10;
 	}
 
 	emit(position: THREE.Vector3) {
 		if (this.activeParticles.length >= this.count) {
 			this.activeParticles.shift();
 		}
-		
+
 		this.activeParticles.push({
 			position: position.clone(),
 			life: this.maxLife,
 			maxLife: this.maxLife,
-			scale: 1.0, 
+			peakScale: 1.15,
 			drift: new THREE.Vector3(
 				(Math.random() - 0.5) * 1.5,
-				Math.random() * 2.0 + 1.0, // Drift upwards faster
+				Math.random() * 2.0 + 1.0,
 				(Math.random() - 0.5) * 1.5
 			),
-			rotationAxis: new THREE.Vector3(Math.random(), Math.random(), Math.random()).normalize(),
+			rotationAxis: new THREE.Vector3(
+				Math.random(),
+				Math.random(),
+				Math.random()
+			).normalize(),
 			rotationSpeed: (Math.random() - 0.5) * 10.0,
-			rotationAngle: Math.random() * Math.PI * 2
+			rotationAngle: Math.random() * Math.PI * 2,
+			kind: 0,
+		});
+	}
+
+	/**
+	 * Tire fog: appears under the wheel, drifts out, shrinks away to nothing
+	 * (no solid white lump left behind).
+	 */
+	emitTire(position: THREE.Vector3) {
+		if (this.activeParticles.length >= this.count) {
+			this.activeParticles.shift();
+		}
+
+		const life = 0.55 + Math.random() * 0.25;
+		this.activeParticles.push({
+			position: position.clone(),
+			life,
+			maxLife: life,
+			peakScale: 0.55 + Math.random() * 0.35,
+			drift: new THREE.Vector3(
+				(Math.random() - 0.5) * 1.6,
+				0.35 + Math.random() * 0.7,
+				(Math.random() - 0.5) * 1.6
+			),
+			rotationAxis: new THREE.Vector3(
+				Math.random(),
+				Math.random(),
+				Math.random()
+			).normalize(),
+			rotationSpeed: (Math.random() - 0.5) * 6.0,
+			rotationAngle: Math.random() * Math.PI * 2,
+			kind: 1,
 		});
 	}
 
@@ -67,47 +107,52 @@ export class SmokeTrailSystem {
 		for (let i = 0; i < this.activeParticles.length; i++) {
 			const p = this.activeParticles[i];
 			p.life -= dt;
-			
-			if (p.life > 0) {
-				// Move particle
-				p.position.addScaledVector(p.drift, dt);
-				
-				// Rotate particle
-				p.rotationAngle += p.rotationSpeed * dt;
-				this.dummy.quaternion.setFromAxisAngle(p.rotationAxis, p.rotationAngle);
-				
-				// Scale shrinks over time
-				const lifeRatio = p.life / p.maxLife; // 1 to 0
-				
-				// Pop in slightly, then shrink to nothing
+
+			if (p.life <= 0) continue;
+
+			p.position.addScaledVector(p.drift, dt);
+			// Fog slows as it dies.
+			p.drift.multiplyScalar(1 - 0.8 * dt);
+
+			p.rotationAngle += p.rotationSpeed * dt;
+			this.dummy.quaternion.setFromAxisAngle(p.rotationAxis, p.rotationAngle);
+
+			const lifeRatio = p.life / p.maxLife; // 1 → 0
+			const age = 1 - lifeRatio; // 0 → 1
+
+			let scale: number;
+			if (p.kind === 1) {
+				// Appear → soft peak → fully disappear (scale 0).
+				const appear = Math.min(1, age / 0.18);
+				const fade = lifeRatio < 0.45 ? lifeRatio / 0.45 : 1;
+				scale = p.peakScale * appear * fade;
+				// Expand slightly while fading so it reads as fog, not a rock.
+				scale *= 1 + age * 0.65;
+				this.particleColor.copy(this.colorFog).lerp(this.colorGrey, age);
+			} else {
 				if (lifeRatio > 0.8) {
-					p.scale = THREE.MathUtils.lerp(0.5, 1.2, (1.0 - lifeRatio) / 0.2);
+					scale = THREE.MathUtils.lerp(0.5, p.peakScale, (1.0 - lifeRatio) / 0.2);
 				} else {
-					p.scale = THREE.MathUtils.lerp(0.0, 1.2, lifeRatio / 0.8);
+					scale = THREE.MathUtils.lerp(0.0, p.peakScale, lifeRatio / 0.8);
 				}
-				
-				this.dummy.position.copy(p.position);
-				this.dummy.scale.setScalar(p.scale);
-				this.dummy.updateMatrix();
-				
-				// Color darkens to grey as it fades
-				this.particleColor.lerpColors(
-					this.colorGrey,
-					this.colorWhite,
-					lifeRatio
-				);
-				
-				this.mesh.setMatrixAt(writeIdx, this.dummy.matrix);
-				this.mesh.setColorAt(writeIdx, this.particleColor);
-				writeIdx++;
+				this.particleColor.lerpColors(this.colorGrey, this.colorWhite, lifeRatio);
 			}
+
+			if (scale < 0.02) continue;
+
+			this.dummy.position.copy(p.position);
+			this.dummy.scale.setScalar(scale);
+			this.dummy.updateMatrix();
+
+			this.mesh.setMatrixAt(writeIdx, this.dummy.matrix);
+			this.mesh.setColorAt(writeIdx, this.particleColor);
+			writeIdx++;
 		}
-		
-		// Clean up dead particles
-		if (this.activeParticles.length > writeIdx) {
-			this.activeParticles = this.activeParticles.filter(p => p.life > 0);
+
+		if (this.activeParticles.length !== writeIdx) {
+			this.activeParticles = this.activeParticles.filter((p) => p.life > 0);
 		}
-		
+
 		this.mesh.count = writeIdx;
 		this.mesh.instanceMatrix.needsUpdate = true;
 		if (this.mesh.instanceColor) this.mesh.instanceColor.needsUpdate = true;

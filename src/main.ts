@@ -852,7 +852,7 @@ export class FluffyGrass {
 				if (state.activeEntity === "human") {
 					rp.carGroup.visible = true; // Wait, actually should carGroup be true here? Yes, if they left it. But humanGroup should be true too!
 					rp.humanGroup.visible = true;
-					rp.engineSound.update(0, 0, rp.carGroup.position);
+					rp.engineSound.update(0, 0, rp.carGroup.position, true);
 
 					// Handle Animation
 					if (rp.isBeingCarried && rp.animations.has("being carried")) {
@@ -871,7 +871,11 @@ export class FluffyGrass {
 				} else if (state.activeEntity === "car") {
 					rp.humanGroup.visible = false;
 					rp.carGroup.visible = true;
-					rp.engineSound.update(state.speed || 0, state.throttle || 0, rp.carGroup.position);
+					rp.engineSound.update(
+						state.speed || 0,
+						state.throttle || 0,
+						rp.carGroup.position
+					);
 				}
 			});
 
@@ -2096,10 +2100,34 @@ export class FluffyGrass {
 			}
 			syncCar(this.car);
 
+			if (
+				this.smokeSystem &&
+				this.carController &&
+				this.activePlayer === "car" &&
+				this.car
+			) {
+				if (this.carController.consumeTireSmokeBurst(dt)) {
+					const driveWheels = this.carController.getDriveWheelIndices();
+					const _smokePos = new THREE.Vector3();
+					// Always both rear tires together.
+					for (const wi of driveWheels) {
+						const wheel = this.car.wheels[wi];
+						if (!wheel) continue;
+						wheel.getWorldPosition(_smokePos);
+						_smokePos.y = getWorldTerrainY(_smokePos.x, _smokePos.z) + 0.12;
+						this.smokeSystem.emitTire(_smokePos);
+					}
+				}
+			}
+
 			if (this.engineSound && this.carController) {
-				const speed = this.carController.getSpeed();
-				const throttle = this.carController.getThrottle();
-				this.engineSound.update(speed, throttle);
+				if (this.activePlayer === "car") {
+					const speed = this.carController.getSpeed();
+					const throttle = this.carController.getThrottle();
+					this.engineSound.update(speed, throttle);
+				} else {
+					this.engineSound.update(0, 0, undefined, true);
+				}
 			}
 
 			// Sync bomb physics
