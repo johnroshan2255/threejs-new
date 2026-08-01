@@ -1,5 +1,9 @@
 import * as THREE from "three";
-import type { HumanEntity } from "./HumanEntity";
+import {
+	HumanEntity,
+	hitReactionAnimName,
+	type HitReaction,
+} from "./HumanEntity";
 import { type MobileControls } from "../../ui/mobileControls";
 import {
 	isGameKeyBlocked,
@@ -17,6 +21,7 @@ export class HumanInput {
     private rotationSmoothness = 10.0;
     
     private lastJumpTime = 0;
+    private jumpDuration = 0.8;
     
     // Procedural Pickup
     private isPickingUp = false;
@@ -34,6 +39,23 @@ export class HumanInput {
     public onGrabPlayer: ((socketId: string) => void) | null = null;
     public onThrowPlayer: ((socketId: string) => void) | null = null;
     public carriedPlayerId: string | null = null;
+
+    /** Returns remote targets with approx head/spine world positions for punch tests. */
+    public getPunchTargets:
+        | (() => Array<{
+              id: string;
+              head: THREE.Vector3;
+              spine: THREE.Vector3;
+              feetY: number;
+              position: THREE.Vector3;
+              quaternion: THREE.Quaternion;
+          }>)
+        | null = null;
+    public onPunchHit: ((targetId: string, reaction: HitReaction) => void) | null = null;
+    /** Fired after root-motion is baked so multiplayer can snap-sync position. */
+    public onHitRepositioned:
+        | ((pos: THREE.Vector3, quat: THREE.Quaternion) => void)
+        | null = null;
     
     private isThrowing = false;
     private throwTimer = 0;
@@ -44,6 +66,26 @@ export class HumanInput {
     // Recovery sequence
     private recoveryState: "none" | "fall" | "sitToStand" | "sweepFall" | "standToSit" = "none";
     private recoveryTimer = 0;
+
+    /** Stun while playing receive-hit anims so locomotion can't overwrite them. */
+    private hitReactionTimer = 0;
+    private hitReaction: HitReaction | null = null;
+    private hitPhase: "none" | "react" | "getUp" = "none";
+    private readonly hitStartHips = new THREE.Vector3();
+    private hasHitStartHips = false;
+
+    private rootMotionBufferFor(reaction: HitReaction | null): number {
+        switch (reaction) {
+            case "uppercut":
+                return 1.0;
+            case "sweep":
+                return 1.5;
+            case "side":
+                return 1.2;
+            default:
+                return 1.0;
+        }
+    }
     
     // For mobile
     private mobileControls: MobileControls | null = null;
@@ -54,12 +96,22 @@ export class HumanInput {
     private cameraRight = new THREE.Vector3();
     private targetRotation = new THREE.Quaternion();
     private readonly upAxis = new THREE.Vector3(0, 1, 0);
+    private readonly victimFwd = new THREE.Vector3();
+    private readonly toAttacker = new THREE.Vector3();
     private isSwimming = false;
 
     private isLeftMouseDown = false;
     private isRightMouseDown = false;
     private leftMouseDownTime = 0;
     private attackTimer = 0;
+    private attackDuration = 0;
+    private readonly handPos = new THREE.Vector3();
+    private readonly hitCooldowns = new Map<string, number>();
+    private static readonly CONTACT_RADIUS = 0.65;
+    private static readonly DROP_KICK_RADIUS = 1.35;
+    private static readonly HIT_COOLDOWN_SEC = 0.5;
+    /** Attacker in front of victim if facing-dot above this. */
+    private static readonly FRONT_DOT = 0.25;
 
     constructor(human: HumanEntity) {
         this.human = human;
@@ -122,15 +174,19 @@ export class HumanInput {
         if (isUiPointerTarget(e.target) || e.altKey) return;
         if (this.isCarryingPlayer) return; // Disable punches when carrying a player
 
+        if (this.hitReactionTimer > 0) return;
+
         if (e.button === 0) { // left
             this.isLeftMouseDown = true;
             this.leftMouseDownTime = performance.now();
             const duration = this.human.playAnimation("punch one");
             this.attackTimer = duration;
+            this.attackDuration = duration;
         } else if (e.button === 2) { // right
             this.isRightMouseDown = true;
             const duration = this.human.playAnimation("drop kick");
             this.attackTimer = duration;
+            this.attackDuration = duration;
         }
     };
 
@@ -229,7 +285,175 @@ export class HumanInput {
         return this.recoveryState !== "none";
     }
 
+    /** Play hit reaction with root motion, then plant physics under the animated hips. */
+    public applyHitReaction(reaction: HitReaction) {
+        const anim = hitReactionAnimName(reaction);
+        const duration = this.human.playAnimation(anim);
+        this.hitReaction = reaction;
+        this.hitPhase = "react";
+        this.hitReactionTimer = duration > 0 ? duration : 1.0;
+        // Capture hips before root motion accumulates (delta baked on end)
+        this.hasHitStartHips = this.human.getRootWorldPosition(this.hitStartHips);
+        this.isLeftMouseDown = false;
+        this.isRightMouseDown = false;
+        this.attackTimer = 0;
+        this.isPickingUp = false;
+        this.isThrowing = false;
+    }
+
+    private endHitReaction() {
+        // Sweep fall → bake once → sit to stand → idle (no second bake; that pulled us back)
+        if (this.hitReaction === "sweep" && this.hitPhase === "react") {
+            if (this.hasHitStartHips) {
+                this.human.applyRootMotionDelta(
+                    this.hitStartHips,
+                    this.rootMotionBufferFor(this.hitReaction)
+                );
+                this.hasHitStartHips = false;
+            }
+            this.hitPhase = "getUp";
+            const duration = this.human.playAnimation("sit to stand");
+            this.hitReactionTimer = duration > 0 ? duration : 1.5;
+            if (this.onHitRepositioned) {
+                this.onHitRepositioned(
+                    this.human.mesh.position.clone(),
+                    this.human.mesh.quaternion.clone()
+                );
+            }
+            return;
+        }
+
+        if (this.hitPhase === "getUp") {
+            // Stay at the post-sweep planted position
+            this.hasHitStartHips = false;
+            this.hitReaction = null;
+            this.hitPhase = "none";
+            this.hitReactionTimer = 0;
+            this.human.playAnimation("idle");
+            if (this.onHitRepositioned) {
+                this.onHitRepositioned(
+                    this.human.mesh.position.clone(),
+                    this.human.mesh.quaternion.clone()
+                );
+            }
+            return;
+        }
+
+        // uppercut / side → plant then idle
+        if (this.hasHitStartHips) {
+            this.human.applyRootMotionDelta(
+                this.hitStartHips,
+                this.rootMotionBufferFor(this.hitReaction)
+            );
+            this.hasHitStartHips = false;
+        }
+        this.hitReaction = null;
+        this.hitPhase = "none";
+        this.hitReactionTimer = 0;
+        this.human.playAnimation("idle");
+        if (this.onHitRepositioned) {
+            this.onHitRepositioned(
+                this.human.mesh.position.clone(),
+                this.human.mesh.quaternion.clone()
+            );
+        }
+    }
+
+    private tickHitCooldowns(dt: number) {
+        for (const [id, remaining] of this.hitCooldowns) {
+            const next = remaining - dt;
+            if (next <= 0) this.hitCooldowns.delete(id);
+            else this.hitCooldowns.set(id, next);
+        }
+    }
+
+    private resolveAttackKind(): "punch one" | "punch two" | "drop kick" | null {
+        const anim = this.human.activeAnimationName ?? "";
+        if (anim.includes("drop kick")) return "drop kick";
+        if (anim.includes("punch two")) return "punch two";
+        if (anim.includes("punch")) return "punch one";
+        return null;
+    }
+
+    /** True when attacker stands in front of the victim's facing direction. */
+    private isAttackFromFront(
+        victimPos: THREE.Vector3,
+        victimQuat: THREE.Quaternion
+    ): boolean {
+        this.victimFwd.set(0, 0, 1).applyQuaternion(victimQuat);
+        this.victimFwd.y = 0;
+        if (this.victimFwd.lengthSq() < 1e-6) return true;
+        this.victimFwd.normalize();
+
+        this.toAttacker
+            .copy(this.human.mesh.position)
+            .sub(victimPos);
+        this.toAttacker.y = 0;
+        if (this.toAttacker.lengthSq() < 1e-6) return true;
+        this.toAttacker.normalize();
+
+        return this.victimFwd.dot(this.toAttacker) >= HumanInput.FRONT_DOT;
+    }
+
+    private pickReaction(
+        attack: "punch one" | "punch two" | "drop kick",
+        fromFront: boolean
+    ): HitReaction {
+        if (attack === "punch one") {
+            return fromFront ? "uppercut" : "side";
+        }
+        // punch two / drop kick
+        return fromFront ? "sweep" : "side";
+    }
+
+    private tryPunchHits() {
+        if (!this.onPunchHit || !this.getPunchTargets) return;
+
+        const attack = this.resolveAttackKind();
+        if (!attack) return;
+
+        // Only test during the forward portion of the swing
+        const progress =
+            this.attackDuration > 0
+                ? 1 - this.attackTimer / this.attackDuration
+                : 0.5;
+        if (progress < 0.25 || progress > 0.85) return;
+
+        const hasHand = this.human.getRightHandWorldPosition(this.handPos);
+        const targets = this.getPunchTargets();
+        for (const target of targets) {
+            if (this.hitCooldowns.has(target.id)) continue;
+
+            const radius =
+                attack === "drop kick"
+                    ? HumanInput.DROP_KICK_RADIUS
+                    : HumanInput.CONTACT_RADIUS;
+
+            let inContact = false;
+            if (hasHand) {
+                const dHead = this.handPos.distanceTo(target.head);
+                const dBody = this.handPos.distanceTo(target.spine);
+                inContact = dHead <= radius || dBody <= radius;
+            }
+            if (!inContact) {
+                const dx = this.human.mesh.position.x - target.position.x;
+                const dz = this.human.mesh.position.z - target.position.z;
+                inContact = Math.hypot(dx, dz) <= radius + 0.35;
+            }
+            if (!inContact) continue;
+
+            const fromFront = this.isAttackFromFront(
+                target.position,
+                target.quaternion
+            );
+            const reaction = this.pickReaction(attack, fromFront);
+            this.hitCooldowns.set(target.id, HumanInput.HIT_COOLDOWN_SEC);
+            this.onPunchHit(target.id, reaction);
+        }
+    }
+
     public update(dt: number, camera: THREE.PerspectiveCamera) {
+        this.tickHitCooldowns(dt);
         let forward = 0;
         let right = 0;
         
@@ -255,13 +479,35 @@ export class HumanInput {
         const now = performance.now();
         // Relaxed grounded check for jumping on uneven terrain
         const canJump = Math.abs(currentVel.y) < 2.0;
-        if (this.isEnabled && this.keys[" "] && canJump && now - this.lastJumpTime > 500) {
-            currentVel.y = this.jumpForce;
+        if (this.isEnabled && this.keys[" "] && canJump && now - this.lastJumpTime > this.jumpDuration * 1000) {
+            // currentVel.y = this.jumpForce; // Animation has root motion, no physics jump
             this.lastJumpTime = now;
+            
+            const isRunning = this.keys["shift"];
+            const animName = (isRunning && this.human.animations.has("running jumb")) ? "running jumb" : "jumbing";
+            const duration = this.human.playAnimation(animName);
+            if (duration > 0) {
+                this.jumpDuration = duration;
+            }
         }
 
         if (this.knockbackTimer > 0) {
             this.knockbackTimer -= dt;
+        }
+
+        if (this.hitReactionTimer > 0) {
+            this.hitReactionTimer -= dt;
+            // Hold still while root motion plays on the skeleton
+            this.human.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+            if (this.hitPhase === "getUp") {
+                this.human.playAnimation("sit to stand");
+            } else if (this.hitReaction) {
+                this.human.playAnimation(hitReactionAnimName(this.hitReaction));
+            }
+            if (this.hitReactionTimer <= 0) {
+                this.endHitReaction();
+            }
+            return;
         }
 
         if (this.recoveryState !== "none") {
@@ -295,7 +541,13 @@ export class HumanInput {
         }
 
         if (this.knockbackTimer > 0) {
-            if (currentVel.y < -4.0 || now - this.lastJumpTime < 800) this.human.playAnimation("jump");
+            if (currentVel.y < -4.0 || now - this.lastJumpTime < this.jumpDuration * 1000) {
+                if (isRunning && (forward !== 0 || right !== 0) && this.human.animations.has("running jumb")) {
+                    this.human.playAnimation("running jumb");
+                } else if (this.human.animations.has("jumbing")) {
+                    this.human.playAnimation("jumbing");
+                }
+            }
             return; // Skip input processing to allow physics engine to move the character
         }
 
@@ -421,20 +673,27 @@ export class HumanInput {
             if (this.human.activeAnimationName && !this.human.activeAnimationName.includes("punch two")) {
                 const duration = this.human.playAnimation("punch two");
                 this.attackTimer = duration;
+                this.attackDuration = duration;
             } else if (this.attackTimer <= 0.1) { 
                 // Loop it seamlessly if still held at the end
                 const duration = this.human.playAnimation("punch two");
                 this.attackTimer = duration;
+                this.attackDuration = duration;
             }
         }
 
         // Animation state machine
         if (this.attackTimer > 0) {
             this.attackTimer -= dt;
+            this.tryPunchHits();
         } else if (this.isSwimming) {
             this.human.playAnimation("swim");
-        } else if ((currentVel.y < -4.0 || performance.now() - this.lastJumpTime < 800) && this.human.animations.has("jump")) {
-            this.human.playAnimation("jump");
+        } else if (currentVel.y < -4.0 || performance.now() - this.lastJumpTime < this.jumpDuration * 1000) {
+            if (isRunning && this.moveDir.lengthSq() > 0.01 && this.human.animations.has("running jumb")) {
+                this.human.playAnimation("running jumb");
+            } else if (this.human.animations.has("jumbing")) {
+                this.human.playAnimation("jumbing");
+            }
         } else if (this.moveDir.lengthSq() > 0.01) {
             if (this.isCarryingPlayer) {
                 this.human.playAnimation("carry walk");

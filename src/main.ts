@@ -35,7 +35,7 @@ import { EngineSound } from "./entities/car/EngineSound";
 import { VehicleGrapple } from "./entities/car/vehicleGrapple";
 import { updateChaseCamera, updateHumanCamera } from "./three/chaseCamera";
 import { ChaseCameraInput } from "./three/chaseCameraInput";
-import { HumanEntity } from "./entities/human/HumanEntity";
+import { HumanEntity, findCombatBones, hitReactionAnimName, stripRootMotion, type CombatBones, type HitReaction } from "./entities/human/HumanEntity";
 import { HumanInput } from "./entities/human/HumanInput";
 import {
 	createTree,
@@ -123,6 +123,7 @@ type RemotePlayer = {
 	mixer?: THREE.AnimationMixer;
 	animations?: Map<string, THREE.AnimationAction>;
 	currentAction?: THREE.AnimationAction | null;
+	combatBones?: CombatBones;
 	targetHumanPosition: THREE.Vector3;
 	targetHumanQuaternion: THREE.Quaternion;
 	targetCarPosition: THREE.Vector3;
@@ -729,6 +730,84 @@ export class FluffyGrass {
 			if (target) target.isBeingCarried = false;
 		});
 
+		this.socket.on("player-hit", (data: any) => {
+			const { targetSocketId, hitZone } = data;
+			const reaction: HitReaction =
+				hitZone === "uppercut" || hitZone === "sweep" || hitZone === "side"
+					? hitZone
+					: hitZone === "head"
+						? "uppercut"
+						: "side";
+			const animName = hitReactionAnimName(reaction);
+
+			// Local player was hit — play reaction (syncs out via player-state)
+			if (targetSocketId === this.socket?.id) {
+				this.humanInput?.applyHitReaction(reaction);
+				return;
+			}
+
+			// Eagerly play on the remote victim for snappier feedback
+			const rp = this.remotePlayers.get(targetSocketId);
+			if (!rp?.loaded || !rp.animations) return;
+			const action = [...rp.animations.entries()].find(
+				([name]) => name === animName || name.includes(animName)
+			)?.[1];
+			if (!action) return;
+			if (rp.currentAction !== action) {
+				if (rp.currentAction) rp.currentAction.fadeOut(0.15);
+				action.reset().setLoop(THREE.LoopOnce, 1);
+				action.clampWhenFinished = true;
+				action.fadeIn(0.15).play();
+				rp.currentAction = action;
+			}
+		});
+
+		this.socket.on("player-reposition", (data: any) => {
+			const { socketId, position, quaternion, animation } = data;
+			if (socketId === this.socket?.id) return;
+			const rp = this.remotePlayers.get(socketId);
+			if (!rp?.loaded || !rp.humanGroup || !position) return;
+
+			// Snap remote to baked post-hit position (skip lerp lag)
+			rp.targetHumanPosition.set(position.x, position.y, position.z);
+			rp.humanGroup.position.set(position.x, position.y, position.z);
+			if (quaternion) {
+				rp.targetHumanQuaternion.set(
+					quaternion.x,
+					quaternion.y,
+					quaternion.z,
+					quaternion.w
+				);
+				rp.humanGroup.quaternion.copy(rp.targetHumanQuaternion);
+			}
+			if (rp.humanBody) {
+				rp.humanBody.setNextKinematicTranslation(rp.humanGroup.position);
+				rp.humanBody.setNextKinematicRotation(rp.humanGroup.quaternion);
+			}
+
+			if (animation && rp.animations) {
+				const action = [...rp.animations.entries()].find(
+					([name]) => name === animation || name.includes(animation)
+				)?.[1];
+				if (action && rp.currentAction !== action) {
+					if (rp.currentAction) rp.currentAction.fadeOut(0.15);
+					const once =
+						animation.includes("sit to stand") ||
+						animation.includes("sweep") ||
+						animation.includes("uppercut") ||
+						animation.includes("hit on side");
+					if (once) {
+						action.reset().setLoop(THREE.LoopOnce, 1);
+						action.clampWhenFinished = true;
+					} else {
+						action.reset().setLoop(THREE.LoopRepeat, Infinity);
+					}
+					action.fadeIn(0.15).play();
+					rp.currentAction = action;
+				}
+			}
+		});
+
 		this.socket.on("player-state-updated", async (data: any) => {
 			const { socketId, state } = data;
 
@@ -755,20 +834,20 @@ export class FluffyGrass {
 				humanGltf.animations.forEach((clip: any) => {
 					const nameLower = clip.name.toLowerCase();
 					if (nameLower.includes("walk") || nameLower.includes("run")) {
-						clip.tracks.forEach((track: any) => {
-							if (track.name.toLowerCase().includes(".position")) {
-								const values = track.values;
-								const startX = values[0];
-								const startZ = values[2];
-								for (let i = 0; i < values.length; i += 3) {
-									values[i] = startX;
-									values[i + 2] = startZ;
-								}
-							}
-						});
+						stripRootMotion(clip);
 					}
 					const action = mixer.clipAction(clip);
-					if (nameLower === "being carried" || nameLower === "fall down" || nameLower === "sit to stand" || nameLower === "sweep fall" || nameLower === "stand to sit") {
+					if (
+						nameLower === "being carried" ||
+						nameLower === "fall down" ||
+						nameLower === "sit to stand" ||
+						nameLower === "sweep fall" ||
+						nameLower === "stand to sit" ||
+						nameLower.includes("receiving an uppercut") ||
+						nameLower.includes("hit on side of body") ||
+						nameLower === "punch one" ||
+						nameLower === "drop kick"
+					) {
 						action.setLoop(THREE.LoopOnce, 1);
 						action.clampWhenFinished = true;
 					} else {
@@ -816,6 +895,7 @@ export class FluffyGrass {
 				rp.mixer = mixer;
 				rp.animations = animations;
 				rp.currentAction = null;
+				rp.combatBones = findCombatBones(humanGroup);
 
 				// Avoid overwriting if they disconnected while loading
 				if (!this.remotePlayers.has(socketId)) {
@@ -1821,6 +1901,105 @@ export class FluffyGrass {
 
 			const target = this.remotePlayers.get(socketId);
 			if (target) target.isBeingCarried = false;
+		};
+
+		const _punchHead = new THREE.Vector3();
+		const _punchSpine = new THREE.Vector3();
+
+		this.humanInput.getPunchTargets = () => {
+			const results: Array<{
+				id: string;
+				head: THREE.Vector3;
+				spine: THREE.Vector3;
+				feetY: number;
+				position: THREE.Vector3;
+				quaternion: THREE.Quaternion;
+			}> = [];
+			if (!this.human) return results;
+
+			for (const [socketId, rp] of this.remotePlayers.entries()) {
+				if (!rp.loaded || !rp.humanGroup || !rp.humanGroup.visible) continue;
+				if (rp.isBeingCarried) continue;
+
+				const feetY = rp.humanGroup.position.y;
+				const bones = rp.combatBones;
+
+				if (bones?.head) {
+					bones.head.getWorldPosition(_punchHead);
+				} else {
+					_punchHead.set(
+						rp.humanGroup.position.x,
+						feetY + HumanEntity.MESH_Y_OFFSET * 1.75,
+						rp.humanGroup.position.z
+					);
+				}
+
+				if (bones?.spine) {
+					bones.spine.getWorldPosition(_punchSpine);
+				} else {
+					_punchSpine.set(
+						rp.humanGroup.position.x,
+						feetY + HumanEntity.MESH_Y_OFFSET,
+						rp.humanGroup.position.z
+					);
+				}
+
+				results.push({
+					id: socketId,
+					head: _punchHead.clone(),
+					spine: _punchSpine.clone(),
+					feetY,
+					position: rp.humanGroup.position.clone(),
+					quaternion: rp.humanGroup.quaternion.clone(),
+				});
+			}
+			return results;
+		};
+
+		this.humanInput.onPunchHit = (targetId, reaction) => {
+			if (this.socket && this.roomCode) {
+				this.socket.emit("player-hit", {
+					roomCode: this.roomCode,
+					targetSocketId: targetId,
+					hitZone: reaction,
+				});
+			}
+
+			// Optimistic remote reaction (victim also applies from player-hit)
+			const rp = this.remotePlayers.get(targetId);
+			if (!rp?.loaded || !rp.animations) return;
+			const animName = hitReactionAnimName(reaction);
+			const action = [...rp.animations.entries()].find(
+				([name]) => name === animName || name.includes(animName)
+			)?.[1];
+			if (!action) return;
+			if (rp.currentAction) rp.currentAction.fadeOut(0.15);
+			action.reset().setLoop(THREE.LoopOnce, 1);
+			action.clampWhenFinished = true;
+			action.fadeIn(0.15).play();
+			rp.currentAction = action;
+		};
+
+		this.humanInput.onHitRepositioned = (pos, quat) => {
+			if (!this.socket || !this.roomCode || !this.human) return;
+			const animation = this.human.activeAnimationName;
+			this.socket.emit("player-reposition", {
+				roomCode: this.roomCode,
+				position: { x: pos.x, y: pos.y, z: pos.z },
+				quaternion: { x: quat.x, y: quat.y, z: quat.z, w: quat.w },
+				animation,
+			});
+			// Also push a full state tick so animation/pos stay aligned
+			this.socket.emit("player-state", {
+				roomCode: this.roomCode,
+				state: {
+					activeEntity: this.activePlayer,
+					humanPosition: { x: pos.x, y: pos.y, z: pos.z },
+					humanQuaternion: { x: quat.x, y: quat.y, z: quat.z, w: quat.w },
+					animation,
+					benchSeat: null,
+				},
+			});
 		};
 	}
 	private async createLobbyModels() {
