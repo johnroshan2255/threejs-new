@@ -4,7 +4,10 @@ import {
 	hitReactionAnimName,
 	type HitReaction,
 } from "./HumanEntity";
+import { WeaponInventory, type WeaponId } from "./WeaponInventory";
 import { type MobileControls } from "../../ui/mobileControls";
+import { WeaponWheel } from "../../ui/WeaponWheel";
+import { GunSound } from "../../audio/GunSound";
 import {
 	isGameKeyBlocked,
 	isTextEntryTarget,
@@ -22,6 +25,31 @@ export class HumanInput {
     
     private lastJumpTime = 0;
     private jumpDuration = 0.8;
+
+    /** Fists vs free gun — bomb is a temporary world pickup. */
+    public readonly inventory = new WeaponInventory();
+    private weaponWheel: WeaponWheel | null = null;
+    /** GTA toggle aim — RMB click locks/unlocks ADS (not hold). */
+    private aimLocked = false;
+    private isShooting = false;
+    private shootTimer = 0;
+    private shootDuration = 0;
+    /** Time until next bullet can fire (auto / tap). */
+    private fireCooldown = 0;
+    private static readonly FIRE_INTERVAL = 0.11;
+    private readonly shootCooldown = new Map<string, number>();
+    private static readonly SHOOT_RANGE = 80;
+    private static readonly SHOOT_HIT_RADIUS = 1.1;
+    private static readonly SHOOT_COOLDOWN_SEC = 0.12;
+    private readonly shootOrigin = new THREE.Vector3();
+    private readonly shootDir = new THREE.Vector3();
+    private readonly shootToTarget = new THREE.Vector3();
+    private readonly shootClosest = new THREE.Vector3();
+    private readonly aimPoint = new THREE.Vector3();
+    private readonly camWorldPos = new THREE.Vector3();
+    private crosshairEl: HTMLElement | null = null;
+    /** Last camera passed to update — used when firing from mousedown. */
+    private lastCamera: THREE.PerspectiveCamera | null = null;
     
     // Procedural Pickup
     private isPickingUp = false;
@@ -32,6 +60,21 @@ export class HumanInput {
     public checkIsHoldingObject: (() => THREE.Object3D | null) | null = null;
     public onGrabObject: ((obj: THREE.Object3D) => void) | null = null;
     public onThrowObject: ((obj: THREE.Object3D) => void) | null = null;
+    /** Fired when fists/gun selection changes (for showing gun mesh). */
+    public onWeaponEquip: ((id: WeaponId) => void) | null = null;
+    /** Pause/resume pointer-lock mouse look while the weapon wheel is open. */
+    public onWeaponWheelToggle: ((open: boolean) => void) | null = null;
+    /** Optional gun hit callback (when projectile actually hits a body). */
+    public onGunHit: ((targetId: string, part: "head" | "body") => void) | null = null;
+    /**
+     * Spawn a physical/visual bullet. Prefer this over instant hitscan.
+     * origin = muzzle, dir = aim direction (normalized by system).
+     */
+    public onFireProjectile:
+        | ((origin: THREE.Vector3, direction: THREE.Vector3) => void)
+        | null = null;
+    /** World position of the gun muzzle tip (optional). */
+    public getMuzzleWorldPosition: (() => THREE.Vector3 | null) | null = null;
     
     // Player carrying
     public isCarryingPlayer = false;
@@ -116,6 +159,18 @@ export class HumanInput {
     constructor(human: HumanEntity) {
         this.human = human;
 
+        this.weaponWheel = new WeaponWheel({
+            getEquipped: () => this.inventory.equipped,
+            onSelect: (id) => this.equipWeapon(id),
+        });
+
+        this.crosshairEl = document.createElement("div");
+        this.crosshairEl.className = "gun-crosshair";
+        this.crosshairEl.setAttribute("aria-hidden", "true");
+        this.crosshairEl.innerHTML =
+            '<span class="gc-h"></span><span class="gc-v"></span><span class="gc-dot"></span>';
+        document.body.appendChild(this.crosshairEl);
+
         window.addEventListener("keydown", this.onKeyDown);
         window.addEventListener("keyup", this.onKeyUp);
         window.addEventListener("contextmenu", this.onRightClick);
@@ -129,6 +184,100 @@ export class HumanInput {
         window.removeEventListener("contextmenu", this.onRightClick);
         window.removeEventListener("mousedown", this.onMouseDown);
         window.removeEventListener("mouseup", this.onMouseUp);
+        this.weaponWheel?.dispose();
+        this.weaponWheel = null;
+        this.crosshairEl?.remove();
+        this.crosshairEl = null;
+        this.onWeaponWheelToggle?.(false);
+    }
+
+    public get equippedWeapon(): WeaponId {
+        return this.inventory.equipped;
+    }
+
+    public equipWeapon(id: WeaponId) {
+        // Don't swap loadout mid bomb lift/throw or while a bomb is in hand
+        if (this.isPickingUp || this.isThrowing) return;
+        if (this.checkIsHoldingObject?.()) return;
+        if (!this.inventory.equip(id)) {
+            this.syncWeaponVisual();
+            return;
+        }
+        this.isShooting = false;
+        this.shootTimer = 0;
+        this.aimLocked = false;
+        this.fireCooldown = 0;
+        this.syncWeaponVisual();
+    }
+
+    /** True when the gun mesh should be visible in the right hand. */
+    public shouldShowGun(): boolean {
+        return (
+            this.inventory.isGun() &&
+            !this.isHoldingBomb() &&
+            !this.isPickingUp &&
+            !this.isThrowing
+        );
+    }
+
+    /** GTA toggle ADS — locked until RMB clicked again (or auto-locked by firing). */
+    public isAimingGun(): boolean {
+        return this.gunModeActive() && this.aimLocked;
+    }
+
+    /** True while spraying with LMB in ADS (for network tick sync). */
+    public isFiringGun(): boolean {
+        return this.isAimingGun() && this.isLeftMouseDown;
+    }
+
+    /** Block combat / movement while dead (respawn pending). */
+    public isDead = false;
+
+    /** LMB without prior RMB: enter ADS so you can shoot immediately (incl. while walking). */
+    private ensureAimForFire() {
+        if (!this.gunModeActive()) return false;
+        if (!this.aimLocked) {
+            this.aimLocked = true;
+            this.syncAimUi();
+        }
+        return true;
+    }
+
+    public clearAimLock() {
+        this.aimLocked = false;
+        this.isShooting = false;
+        this.shootTimer = 0;
+        this.fireCooldown = 0;
+        this.syncAimUi();
+    }
+
+    private syncWeaponVisual() {
+        this.onWeaponEquip?.(this.inventory.equipped);
+        this.syncAimUi();
+    }
+
+    private syncAimUi() {
+        this.crosshairEl?.classList.toggle("is-visible", this.isAimingGun());
+    }
+
+    private openWeaponWheel() {
+        if (this.weaponWheel?.isOpen()) return;
+        this.weaponWheel?.show();
+        this.onWeaponWheelToggle?.(true);
+    }
+
+    private closeWeaponWheel(commit: boolean) {
+        if (!this.weaponWheel?.isOpen()) return;
+        this.weaponWheel.hide(commit);
+        this.onWeaponWheelToggle?.(false);
+    }
+
+    private isHoldingBomb(): boolean {
+        return Boolean(this.checkIsHoldingObject?.());
+    }
+
+    private gunModeActive(): boolean {
+        return this.inventory.isGun() && !this.isHoldingBomb() && !this.isPickingUp && !this.isThrowing;
     }
 
     public setMobileControls(mc: MobileControls) {
@@ -140,6 +289,14 @@ export class HumanInput {
         this.keys = {};
         this.isLeftMouseDown = false;
         this.isRightMouseDown = false;
+        this.clearAimLock();
+        this.weaponWheel?.hide(false);
+        this.onWeaponWheelToggle?.(false);
+    }
+
+    /** Called when leaving human control so the wheel cannot stay open. */
+    public forceCloseWeaponWheel() {
+        this.closeWeaponWheel(false);
     }
 
     private onKeyDown = (e: KeyboardEvent) => {
@@ -153,11 +310,19 @@ export class HumanInput {
         this.keys[k] = true;
         if (k === "t") this.triggerPickup();
         if (k === "h") this.triggerCarryPlayer();
+        if (k === "q" && !e.repeat) {
+            e.preventDefault();
+            this.openWeaponWheel();
+        }
     };
 
     private onKeyUp = (e: KeyboardEvent) => {
         if (!e.key) return;
-        this.keys[e.key.toLowerCase()] = false;
+        const k = e.key.toLowerCase();
+        this.keys[k] = false;
+        if (k === "q") {
+            this.closeWeaponWheel(true);
+        }
     };
 
     private onRightClick = (e: MouseEvent) => {
@@ -172,9 +337,33 @@ export class HumanInput {
         // Clicking a form / modal / nav button is UI, not a punch. Alt is the
         // cursor-mode modifier, so Alt+click is pointing, not fighting.
         if (isUiPointerTarget(e.target) || e.altKey) return;
+        if (this.weaponWheel?.isOpen()) return;
         if (this.isCarryingPlayer) return; // Disable punches when carrying a player
+        if (this.isHoldingBomb() || this.isPickingUp || this.isThrowing) return;
 
         if (this.hitReactionTimer > 0) return;
+
+        if (this.gunModeActive()) {
+            // RMB: toggle aim lock only (no fire)
+            if (e.button === 2) {
+                this.aimLocked = !this.aimLocked;
+                if (!this.aimLocked) {
+                    this.isShooting = false;
+                    this.shootTimer = 0;
+                    this.fireCooldown = 0;
+                }
+                this.syncAimUi();
+            } else if (e.button === 0) {
+                // LMB: auto-ADS if needed, then shoot (works from rifle walk too)
+                this.isLeftMouseDown = true;
+                if (this.ensureAimForFire()) {
+                    this.isShooting = true;
+                    this.human.playAnimation("gunplay", 0.12, false, "repeat");
+                    this.fireBullet(this.lastCamera);
+                }
+            }
+            return;
+        }
 
         if (e.button === 0) { // left
             this.isLeftMouseDown = true;
@@ -196,10 +385,57 @@ export class HumanInput {
         
         if (e.button === 0) {
             this.isLeftMouseDown = false;
+            if (this.inventory.isGun()) {
+                // End spray — next frame returns to rifle idle
+                this.isShooting = false;
+                this.shootTimer = 0;
+            }
         } else if (e.button === 2) {
             this.isRightMouseDown = false;
+            // Aim stays locked until RMB is clicked again (toggle)
         }
     };
+
+    /** Discrete shot: sound + spawn projectile aimed through screen-center crosshair. */
+    private fireBullet(camera: THREE.PerspectiveCamera | null) {
+        if (!this.isAimingGun()) return;
+        if (this.fireCooldown > 0) return;
+
+        this.fireCooldown = HumanInput.FIRE_INTERVAL;
+        GunSound.playShot(this.human.mesh.position);
+
+        if (!camera) return;
+        camera.updateMatrixWorld(true);
+        camera.getWorldPosition(this.camWorldPos);
+        camera.getWorldDirection(this.shootDir);
+
+        // Always aim through exact screen-center crosshair — no target snap.
+        this.aimPoint
+            .copy(this.camWorldPos)
+            .addScaledVector(this.shootDir, HumanInput.SHOOT_RANGE);
+
+        const muzzle = this.getMuzzleWorldPosition?.();
+        if (muzzle) {
+            this.shootOrigin.copy(muzzle);
+        } else {
+            this.shootOrigin
+                .copy(this.camWorldPos)
+                .addScaledVector(this.shootDir, 1.2);
+        }
+
+        this.shootDir.copy(this.aimPoint).sub(this.shootOrigin);
+        if (this.shootDir.lengthSq() < 1e-6) {
+            camera.getWorldDirection(this.shootDir);
+        } else {
+            this.shootDir.normalize();
+        }
+
+        if (this.onFireProjectile) {
+            this.onFireProjectile(this.shootOrigin, this.shootDir);
+        } else {
+            this.tryShootHits(camera, true);
+        }
+    }
 
     public triggerPickup() {
         if (this.isCarryingPlayer) return; // Can't pick up bombs while carrying a player
@@ -213,9 +449,11 @@ export class HumanInput {
                 if (!this.isThrowing) {
                     this.isThrowing = true;
                     this.isPickingUp = false;
+                    this.isShooting = false;
                     this.pickupTimer = 0;
                     this.throwTimer = 0;
                     this.targetPickupObject = heldObj;
+                    this.syncWeaponVisual();
                     const duration = this.human.playAnimation("throw");
                     this.throwDuration = duration > 0 ? duration : 1.0;
                     this.human.body.setLinvel({x: 0, y: currentVel.y, z: 0}, true);
@@ -232,7 +470,10 @@ export class HumanInput {
 
         if (!this.isPickingUp && this.targetPickupObject) {
             this.isPickingUp = true;
+            this.isShooting = false;
+            this.clearAimLock();
             this.pickupTimer = 0;
+            this.syncWeaponVisual();
             const duration = this.human.playAnimation("lift");
             this.pickupDuration = duration > 0 ? duration : 1.0;
         }
@@ -408,6 +649,7 @@ export class HumanInput {
 
     private tryPunchHits() {
         if (!this.onPunchHit || !this.getPunchTargets) return;
+        if (this.gunModeActive() || this.isShooting) return;
 
         const attack = this.resolveAttackKind();
         if (!attack) return;
@@ -452,12 +694,77 @@ export class HumanInput {
         }
     }
 
+    private tryShootHits(
+        camera: THREE.PerspectiveCamera,
+        immediate: boolean = false
+    ) {
+        if (!this.onGunHit || !this.getPunchTargets) return;
+        if (!this.isAimingGun()) return;
+        if (!immediate && !this.isShooting) return;
+
+        // Hitscan along camera forward (= screen-center crosshair while ADS)
+        camera.updateMatrixWorld(true);
+        this.shootOrigin.setFromMatrixPosition(camera.matrixWorld);
+        camera.getWorldDirection(this.shootDir);
+
+        const targets = this.getPunchTargets();
+        let bestId: string | null = null;
+        let bestDist = HumanInput.SHOOT_RANGE;
+
+        for (const target of targets) {
+            if (this.shootCooldown.has(target.id)) continue;
+
+            // Test both torso and head; take the closer hit along the ray
+            for (const aimPoint of [target.spine, target.head]) {
+                this.shootToTarget.copy(aimPoint).sub(this.shootOrigin);
+                const along = this.shootToTarget.dot(this.shootDir);
+                if (along < 1.0 || along > bestDist) continue;
+
+                this.shootClosest
+                    .copy(this.shootOrigin)
+                    .addScaledVector(this.shootDir, along);
+                if (
+                    this.shootClosest.distanceTo(aimPoint) >
+                    HumanInput.SHOOT_HIT_RADIUS
+                ) {
+                    continue;
+                }
+                bestDist = along;
+                bestId = target.id;
+            }
+        }
+
+        if (bestId) {
+            this.shootCooldown.set(bestId, HumanInput.SHOOT_COOLDOWN_SEC);
+            this.onGunHit(bestId, "body");
+            this.crosshairEl?.classList.add("is-hit");
+            window.setTimeout(() => {
+                this.crosshairEl?.classList.remove("is-hit");
+            }, 80);
+        }
+    }
+
     public update(dt: number, camera: THREE.PerspectiveCamera) {
+        this.lastCamera = camera;
+        if (this.isDead) {
+            this.releaseControls();
+            this.clearAimLock();
+            return;
+        }
         this.tickHitCooldowns(dt);
+        for (const [id, t] of this.shootCooldown) {
+            const next = t - dt;
+            if (next <= 0) this.shootCooldown.delete(id);
+            else this.shootCooldown.set(id, next);
+        }
+        if (this.fireCooldown > 0) {
+            this.fireCooldown = Math.max(0, this.fireCooldown - dt);
+        }
+
         let forward = 0;
         let right = 0;
         
-        if (this.isEnabled) {
+        if (this.isEnabled && !this.weaponWheel?.isOpen()) {
             if (this.keys["w"] || this.keys["arrowup"]) forward += 1;
             if (this.keys["s"] || this.keys["arrowdown"]) forward -= 1;
             if (this.keys["a"] || this.keys["arrowleft"]) right -= 1;
@@ -471,8 +778,14 @@ export class HumanInput {
             }
         }
 
-        const isRunning = this.keys["shift"];
-        const currentSpeed = isRunning ? this.runSpeed : this.walkSpeed;
+        // Gun out: walk only. Extra slow while ADS (GTA-like).
+        const wantsRun = Boolean(this.keys["shift"]) && !this.gunModeActive();
+        const isRunning = wantsRun;
+        const currentSpeed = this.isAimingGun()
+            ? this.walkSpeed * 0.55
+            : isRunning
+                ? this.runSpeed
+                : this.walkSpeed;
 
         // Jump Logic
         const currentVel = this.human.body.linvel();
@@ -483,8 +796,10 @@ export class HumanInput {
             // currentVel.y = this.jumpForce; // Animation has root motion, no physics jump
             this.lastJumpTime = now;
             
-            const isRunning = this.keys["shift"];
-            const animName = (isRunning && this.human.animations.has("running jumb")) ? "running jumb" : "jumbing";
+            const animName =
+                isRunning && this.human.animations.has("running jumb")
+                    ? "running jumb"
+                    : "jumbing";
             const duration = this.human.playAnimation(animName);
             if (duration > 0) {
                 this.jumpDuration = duration;
@@ -590,6 +905,7 @@ export class HumanInput {
                 this.isThrowing = false;
                 this.human.throwProgress = 0;
                 this.targetPickupObject = null;
+                this.syncWeaponVisual();
             }
         }
 
@@ -622,12 +938,25 @@ export class HumanInput {
                 z: this.moveDir.z * currentSpeed
             }, true);
 
-            // Rotate visual mesh to face movement direction
-            const angle = Math.atan2(this.moveDir.x, this.moveDir.z);
-            this.targetRotation.setFromAxisAngle(this.upAxis, angle);
-            
-            // Smoothly interpolate current rotation to target rotation
-            this.human.mesh.quaternion.slerp(this.targetRotation, dt * this.rotationSmoothness);
+            if (this.isAimingGun()) {
+                // ADS: face camera look (GTA) so strafe keeps aim forward
+                camera.getWorldDirection(this.cameraFwd);
+                this.cameraFwd.y = 0;
+                if (this.cameraFwd.lengthSq() > 1e-4) {
+                    this.cameraFwd.normalize();
+                    const angle = Math.atan2(this.cameraFwd.x, this.cameraFwd.z);
+                    this.targetRotation.setFromAxisAngle(this.upAxis, angle);
+                    this.human.mesh.quaternion.slerp(
+                        this.targetRotation,
+                        dt * this.rotationSmoothness * 1.4
+                    );
+                }
+            } else {
+                // Hip / fists: face walk direction
+                const angle = Math.atan2(this.moveDir.x, this.moveDir.z);
+                this.targetRotation.setFromAxisAngle(this.upAxis, angle);
+                this.human.mesh.quaternion.slerp(this.targetRotation, dt * this.rotationSmoothness);
+            }
         } else {
             // Apply preserved vertical velocity even when not moving horizontally
             this.human.body.setLinvel({
@@ -635,6 +964,21 @@ export class HumanInput {
                 y: currentVel.y,
                 z: 0
             }, true);
+
+            // Idle ADS: face camera aim
+            if (this.isAimingGun()) {
+                camera.getWorldDirection(this.cameraFwd);
+                this.cameraFwd.y = 0;
+                if (this.cameraFwd.lengthSq() > 1e-4) {
+                    this.cameraFwd.normalize();
+                    const angle = Math.atan2(this.cameraFwd.x, this.cameraFwd.z);
+                    this.targetRotation.setFromAxisAngle(this.upAxis, angle);
+                    this.human.mesh.quaternion.slerp(
+                        this.targetRotation,
+                        dt * this.rotationSmoothness * 1.4
+                    );
+                }
+            }
         }
 
         // Swimming logic & Buoyancy
@@ -668,8 +1012,12 @@ export class HumanInput {
             }, true);
         }
 
-        // Check for holding left click for punch two
-        if (this.isLeftMouseDown && performance.now() - this.leftMouseDownTime > 300) {
+        // Hold LMB for punch two — fists only
+        if (
+            !this.gunModeActive() &&
+            this.isLeftMouseDown &&
+            performance.now() - this.leftMouseDownTime > 300
+        ) {
             if (this.human.activeAnimationName && !this.human.activeAnimationName.includes("punch two")) {
                 const duration = this.human.playAnimation("punch two");
                 this.attackTimer = duration;
@@ -682,8 +1030,21 @@ export class HumanInput {
             }
         }
 
+        // Hold LMB: auto-ADS + looping Gunplay + fire (also while moving / rifle walk)
+        if (this.gunModeActive() && this.isLeftMouseDown) {
+            this.ensureAimForFire();
+            this.isShooting = true;
+            this.human.playAnimation("gunplay", 0.12, false, "repeat");
+            this.fireBullet(camera);
+        } else if (this.isShooting) {
+            this.isShooting = false;
+            this.shootTimer = 0;
+        }
+
         // Animation state machine
-        if (this.attackTimer > 0) {
+        if (this.gunModeActive() && this.isLeftMouseDown) {
+            // Gunplay held above — do not fall through to rifle walk/idle
+        } else if (this.attackTimer > 0 && !this.gunModeActive()) {
             this.attackTimer -= dt;
             this.tryPunchHits();
         } else if (this.isSwimming) {
@@ -694,19 +1055,23 @@ export class HumanInput {
             } else if (this.human.animations.has("jumbing")) {
                 this.human.playAnimation("jumbing");
             }
-        } else if (this.moveDir.lengthSq() > 0.01) {
-            if (this.isCarryingPlayer) {
-                this.human.playAnimation("carry walk");
-            } else {
-                this.human.playAnimation(isRunning ? "run" : "walk");
-            }
         } else if (this.isPickingUp) {
             this.human.playAnimation("lift");
         } else if (this.isThrowing) {
             this.human.playAnimation("throw");
+        } else if (this.moveDir.lengthSq() > 0.01) {
+            if (this.isCarryingPlayer) {
+                this.human.playAnimation("carry walk");
+            } else if (this.gunModeActive()) {
+                this.human.playAnimation("rifle walk");
+            } else {
+                this.human.playAnimation(isRunning ? "run" : "walk");
+            }
         } else {
             if (this.isCarryingPlayer) {
                 this.human.playAnimation("carry idle");
+            } else if (this.gunModeActive()) {
+                this.human.playAnimation("rifle idle");
             } else {
                 this.human.playAnimation("idle");
             }

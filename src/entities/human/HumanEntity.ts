@@ -119,6 +119,8 @@ export class HumanEntity {
 		"hit on side of body",
 		"punch one",
 		"drop kick",
+		"gunplay",
+		"dying",
 	];
 
 	constructor(
@@ -254,7 +256,12 @@ export class HumanEntity {
 		);
 	}
 
-	public playAnimation(name: string, fadeDuration: number = 0.2): number {
+	public playAnimation(
+		name: string,
+		fadeDuration: number = 0.2,
+		forceRestart: boolean = false,
+		loopMode: "auto" | "once" | "repeat" = "auto"
+	): number {
 		const lowerName = name.toLowerCase();
 		let targetAction: THREE.AnimationAction | undefined;
 
@@ -278,8 +285,8 @@ export class HumanEntity {
 
 		if (!targetAction) return 0;
 
-		if (targetAction !== this.activeAction) {
-			if (this.activeAction) {
+		if (forceRestart || targetAction !== this.activeAction) {
+			if (this.activeAction && this.activeAction !== targetAction) {
 				this.activeAction.fadeOut(fadeDuration);
 			}
 
@@ -287,14 +294,26 @@ export class HumanEntity {
 
 			const clipLower = targetAction.getClip().name.toLowerCase();
 			const isOneShot =
-				HumanEntity.ONE_SHOT_ANIMS.some(
-					(a) => lowerName === a || clipLower === a || clipLower.includes(a)
-				);
+				loopMode === "once" ||
+				(loopMode === "auto" &&
+					HumanEntity.ONE_SHOT_ANIMS.some(
+						(a) =>
+							lowerName === a ||
+							clipLower === a ||
+							clipLower.includes(a)
+					));
 
-			if (isOneShot) {
+			if (loopMode === "repeat") {
+				targetAction.setLoop(THREE.LoopRepeat, Infinity);
+				targetAction.clampWhenFinished = false;
+			} else if (isOneShot) {
 				targetAction.setLoop(THREE.LoopOnce, 1);
 				targetAction.clampWhenFinished = true;
-			} else if (lowerName === "sitting" || lowerName.includes("sitting") || clipLower.includes("sitting")) {
+			} else if (
+				lowerName === "sitting" ||
+				lowerName.includes("sitting") ||
+				clipLower.includes("sitting")
+			) {
 				targetAction.setLoop(THREE.LoopRepeat, Infinity);
 				targetAction.clampWhenFinished = false;
 			} else {

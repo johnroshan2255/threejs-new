@@ -71,7 +71,7 @@ export function isUiPointerTarget(target: EventTarget | null): boolean {
 	if (!el?.closest) return false;
 	return Boolean(
 		el.closest(
-			".logout-modal, #room-list-panel, #game-top-nav, .loading-screen, .mobile-controls, .settings-toggle, .dg, .orientation-gate"
+			".logout-modal, #room-list-panel, #game-top-nav, .loading-screen, .mobile-controls, .settings-toggle, .dg, .orientation-gate, .weapon-wheel"
 		)
 	);
 }

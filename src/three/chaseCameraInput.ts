@@ -1,5 +1,5 @@
-const MIN_PITCH = -0.35;
-const MAX_PITCH = 1.05;
+const MIN_PITCH = -0.85;
+const MAX_PITCH = 1.15;
 const MIN_DISTANCE = 5;
 const MAX_DISTANCE = 16;
 /** Mouse-look sensitivity (radians per pixel of movement). */
@@ -55,6 +55,9 @@ export class ChaseCameraInput {
 	private altHeld = false;
 	/** Was the pointer locked when Alt went down? Restore it on release. */
 	private relockAfterAlt = false;
+	/** Weapon wheel / modal UI that needs a real mouse cursor. */
+	private uiCapture = false;
+	private relockAfterUi = false;
 
 	/** True while the player is steering the camera (drag, or recent mouse-look). */
 	get isDragging(): boolean {
@@ -92,7 +95,7 @@ export class ChaseCameraInput {
 	private isUiTarget(target: EventTarget | null): boolean {
 		const el = target as HTMLElement | null;
 		return !!el?.closest?.(
-			".mobile-controls, .settings-toggle, .dg, .orientation-gate, .logout-modal, #room-list-panel, #game-top-nav, .loading-screen"
+			".mobile-controls, .settings-toggle, .dg, .orientation-gate, .logout-modal, #room-list-panel, #game-top-nav, .loading-screen, .weapon-wheel"
 		);
 	}
 
@@ -145,6 +148,35 @@ export class ChaseCameraInput {
 		this.lastPinchDist = dist;
 	}
 
+	/**
+	 * Pause mouse-look and show the system cursor (weapon wheel, etc.).
+	 * Mirrors Alt-held cursor mode but is driven by game UI, not the Alt key.
+	 */
+	setUiCapture(active: boolean) {
+		if (this.uiCapture === active) return;
+		this.uiCapture = active;
+		this.hasFreeSample = false;
+		if (active) {
+			this.lookActiveUntil = 0;
+			this.relockAfterUi = this.locked;
+			this.exitPointerLock();
+			this.domElement.style.cursor = "default";
+			document.body.classList.add("ui-cursor-capture");
+			return;
+		}
+		document.body.classList.remove("ui-cursor-capture");
+		this.domElement.style.cursor = this.dragging ? "grabbing" : "grab";
+		if (this.relockAfterUi && this.options.isFreeLookAllowed?.()) {
+			this.requestPointerLock();
+		}
+		this.relockAfterUi = false;
+	}
+
+	/** True while weapon wheel / similar UI owns the mouse. */
+	get isUiCapture(): boolean {
+		return this.uiCapture;
+	}
+
 	// --- Alt = temporary cursor mode ---
 
 	private setAltHeld(held: boolean) {
@@ -165,7 +197,11 @@ export class ChaseCameraInput {
 		// Hand the mouse back to the camera exactly as it was. The key release
 		// usually counts as user activation; if the browser refuses, cursor-based
 		// look takes over until the next canvas click.
-		if (this.relockAfterAlt && this.options.isFreeLookAllowed?.()) {
+		if (
+			this.relockAfterAlt &&
+			!this.uiCapture &&
+			this.options.isFreeLookAllowed?.()
+		) {
 			this.requestPointerLock();
 		}
 		this.relockAfterAlt = false;
@@ -276,7 +312,9 @@ export class ChaseCameraInput {
 	/** Per-frame: give the cursor back as soon as free look stops being allowed. */
 	syncFreeLook() {
 		if (!this.locked) return;
-		if (this.altHeld || !this.options.isFreeLookAllowed?.()) this.exitFreeLook();
+		if (this.altHeld || this.uiCapture || !this.options.isFreeLookAllowed?.()) {
+			this.exitFreeLook();
+		}
 	}
 
 	/** Release mouse-look (edit mode, lobby, UI that needs the cursor). */
@@ -297,7 +335,7 @@ export class ChaseCameraInput {
 		this.hasFreeSample = false;
 		this.domElement.style.cursor = this.locked
 			? "none"
-			: this.altHeld
+			: this.altHeld || this.uiCapture
 				? "default"
 				: this.dragging
 					? "grabbing"
@@ -329,8 +367,8 @@ export class ChaseCameraInput {
 			return;
 		}
 
-		// Alt held: the click belongs to the UI — no lock, no orbit drag.
-		if (this.altHeld) return;
+		// Alt / UI capture: the click belongs to the UI — no lock, no orbit drag.
+		if (this.altHeld || this.uiCapture) return;
 		// Clicking the world upgrades cursor look to pointer lock (edge-free).
 		if (!this.locked && this.options.isFreeLookAllowed?.()) {
 			this.requestPointerLock();
@@ -351,7 +389,7 @@ export class ChaseCameraInput {
 		this.syncAltFromEvent(e);
 		// Alt held: the mouse belongs to the cursor, not the camera. Checked
 		// before the locked branch — the lock exit is a frame behind the keydown.
-		if (this.altHeld) return;
+		if (this.altHeld || this.uiCapture) return;
 		if (this.locked) {
 			this.applyLook(e.movementX, e.movementY);
 			return;

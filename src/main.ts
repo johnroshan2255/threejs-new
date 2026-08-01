@@ -16,7 +16,7 @@ import {
 	createTerrainHeightfieldCollider,
 	type TerrainColliderHandle,
 } from "./physics/terrainCollider";
-import { setIslandTerrain, getWorldTerrainY } from "./terrain/islandHeight";
+import { setIslandTerrain, getWorldTerrainY, findSafeTerrainSpawn, isOutsideTerrain } from "./terrain/islandHeight";
 import { createLargeTerrain, TERRAIN_CONFIG } from "./terrain/createLargeTerrain";
 import { Pond, REFERENCE_WATER_LOOK } from "./entities/water";
 import { createCar, type CarEntity } from "./entities/car/createCar";
@@ -37,6 +37,14 @@ import { updateChaseCamera, updateHumanCamera } from "./three/chaseCamera";
 import { ChaseCameraInput } from "./three/chaseCameraInput";
 import { HumanEntity, findCombatBones, hitReactionAnimName, stripRootMotion, type CombatBones, type HitReaction } from "./entities/human/HumanEntity";
 import { HumanInput } from "./entities/human/HumanInput";
+import { BulletSystem } from "./entities/human/BulletSystem";
+import {
+	BLAST_KILL_RADIUS,
+	PLAYER_MAX_HP,
+	damageForPart,
+	type DeathCause,
+	type GunHitPart,
+} from "./entities/human/playerCombat";
 import {
 	createTree,
 	updateFoliageWind,
@@ -111,6 +119,7 @@ import {
 	type GraphicsQuality,
 } from "./ui/GameSettings";
 import { WorldLoadingOverlay } from "./ui/WorldLoadingOverlay";
+import { HealthHud } from "./ui/HealthHud";
 
 type RemotePlayer = {
 	loaded: boolean;
@@ -132,6 +141,8 @@ type RemotePlayer = {
 	isCarryingPlayer?: boolean;
 	/** Occupied island bench seat (0 | 1), or null if not sitting. */
 	benchSeat?: 0 | 1 | null;
+	hp?: number;
+	dead?: boolean;
 };
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:3000";
@@ -157,6 +168,9 @@ export class FluffyGrass {
 
 	// Interactive Objects
 	private bombs: { mesh: THREE.Group, body: RAPIER.RigidBody | null, id: number, isFlying?: boolean, flightTime?: number }[] = [];
+	/** Prevent double-detonation (bullet + land fuse, chain, etc.). */
+	private readonly detonatingBombIds = new Set<number>();
+	private readonly _bombWorldPos = new THREE.Vector3();
 
 	Uniforms = {
 		uTime: { value: 0 },
@@ -213,6 +227,30 @@ export class FluffyGrass {
 	private activePlayer: "car" | "human" = "car";
 	private human: HumanEntity | null = null;
 	private humanInput: HumanInput | null = null;
+	/** Held firearm mesh — lives in the scene, snapped to the right hand each frame. */
+	private gunMesh: THREE.Object3D | null = null;
+	private bulletSystem: BulletSystem | null = null;
+	private localHp = PLAYER_MAX_HP;
+	private localDead = false;
+	private deathTimer = 0;
+	private deathCause: DeathCause | null = null;
+	private healthHud: HealthHud | null = null;
+	private readonly gunHandPos = new THREE.Vector3();
+	private readonly gunHandQuat = new THREE.Quaternion();
+	private readonly gunWorldOffset = new THREE.Vector3();
+	private readonly gunMuzzleWorld = new THREE.Vector3();
+	private readonly gunMuzzleLocal = new THREE.Vector3(0.02, 0.05, 0.42);
+	private readonly gunOffsetPos = new THREE.Vector3(0.05, 0.02, 0.08);
+	private readonly gunOffsetQuat = new THREE.Quaternion().setFromEuler(
+		new THREE.Euler(-Math.PI * 0.5, Math.PI, 0.2)
+	);
+	private readonly _shotOrigin = new THREE.Vector3();
+	private readonly _shotDir = new THREE.Vector3();
+	private readonly _shotAim = new THREE.Vector3();
+	private readonly _shotClosest = new THREE.Vector3();
+	private readonly _shotTo = new THREE.Vector3();
+	/** Dedupe networked hit tracers (attacker->victim). */
+	private readonly recentGunFxAt = new Map<string, number>();
 	private interactionPrompt: HTMLElement | null = null;
 
 	private socket: Socket | null = null;
@@ -387,6 +425,7 @@ export class FluffyGrass {
 		this.setupTextures();
 		this.setupEventListeners();
 		this.setupInteractionUI();
+		this.healthHud = new HealthHud();
 		this.orientationGate = createOrientationGate();
 		this.dayNight = createDayNightCycle(this.scene, { shadowExtent: 90 });
 		this.dayNight.auto = this.dayNightGui.auto;
@@ -401,6 +440,10 @@ export class FluffyGrass {
 
 		this.explosionSystem = new ExplosionSystem();
 		this.scene.add(this.explosionSystem.mesh);
+
+		this.bulletSystem = new BulletSystem();
+		this.scene.add(this.bulletSystem.group);
+		this.bulletSystem.getGroundY = (x, z) => getWorldTerrainY(x, z);
 
 		this.initializationPromise = (async () => {
 			await initPhysics();
@@ -437,6 +480,8 @@ export class FluffyGrass {
 				this.userData = user;
 				this.isGameActive = true;
 				this.settings.show();
+				this.healthHud?.setVisible(true);
+				this.healthHud?.setHp(this.localHp);
 				if (this.carInput) this.carInput.isEnabled = this.activePlayer === "car";
 				if (this.humanInput) {
 					this.humanInput.isEnabled = this.activePlayer === "human";
@@ -742,13 +787,14 @@ export class FluffyGrass {
 
 			// Local player was hit — play reaction (syncs out via player-state)
 			if (targetSocketId === this.socket?.id) {
+				if (this.localDead) return;
 				this.humanInput?.applyHitReaction(reaction);
 				return;
 			}
 
 			// Eagerly play on the remote victim for snappier feedback
 			const rp = this.remotePlayers.get(targetSocketId);
-			if (!rp?.loaded || !rp.animations) return;
+			if (!rp?.loaded || !rp.animations || rp.dead) return;
 			const action = [...rp.animations.entries()].find(
 				([name]) => name === animName || name.includes(animName)
 			)?.[1];
@@ -760,6 +806,116 @@ export class FluffyGrass {
 				action.fadeIn(0.15).play();
 				rp.currentAction = action;
 			}
+		});
+
+		this.socket.on("player-damage", (data: any) => {
+			const { targetSocketId, part, damage, socketId: attackerId } = data;
+			const hitPart: GunHitPart = part === "head" ? "head" : "body";
+			const dmg =
+				typeof damage === "number" ? damage : damageForPart(hitPart);
+
+			if (targetSocketId === this.socket?.id) {
+				this.applyLocalDamage(hitPart, dmg, attackerId);
+			} else {
+				// Optimistic remote HP (no flinch anim on gun hits)
+				const rp = this.remotePlayers.get(targetSocketId);
+				if (rp && !rp.dead) {
+					rp.hp = Math.max(0, (rp.hp ?? PLAYER_MAX_HP) - dmg);
+				}
+			}
+
+			// Every client sees a tracer into the victim's local body (matches HP sync)
+			if (attackerId && targetSocketId) {
+				this.spawnSyncedHitTracer(attackerId, targetSocketId, hitPart);
+			}
+		});
+
+		this.socket.on("player-died", (data: any) => {
+			const { socketId, cause, position, animation } = data;
+			if (socketId === this.socket?.id) return;
+			const rp = this.remotePlayers.get(socketId);
+			if (!rp?.loaded || !rp.humanGroup) return;
+			rp.dead = true;
+			rp.hp = 0;
+			if (position) {
+				rp.targetHumanPosition.set(position.x, position.y, position.z);
+				rp.humanGroup.position.copy(rp.targetHumanPosition);
+			}
+			const anim =
+				animation ||
+				(cause === "bomb" ? "fall down" : "dying");
+			if (rp.animations) {
+				const action = [...rp.animations.entries()].find(
+					([name]) => name === anim || name.includes(anim)
+				)?.[1];
+				if (action) {
+					if (rp.currentAction) rp.currentAction.fadeOut(0.1);
+					action.reset().setLoop(THREE.LoopOnce, 1);
+					action.clampWhenFinished = true;
+					action.fadeIn(0.1).play();
+					rp.currentAction = action;
+				}
+			}
+		});
+
+		this.socket.on("player-respawned", (data: any) => {
+			const { socketId, position, hp } = data;
+			if (socketId === this.socket?.id) return;
+			const rp = this.remotePlayers.get(socketId);
+			if (!rp?.loaded || !rp.humanGroup || !position) return;
+			rp.dead = false;
+			rp.hp = typeof hp === "number" ? hp : PLAYER_MAX_HP;
+			rp.targetHumanPosition.set(position.x, position.y, position.z);
+			rp.humanGroup.position.copy(rp.targetHumanPosition);
+			if (rp.humanBody) {
+				rp.humanBody.setNextKinematicTranslation({
+					x: position.x,
+					y: position.y + HumanEntity.MESH_Y_OFFSET,
+					z: position.z,
+				});
+			}
+			if (rp.animations?.has("idle")) {
+				const idle = rp.animations.get("idle")!;
+				if (rp.currentAction) rp.currentAction.fadeOut(0.15);
+				idle.reset().fadeIn(0.15).play();
+				rp.currentAction = idle;
+			}
+		});
+
+		this.socket.on("bomb-blast", (data: any) => {
+			const { bombId, position, socketId } = data;
+			if (socketId === this.socket?.id) return; // we already detonated locally
+			if (typeof bombId === "number" && this.detonatingBombIds.has(bombId)) {
+				return;
+			}
+			const blastPos = new THREE.Vector3(
+				position.x,
+				position.y,
+				position.z
+			);
+			this.applyRemoteBombBlast(bombId, blastPos);
+		});
+
+		this.socket.on("gun-shot", (data: any) => {
+			const { socketId, origin, direction, targetId } = data;
+			if (socketId === this.socket?.id) return;
+			if (!origin || !direction || !this.bulletSystem) return;
+			const ox = Number(origin.x);
+			const oy = Number(origin.y);
+			const oz = Number(origin.z);
+			const dx = Number(direction.x);
+			const dy = Number(direction.y);
+			const dz = Number(direction.z);
+			if (![ox, oy, oz, dx, dy, dz].every((n) => Number.isFinite(n))) return;
+
+			this._shotOrigin.set(ox, oy, oz);
+			this._shotDir.set(dx, dy, dz).normalize();
+			this.spawnRemoteGunTracer(
+				socketId,
+				this._shotOrigin,
+				this._shotDir,
+				typeof targetId === "string" ? targetId : null
+			);
 		});
 
 		this.socket.on("player-reposition", (data: any) => {
@@ -795,7 +951,9 @@ export class FluffyGrass {
 						animation.includes("sit to stand") ||
 						animation.includes("sweep") ||
 						animation.includes("uppercut") ||
-						animation.includes("hit on side");
+						animation.includes("hit on side") ||
+						animation.includes("dying") ||
+						animation.includes("fall down");
 					if (once) {
 						action.reset().setLoop(THREE.LoopOnce, 1);
 						action.clampWhenFinished = true;
@@ -820,7 +978,9 @@ export class FluffyGrass {
 					targetHumanPosition: new THREE.Vector3(),
 					targetHumanQuaternion: new THREE.Quaternion(),
 					targetCarPosition: new THREE.Vector3(),
-					targetCarQuaternion: new THREE.Quaternion()
+					targetCarQuaternion: new THREE.Quaternion(),
+					hp: PLAYER_MAX_HP,
+					dead: false,
 				};
 				this.remotePlayers.set(socketId, rp);
 
@@ -846,7 +1006,9 @@ export class FluffyGrass {
 						nameLower.includes("receiving an uppercut") ||
 						nameLower.includes("hit on side of body") ||
 						nameLower === "punch one" ||
-						nameLower === "drop kick"
+						nameLower === "drop kick" ||
+						nameLower === "dying" ||
+						nameLower.includes("dying")
 					) {
 						action.setLoop(THREE.LoopOnce, 1);
 						action.clampWhenFinished = true;
@@ -936,6 +1098,9 @@ export class FluffyGrass {
 			rp.benchSeat =
 				state.benchSeat === 0 || state.benchSeat === 1 ? state.benchSeat : null;
 
+			if (typeof state.hp === "number") rp.hp = state.hp;
+			if (typeof state.dead === "boolean") rp.dead = state.dead;
+
 			if (state.activeEntity === "human") {
 				rp.carGroup.visible = true; // Wait, actually should carGroup be true here? Yes, if they left it. But humanGroup should be true too!
 				rp.humanGroup.visible = true;
@@ -951,8 +1116,27 @@ export class FluffyGrass {
 				} else if (state.animation && rp.animations.has(state.animation)) {
 					if (rp.currentAction !== rp.animations.get(state.animation)) {
 						if (rp.currentAction) rp.currentAction.fadeOut(0.2);
-						rp.currentAction = rp.animations.get(state.animation);
-						rp.currentAction!.reset().fadeIn(0.2).play();
+						const next = rp.animations.get(state.animation)!;
+						const anim = String(state.animation).toLowerCase();
+						const once =
+							anim.includes("dying") ||
+							anim.includes("fall down") ||
+							anim.includes("sit to stand") ||
+							anim.includes("sweep") ||
+							anim.includes("uppercut") ||
+							anim.includes("hit on side") ||
+							anim.includes("punch") ||
+							anim.includes("drop kick");
+						next.reset();
+						if (once) {
+							next.setLoop(THREE.LoopOnce, 1);
+							next.clampWhenFinished = true;
+						} else {
+							next.setLoop(THREE.LoopRepeat, Infinity);
+							next.clampWhenFinished = false;
+						}
+						next.fadeIn(0.2).play();
+						rp.currentAction = next;
 					}
 				}
 			} else if (state.activeEntity === "car") {
@@ -1013,6 +1197,7 @@ export class FluffyGrass {
 						this.editMode?.attachSocket(this.socket);
 						void this.editMode?.onRoomWorldBound(res.worldId ?? worldId);
 						this.isGameActive = false;
+						this.healthHud?.setVisible(false);
 						if (lobbyPanel) lobbyPanel.style.display = "flex";
 						if (startBtn) startBtn.style.display = "block";
 						if (loadingScreen) loadingScreen.style.display = "none";
@@ -1038,6 +1223,7 @@ export class FluffyGrass {
 							res.worldId ?? this.activeWorldDef.id
 						);
 						this.isGameActive = false;
+						this.healthHud?.setVisible(false);
 						if (lobbyPanel) lobbyPanel.style.display = "flex";
 						if (startBtn) startBtn.style.display = "none";
 						if (loadingScreen) loadingScreen.style.display = "none";
@@ -1716,6 +1902,64 @@ export class FluffyGrass {
 			this.humanInput.setMobileControls(this.mobileControls);
 		}
 
+		// Free gun — kept in scene (world space), snapped to the right hand each
+		// frame. Parenting under humanScale (~0.03) made the mesh vanish.
+		try {
+			const gunGltf = await this.loadGltfFull("/gun.glb");
+			const gunVisual = gunGltf.scene as THREE.Group;
+			gunVisual.traverse((child: THREE.Object3D) => {
+				if (child instanceof THREE.Mesh) {
+					child.castShadow = true;
+					child.receiveShadow = true;
+					const mats = Array.isArray(child.material)
+						? child.material
+						: [child.material];
+					for (const m of mats) {
+						if (m && "metalness" in m) {
+							(m as THREE.MeshStandardMaterial).metalness = Math.min(
+								(m as THREE.MeshStandardMaterial).metalness ?? 0.4,
+								0.45
+							);
+						}
+						if (m) m.side = THREE.DoubleSide;
+					}
+				}
+			});
+
+			const rawBox = new THREE.Box3().setFromObject(gunVisual);
+			const rawSize = new THREE.Vector3();
+			rawBox.getSize(rawSize);
+			const longest = Math.max(rawSize.x, rawSize.y, rawSize.z, 1e-3);
+			// World-space length ~0.5m (not affected by humanScale)
+			gunVisual.scale.setScalar(0.5 / longest);
+			rawBox.setFromObject(gunVisual);
+			const center = new THREE.Vector3();
+			rawBox.getCenter(center);
+			gunVisual.position.sub(center);
+
+			const grip = new THREE.Group();
+			grip.name = "GunGrip";
+			grip.add(gunVisual);
+			grip.visible = false;
+			this.scene.add(grip);
+			this.gunMesh = grip;
+			console.log(
+				"[setupHuman] Gun ready in world space, scale",
+				gunVisual.scale.x.toFixed(4)
+			);
+		} catch (err) {
+			console.warn("[setupHuman] Failed to load /gun.glb", err);
+		}
+
+		this.humanInput.onWeaponEquip = () => {
+			if (!this.gunMesh || !this.humanInput) return;
+			this.gunMesh.visible = this.humanInput.shouldShowGun();
+		};
+
+		this.humanInput.onWeaponWheelToggle = (open) => {
+			this.chaseCameraInput?.setUiCapture(open);
+		};
+
 		// Connect the procedural pickup animation to grab the object
 		this.humanInput.checkCanPickup = () => {
 			if (!this.human) return null;
@@ -1818,6 +2062,9 @@ export class FluffyGrass {
 			if (!this.human) return;
 			if (obj.parent !== this.worldGroup) return; // already picked up
 
+			// Hide gun while a bomb occupies the hand
+			if (this.gunMesh) this.gunMesh.visible = false;
+
 			// Remove physics body from the world so it stops falling
 			const bombData = this.bombs.find(b => b.mesh === obj);
 			if (bombData && bombData.body) {
@@ -1825,11 +2072,7 @@ export class FluffyGrass {
 				bombData.body = null;
 			}
 
-			let hand: THREE.Object3D | null = null;
-			this.human.mesh.traverse(child => {
-				if (child.name.toLowerCase().includes("righthand") && !hand) hand = child;
-			});
-
+			const hand = this.human.rightHandBone;
 			if (hand) {
 				// Attach the object to the character's hand
 				obj.position.set(0, 0.1, 0); // local to hand
@@ -1920,7 +2163,9 @@ export class FluffyGrass {
 			for (const [socketId, rp] of this.remotePlayers.entries()) {
 				if (!rp.loaded || !rp.humanGroup || !rp.humanGroup.visible) continue;
 				if (rp.isBeingCarried) continue;
+				if (rp.dead) continue;
 
+				rp.humanGroup.updateMatrixWorld(true);
 				const feetY = rp.humanGroup.position.y;
 				const bones = rp.combatBones;
 
@@ -1929,7 +2174,7 @@ export class FluffyGrass {
 				} else {
 					_punchHead.set(
 						rp.humanGroup.position.x,
-						feetY + HumanEntity.MESH_Y_OFFSET * 1.75,
+						feetY + 1.65,
 						rp.humanGroup.position.z
 					);
 				}
@@ -1939,7 +2184,7 @@ export class FluffyGrass {
 				} else {
 					_punchSpine.set(
 						rp.humanGroup.position.x,
-						feetY + HumanEntity.MESH_Y_OFFSET,
+						feetY + 1.05,
 						rp.humanGroup.position.z
 					);
 				}
@@ -1980,6 +2225,64 @@ export class FluffyGrass {
 			rp.currentAction = action;
 		};
 
+		this.humanInput.onGunHit = (targetId, part) => {
+			const dmg = damageForPart(part);
+			if (this.socket && this.roomCode) {
+				this.socket.emit("player-damage", {
+					roomCode: this.roomCode,
+					targetSocketId: targetId,
+					part,
+					damage: dmg,
+				});
+			}
+			// Optimistic remote HP (victim applies real death; no flinch anim)
+			const rp = this.remotePlayers.get(targetId);
+			if (!rp || rp.dead) return;
+			rp.hp = Math.max(0, (rp.hp ?? PLAYER_MAX_HP) - dmg);
+		};
+
+		this.humanInput.getMuzzleWorldPosition = () => {
+			if (!this.gunMesh || !this.gunMesh.visible) return null;
+			this.gunMuzzleLocal.set(0.02, 0.05, 0.42);
+			this.gunMuzzleLocal.applyQuaternion(this.gunMesh.quaternion);
+			this.gunMuzzleWorld.copy(this.gunMesh.position).add(this.gunMuzzleLocal);
+			return this.gunMuzzleWorld;
+		};
+
+		this.humanInput.onFireProjectile = (origin, direction) => {
+			const ownerId = this.socket?.id ?? null;
+			this.bulletSystem?.spawn(origin, direction, {
+				dealDamage: true,
+				ownerId,
+			});
+			if (this.socket && this.roomCode) {
+				const predictedId = this.predictShotTargetId(origin, direction);
+				this.socket.emit("gun-shot", {
+					roomCode: this.roomCode,
+					origin: {
+						x: origin.x,
+						y: origin.y,
+						z: origin.z,
+					},
+					direction: {
+						x: direction.x,
+						y: direction.y,
+						z: direction.z,
+					},
+					targetId: predictedId,
+				});
+			}
+		};
+
+		if (this.bulletSystem) {
+			this.bulletSystem.onHit = (targetId, _point, part) => {
+				this.humanInput?.onGunHit?.(targetId, part);
+			};
+			this.bulletSystem.onBombHit = (bombId) => {
+				this.detonateBomb(bombId);
+			};
+		}
+
 		this.humanInput.onHitRepositioned = (pos, quat) => {
 			if (!this.socket || !this.roomCode || !this.human) return;
 			const animation = this.human.activeAnimationName;
@@ -2002,6 +2305,484 @@ export class FluffyGrass {
 			});
 		};
 	}
+
+	/** Snap the world-space gun mesh to the animated right-hand bone. */
+	private syncGunToHand() {
+		if (!this.gunMesh || !this.human || !this.gunMesh.visible) return;
+		const hand = this.human.rightHandBone;
+		if (!hand) {
+			this.gunMesh.position.copy(this.human.mesh.position);
+			this.gunMesh.position.y += 1.2;
+			this.gunMesh.quaternion.copy(this.human.mesh.quaternion);
+			return;
+		}
+		this.human.mesh.updateMatrixWorld(true);
+		hand.getWorldPosition(this.gunHandPos);
+		hand.getWorldQuaternion(this.gunHandQuat);
+
+		// Offset in hand local space → world
+		this.gunWorldOffset.copy(this.gunOffsetPos).applyQuaternion(this.gunHandQuat);
+		this.gunMesh.position.copy(this.gunHandPos).add(this.gunWorldOffset);
+		this.gunMesh.quaternion.copy(this.gunHandQuat).multiply(this.gunOffsetQuat);
+	}
+
+	/** Who the shot will likely hit on this client (for network visual aim). */
+	private predictShotTargetId(
+		origin: THREE.Vector3,
+		direction: THREE.Vector3
+	): string | null {
+		const targets = this.humanInput?.getPunchTargets?.() ?? [];
+		const dir = this._shotDir.copy(direction).normalize();
+		let bestId: string | null = null;
+		let bestDist = 80;
+		const radius = 0.95;
+
+		for (const t of targets) {
+			for (const point of [t.head, t.spine, t.position]) {
+				this._shotTo.copy(point).sub(origin);
+				const along = this._shotTo.dot(dir);
+				if (along < 0.4 || along > bestDist) continue;
+				this._shotClosest.copy(origin).addScaledVector(dir, along);
+				if (this._shotClosest.distanceTo(point) > radius) continue;
+				bestDist = along;
+				bestId = t.id;
+			}
+		}
+		return bestId;
+	}
+
+	private getPlayerShotAimPoint(
+		playerId: string,
+		part: GunHitPart = "body"
+	): THREE.Vector3 | null {
+		if (playerId === this.socket?.id) {
+			if (!this.human || this.localDead) return null;
+			this.human.mesh.updateMatrixWorld(true);
+			if (part === "head" && this.human.headBone) {
+				this.human.headBone.getWorldPosition(this._shotAim);
+				return this._shotAim;
+			}
+			if (this.human.spineBone) {
+				this.human.spineBone.getWorldPosition(this._shotAim);
+				return this._shotAim;
+			}
+			this._shotAim.copy(this.human.mesh.position);
+			this._shotAim.y += part === "head" ? 1.65 : 1.05;
+			return this._shotAim;
+		}
+
+		const rp = this.remotePlayers.get(playerId);
+		if (!rp?.loaded || !rp.humanGroup || rp.dead) return null;
+		rp.humanGroup.updateMatrixWorld(true);
+		if (part === "head" && rp.combatBones?.head) {
+			rp.combatBones.head.getWorldPosition(this._shotAim);
+			return this._shotAim;
+		}
+		if (rp.combatBones?.spine) {
+			rp.combatBones.spine.getWorldPosition(this._shotAim);
+			return this._shotAim;
+		}
+		this._shotAim.copy(rp.humanGroup.position);
+		this._shotAim.y += part === "head" ? 1.65 : 1.05;
+		return this._shotAim;
+	}
+
+	private getRemoteMuzzleWorld(shooterId: string): THREE.Vector3 | null {
+		const rp = this.remotePlayers.get(shooterId);
+		if (!rp?.loaded || !rp.humanGroup) return null;
+		rp.humanGroup.updateMatrixWorld(true);
+		const hand = rp.combatBones?.rightHand;
+		if (hand) {
+			hand.getWorldPosition(this._shotOrigin);
+			this._shotOrigin.y += 0.08;
+			return this._shotOrigin;
+		}
+		this._shotOrigin.copy(rp.humanGroup.position);
+		this._shotOrigin.y += 1.35;
+		return this._shotOrigin;
+	}
+
+	/**
+	 * Remote gun tracer: start from the shooter's visible body and aim at the
+	 * local representation of the predicted target so all clients see the hit.
+	 */
+	private spawnRemoteGunTracer(
+		shooterId: string,
+		netOrigin: THREE.Vector3,
+		netDir: THREE.Vector3,
+		targetId: string | null
+	) {
+		if (!this.bulletSystem) return;
+
+		const muzzle = this.getRemoteMuzzleWorld(shooterId);
+		const origin = muzzle ? muzzle.clone() : netOrigin.clone();
+
+		let aimId = targetId;
+		if (!aimId) {
+			// Fall back: whoever sits near the networked ray on THIS client
+			aimId = this.predictShotTargetId(origin, netDir);
+		}
+		// Always consider the local player for visual aim (they aren't in getPunchTargets)
+		if (!aimId && this.human && !this.localDead && this.socket?.id) {
+			const head = this.getPlayerShotAimPoint(this.socket.id, "head");
+			const spine = this.getPlayerShotAimPoint(this.socket.id, "body");
+			if (head && spine) {
+				const dir = this._shotDir.copy(netDir).normalize();
+				let bestDist = 80;
+				for (const point of [head, spine, this.human.mesh.position]) {
+					this._shotTo.copy(point).sub(origin);
+					const along = this._shotTo.dot(dir);
+					if (along < 0.4 || along > bestDist) continue;
+					this._shotClosest.copy(origin).addScaledVector(dir, along);
+					if (this._shotClosest.distanceTo(point) > 1.1) continue;
+					bestDist = along;
+					aimId = this.socket.id;
+				}
+			}
+		}
+
+		let dir = netDir.clone().normalize();
+		if (aimId) {
+			const aimAt = this.getPlayerShotAimPoint(aimId, "body");
+			if (aimAt) {
+				dir.copy(aimAt).sub(origin);
+				if (dir.lengthSq() > 1e-6) dir.normalize();
+				else dir.copy(netDir).normalize();
+				const fxKey = `${shooterId}->${aimId}`;
+				this.recentGunFxAt.set(fxKey, performance.now());
+			}
+		}
+
+		this.bulletSystem.spawn(origin, dir, {
+			dealDamage: false,
+			ownerId: shooterId,
+		});
+	}
+
+	/** Authoritative hit FX when damage is applied — aims into local victim body. */
+	private spawnSyncedHitTracer(
+		attackerId: string,
+		victimId: string,
+		part: GunHitPart
+	) {
+		if (!this.bulletSystem) return;
+		if (attackerId === this.socket?.id) return; // shooter already has local bullet
+
+		const fxKey = `${attackerId}->${victimId}`;
+		const now = performance.now();
+		const prev = this.recentGunFxAt.get(fxKey) ?? 0;
+		if (now - prev < 550) return; // gun-shot tracer already covered this hit
+		this.recentGunFxAt.set(fxKey, now);
+
+		const muzzle =
+			this.getRemoteMuzzleWorld(attackerId)?.clone() ??
+			(() => {
+				const rp = this.remotePlayers.get(attackerId);
+				if (!rp?.humanGroup) return null;
+				return rp.humanGroup.position
+					.clone()
+					.add(new THREE.Vector3(0, 1.35, 0));
+			})();
+		const aimAt = this.getPlayerShotAimPoint(victimId, part);
+		if (!muzzle || !aimAt) return;
+
+		const dir = aimAt.clone().sub(muzzle);
+		if (dir.lengthSq() < 1e-6) return;
+		dir.normalize();
+
+		this.bulletSystem.spawn(muzzle, dir, {
+			dealDamage: false,
+			ownerId: attackerId,
+		});
+	}
+
+	/**
+	 * Full bomb detonation — same VFX / SFX / knockback as a thrown landing fuse.
+	 * Safe to call from bullet hits or the land timer.
+	 */
+	private detonateBomb(blastId: number) {
+		if (this.detonatingBombIds.has(blastId)) return;
+		const bomb = this.bombs.find((x) => x.id === blastId);
+		if (!bomb) return;
+
+		this.detonatingBombIds.add(blastId);
+		bomb.isFlying = false;
+
+		const blastPos = new THREE.Vector3();
+		bomb.mesh.getWorldPosition(blastPos);
+
+		// If still attached to a hand, drop back into the world for the blast/reset
+		if (bomb.mesh.parent !== this.worldGroup) {
+			this.worldGroup.add(bomb.mesh);
+			bomb.mesh.position.copy(blastPos);
+		}
+
+		BombSound.playBlastSound(blastPos);
+		this.explosionSystem?.emit(blastPos);
+
+		// --- WATER SPLASH ---
+		if (this.pond) {
+			const distToPond = Math.hypot(blastPos.x - -20, blastPos.z - 5);
+			const waterY = this.pond.mesh.position.y;
+			if (distToPond < 15 && Math.abs(blastPos.y - waterY) < 4.0) {
+				this.pond.createRipple({
+					position: blastPos,
+					strength: 1.5,
+					radius: 5.0,
+				});
+			}
+		}
+
+		const blastRadius = BLAST_KILL_RADIUS;
+
+		// Instant kill if local player is in blast radius
+		if (this.human && this.humanInput && !this.localDead) {
+			const dist = this.human.mesh.position.distanceTo(blastPos);
+			if (dist < blastRadius) {
+				this.dieLocal("bomb");
+			}
+		}
+
+		// Car knockback
+		if (this.car?.body) {
+			const dist = this.car.mesh.position.distanceTo(blastPos);
+			if (dist < blastRadius + 2.0) {
+				const dir = new THREE.Vector3().subVectors(this.car.mesh.position, blastPos);
+				dir.y = Math.max(0.5, dir.y + 1.0);
+				dir.normalize();
+				const force = 25000 * (1 - dist / (blastRadius + 2.0));
+				this.car.body.applyImpulse(dir.multiplyScalar(force), true);
+			}
+		}
+
+		// Other bombs (chain reaction)
+		for (const otherBomb of this.bombs) {
+			if (
+				otherBomb.id !== blastId &&
+				otherBomb.body &&
+				otherBomb.mesh.parent === this.worldGroup
+			) {
+				const dist = otherBomb.mesh.position.distanceTo(blastPos);
+				if (dist < blastRadius) {
+					const dir = new THREE.Vector3().subVectors(
+						otherBomb.mesh.position,
+						blastPos
+					);
+					dir.y = Math.max(0.5, dir.y + 1.0);
+					dir.normalize();
+					const force = 150 * (1 - dist / blastRadius);
+					otherBomb.body.applyImpulse(dir.multiplyScalar(force), true);
+					otherBomb.isFlying = true;
+					otherBomb.flightTime = 0;
+				}
+			}
+		}
+
+		// Respawn this bomb elsewhere
+		if (bomb.body) {
+			const newPos = new THREE.Vector3(
+				(Math.random() - 0.5) * 50,
+				0,
+				(Math.random() - 0.5) * 50
+			);
+			newPos.y = getWorldTerrainY(newPos.x, newPos.z) + 5.0;
+			bomb.body.setTranslation(newPos, true);
+			bomb.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+			bomb.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+			bomb.mesh.position.copy(newPos);
+		} else {
+			// Was held / no body — recreate a simple dynamic body at a random spot
+			const newPos = new THREE.Vector3(
+				(Math.random() - 0.5) * 50,
+				0,
+				(Math.random() - 0.5) * 50
+			);
+			newPos.y = getWorldTerrainY(newPos.x, newPos.z) + 5.0;
+			const rbDesc = RAPIER.RigidBodyDesc.dynamic()
+				.setTranslation(newPos.x, newPos.y, newPos.z)
+				.setLinearDamping(0.1)
+				.setAngularDamping(0.5);
+			const body = getWorld().createRigidBody(rbDesc);
+			getWorld().createCollider(RAPIER.ColliderDesc.ball(0.5).setMass(10), body);
+			bomb.body = body;
+			if (bomb.mesh.parent !== this.worldGroup) {
+				this.worldGroup.add(bomb.mesh);
+			}
+			bomb.mesh.position.copy(newPos);
+		}
+
+		if (this.socket && this.roomCode) {
+			this.socket.emit("bomb-blast", {
+				roomCode: this.roomCode,
+				bombId: blastId,
+				position: { x: blastPos.x, y: blastPos.y, z: blastPos.z },
+			});
+		}
+
+		this.detonatingBombIds.delete(blastId);
+	}
+
+	/** Remote client received a bomb blast (VFX + local kill check + bomb reset). */
+	private applyRemoteBombBlast(bombId: number, blastPos: THREE.Vector3) {
+		if (typeof bombId === "number") {
+			if (this.detonatingBombIds.has(bombId)) return;
+			this.detonatingBombIds.add(bombId);
+		}
+
+		BombSound.playBlastSound(blastPos);
+		this.explosionSystem?.emit(blastPos);
+
+		if (this.pond) {
+			const distToPond = Math.hypot(blastPos.x - -20, blastPos.z - 5);
+			const waterY = this.pond.mesh.position.y;
+			if (distToPond < 15 && Math.abs(blastPos.y - waterY) < 4.0) {
+				this.pond.createRipple({
+					position: blastPos,
+					strength: 1.5,
+					radius: 5.0,
+				});
+			}
+		}
+
+		if (this.human && !this.localDead) {
+			const dist = this.human.mesh.position.distanceTo(blastPos);
+			if (dist < BLAST_KILL_RADIUS) {
+				this.dieLocal("bomb");
+			}
+		}
+
+		if (this.car?.body) {
+			const dist = this.car.mesh.position.distanceTo(blastPos);
+			if (dist < BLAST_KILL_RADIUS + 2.0) {
+				const dir = new THREE.Vector3().subVectors(this.car.mesh.position, blastPos);
+				dir.y = Math.max(0.5, dir.y + 1.0);
+				dir.normalize();
+				const force = 25000 * (1 - dist / (BLAST_KILL_RADIUS + 2.0));
+				this.car.body.applyImpulse(dir.multiplyScalar(force), true);
+			}
+		}
+
+		const bomb = this.bombs.find((x) => x.id === bombId);
+		if (bomb?.body) {
+			const newPos = new THREE.Vector3(
+				(Math.random() - 0.5) * 50,
+				0,
+				(Math.random() - 0.5) * 50
+			);
+			newPos.y = getWorldTerrainY(newPos.x, newPos.z) + 5.0;
+			bomb.body.setTranslation(newPos, true);
+			bomb.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+			bomb.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+			bomb.mesh.position.copy(newPos);
+			bomb.isFlying = false;
+		}
+
+		if (typeof bombId === "number") {
+			this.detonatingBombIds.delete(bombId);
+		}
+	}
+
+	private applyLocalDamage(
+		part: GunHitPart,
+		damage: number,
+		_attackerId?: string
+	) {
+		if (this.localDead || !this.humanInput) return;
+		this.localHp = Math.max(0, this.localHp - damage);
+		this.healthHud?.setHp(this.localHp);
+		if (this.localHp <= 0) {
+			this.dieLocal("gun");
+		}
+	}
+
+	private dieLocal(cause: DeathCause) {
+		if (this.localDead || !this.human || !this.humanInput) return;
+		this.localDead = true;
+		this.localHp = 0;
+		this.healthHud?.setHp(0);
+		this.deathCause = cause;
+		this.humanInput.isDead = true;
+		this.humanInput.clearAimLock();
+		this.humanInput.releaseControls();
+
+		const anim = cause === "bomb" ? "fall down" : "dying";
+		const duration = this.human.playAnimation(anim, 0.15, true);
+		this.deathTimer = Math.max(duration, 1.2) + 0.6;
+
+		if (this.gunMesh) this.gunMesh.visible = false;
+
+		if (this.socket && this.roomCode) {
+			const p = this.human.mesh.position;
+			this.socket.emit("player-died", {
+				roomCode: this.roomCode,
+				cause,
+				position: { x: p.x, y: p.y, z: p.z },
+				animation: this.human.activeAnimationName,
+			});
+		}
+	}
+
+	private updateLocalDeath(dt: number) {
+		if (!this.localDead) return;
+		this.deathTimer -= dt;
+		if (this.human && this.deathCause) {
+			const anim = this.deathCause === "bomb" ? "fall down" : "dying";
+			this.human.playAnimation(anim);
+		}
+		if (this.deathTimer <= 0) {
+			this.respawnLocal();
+		}
+	}
+
+	/** Snap human onto safe terrain (combat / out-of-bounds). */
+	private respawnHumanOnTerrain(preferX?: number, preferZ?: number) {
+		if (!this.human) return;
+		const px =
+			preferX ??
+			(this.car ? this.car.mesh.position.x + 3 : this.human.mesh.position.x);
+		const pz =
+			preferZ ??
+			(this.car ? this.car.mesh.position.z : this.human.mesh.position.z);
+		const spawn = findSafeTerrainSpawn(px, pz, 2.5);
+		this.human.body.setTranslation(
+			{
+				x: spawn.x,
+				y: spawn.y + HumanEntity.MESH_Y_OFFSET,
+				z: spawn.z,
+			},
+			true
+		);
+		this.human.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+		this.human.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+		this.human.mesh.position.copy(spawn);
+	}
+
+	private respawnLocal() {
+		if (!this.human || !this.humanInput) return;
+		this.respawnHumanOnTerrain();
+		this.human.playAnimation("idle");
+
+		this.localHp = PLAYER_MAX_HP;
+		this.localDead = false;
+		this.deathCause = null;
+		this.deathTimer = 0;
+		this.humanInput.isDead = false;
+		this.humanInput.isEnabled = this.activePlayer === "human";
+		this.healthHud?.setHp(this.localHp);
+		if (this.gunMesh) {
+			this.gunMesh.visible = this.humanInput.shouldShowGun();
+		}
+
+		if (this.socket && this.roomCode) {
+			const p = this.human.mesh.position;
+			this.socket.emit("player-respawned", {
+				roomCode: this.roomCode,
+				position: { x: p.x, y: p.y, z: p.z },
+				hp: PLAYER_MAX_HP,
+			});
+		}
+	}
+
 	private async createLobbyModels() {
 		// Add a light to the camera so the models are always visible in the lobby
 		const camLight = new THREE.PointLight(0xffffff, 1.5, 20);
@@ -2263,12 +3044,19 @@ export class FluffyGrass {
 					}
 				} else {
 					this.vehicleGrapple?.release();
-					if (!this.isBeingCarriedBy && this.sitState === "none") {
+					if (this.localDead) {
+						this.humanInput.forceCloseWeaponWheel();
+						this.humanInput.isEnabled = false;
+					} else if (!this.isBeingCarriedBy && this.sitState === "none") {
 						this.humanInput.isEnabled = true;
 						this.humanInput.update(dt, this.camera);
 					} else {
+						this.humanInput.forceCloseWeaponWheel();
 						this.humanInput.isEnabled = false;
 					}
+				}
+				if (this.localDead) {
+					this.updateLocalDeath(dt);
 				}
 			}
 
@@ -2350,86 +3138,10 @@ export class FluffyGrass {
 							if (bomb.flightTime > 0.2 && t.y <= ty + 0.8) {
 								bomb.isFlying = false;
 
-								// Trigger blast sound after 1 second
-								const blastPos = bomb.mesh.position.clone();
+								// Fuse delay after landing (same as before)
 								const blastId = bomb.id;
 								setTimeout(() => {
-									BombSound.playBlastSound(blastPos);
-									this.explosionSystem?.emit(blastPos);
-
-									// --- WATER SPLASH ---
-									if (this.pond) {
-										const distToPond = Math.hypot(blastPos.x - (-20), blastPos.z - 5);
-										const waterY = this.pond.mesh.position.y;
-										// If bomb is anywhere near or inside the pond (radius 15 to include shores)
-										if (distToPond < 15 && Math.abs(blastPos.y - waterY) < 4.0) {
-											this.pond.createRipple({
-												position: blastPos,
-												strength: 1.5, // Huge displacement
-												radius: 5.0    // Huge area
-											});
-										}
-									}
-
-									// --- KNOCKBACK PHYSICS ---
-									const blastRadius = 3.5; // Blast radius
-
-									// 1. Player Knockback
-									if (this.human && this.humanInput) {
-										const dist = this.human.mesh.position.distanceTo(blastPos);
-										if (dist < blastRadius) {
-											// Just trigger the animation sequence, do not apply physics knockback
-											this.humanInput.startRecoverySequence("explosion");
-										}
-									}
-
-									// 2. Car Knockback
-									if (this.car && this.car.body) {
-										// Car is large, check distance from center
-										const dist = this.car.mesh.position.distanceTo(blastPos);
-										// Give car slightly larger blast reception radius due to size
-										if (dist < blastRadius + 2.0) {
-											const dir = new THREE.Vector3().subVectors(this.car.mesh.position, blastPos);
-											dir.y = Math.max(0.5, dir.y + 1.0); // Cars should flip!
-											dir.normalize();
-											// Car is massive (e.g. 1500kg). It requires a massive impulse to move/flip.
-											const force = 25000 * (1 - dist / (blastRadius + 2.0));
-											this.car.body.applyImpulse(dir.multiplyScalar(force), true);
-										}
-									}
-
-									// 3. Other Bombs Knockback (Chain Reactions!)
-									for (const otherBomb of this.bombs) {
-										if (otherBomb.id !== blastId && otherBomb.body && otherBomb.mesh.parent === this.worldGroup) {
-											const dist = otherBomb.mesh.position.distanceTo(blastPos);
-											if (dist < blastRadius) {
-												const dir = new THREE.Vector3().subVectors(otherBomb.mesh.position, blastPos);
-												dir.y = Math.max(0.5, dir.y + 1.0);
-												dir.normalize();
-												const force = 150 * (1 - dist / blastRadius);
-												otherBomb.body.applyImpulse(dir.multiplyScalar(force), true);
-
-												// Start their timer too! Chain reactions!
-												otherBomb.isFlying = true;
-												otherBomb.flightTime = 0;
-											}
-										}
-									}
-									// -------------------------
-
-									// Reset bomb position after explosion
-									const b = this.bombs.find(x => x.id === blastId);
-									if (b && b.body) {
-										const newPos = new THREE.Vector3(
-											(Math.random() - 0.5) * 50,
-											0,
-											(Math.random() - 0.5) * 50
-										);
-										newPos.y = getWorldTerrainY(newPos.x, newPos.z) + 5.0;
-										b.body.setTranslation(newPos, true);
-										b.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
-										b.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
-									}
+									this.detonateBomb(blastId);
 								}, 1000);
 							} else {
 								this.smokeSystem?.emit(bomb.mesh.position);
@@ -2443,7 +3155,15 @@ export class FluffyGrass {
 				if (this.activePlayer === "car") {
 					updateChaseCamera(this.camera, this.car, this.chaseCameraInput, dt);
 				} else {
-					updateHumanCamera(this.camera, this.human, this.chaseCameraInput, dt);
+					const aimMode = Boolean(this.humanInput?.isAimingGun());
+					updateHumanCamera(
+						this.camera,
+						this.human,
+						this.chaseCameraInput,
+						dt,
+						{ aimMode }
+					);
+					this.syncGunToHand();
 				}
 			}
 
@@ -2508,7 +3228,7 @@ export class FluffyGrass {
 				}
 			}
 
-			// Leave the map → wait 2s → respawn
+			// Leave the map → wait 2s → respawn on terrain
 			if (playAllowed) {
 				// Car respawn
 				if (this.car && this.carController) {
@@ -2531,19 +3251,15 @@ export class FluffyGrass {
 					}
 				}
 
-				// Human respawn
-				if (this.human) {
+				// Human respawn (skip while dead — combat respawn handles that)
+				if (this.human && !this.localDead) {
 					const ht = this.human.body.translation();
-					const isOutside = ht.y < -120 || ht.y > 90;
+					const isOutside = isOutsideTerrain(ht.x, ht.y, ht.z);
 
 					if (isOutside) {
 						this.humanOutOfWorldTimer += dt;
 						if (this.humanOutOfWorldTimer >= 2) {
-							// Respawn human safely next to the car, or at center
-							const spawnPos = this.car ? this.car.mesh.position.clone() : new THREE.Vector3(0, 0, 0);
-							spawnPos.y += 3.0; // Drop from slightly above to avoid clipping
-							this.human.body.setTranslation(spawnPos, true);
-							this.human.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+							this.respawnHumanOnTerrain();
 							this.humanOutOfWorldTimer = 0;
 						}
 					} else {
@@ -2614,6 +3330,11 @@ export class FluffyGrass {
 					state.carQuaternion = { x: cq.x, y: cq.y, z: cq.z, w: cq.w };
 				}
 
+				state.hp = this.localHp;
+				state.dead = this.localDead;
+				state.aiming = Boolean(this.humanInput?.isAimingGun());
+				state.firing = Boolean(this.humanInput?.isFiringGun());
+
 				this.socket.emit("player-state", { roomCode: this.roomCode, state });
 			}
 		}
@@ -2673,6 +3394,18 @@ export class FluffyGrass {
 					rp.carBody.setNextKinematicTranslation({ x: 0, y: -100, z: 0 });
 				}
 			}
+		}
+
+		// Bullets after remotes so hit bones match the posed frame
+		if (this.bulletSystem && this.humanInput) {
+			const targets = this.humanInput.getPunchTargets?.() ?? [];
+			const bombTargets = this.bombs
+				.filter((b) => !this.detonatingBombIds.has(b.id))
+				.map((b) => {
+					b.mesh.getWorldPosition(this._bombWorldPos);
+					return { id: b.id, position: this._bombWorldPos.clone() };
+				});
+			this.bulletSystem.update(dt, targets, bombTargets);
 		}
 
 		this.volumetricFogPass?.render(
