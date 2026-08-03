@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import RAPIER from "@dimforge/rapier3d-compat";
 import type { DynamicRayCastVehicleController } from "@dimforge/rapier3d-compat";
 import { getWorldTerrainY } from "../../terrain/islandHeight";
@@ -21,10 +22,10 @@ export type CarEntity = {
 	grappleMountLocal: THREE.Vector3;
 	fpvInterior?: THREE.Group;
 	health: number;
-	maxHealth: number;
-	isDestroyed: boolean;
 	timeSinceDestroyed: number;
 	hasExploded: boolean;
+	leftExhaust: THREE.Object3D;
+	rightExhaust: THREE.Object3D;
 };
 
 export async function createCar(
@@ -52,6 +53,34 @@ export async function createCar(
 	const fpvInterior = createFpvInterior();
 	fpvInterior.visible = false;
 	layout.body.add(fpvInterior);
+
+	const leftExhaust = new THREE.Object3D();
+	leftExhaust.position.set(-0.6, -0.65, -2.15);
+	layout.body.add(leftExhaust);
+
+	const rightExhaust = new THREE.Object3D();
+	rightExhaust.position.set(0.6, -0.65, -2.15);
+	layout.body.add(rightExhaust);
+
+	const gltfLoader = new GLTFLoader(manager);
+	try {
+		const blasterGltf = await gltfLoader.loadAsync("/blaster.glb");
+		const blasterMesh = blasterGltf.scene;
+
+		const leftBlaster = blasterMesh.clone();
+		leftBlaster.position.set(-0.6, -0.65, -2.15);
+		leftBlaster.rotation.y = Math.PI; // point backwards
+		leftBlaster.scale.setScalar(0.4);
+		layout.body.add(leftBlaster);
+
+		const rightBlaster = blasterMesh.clone();
+		rightBlaster.position.set(0.6, -0.65, -2.15);
+		rightBlaster.rotation.y = Math.PI;
+		rightBlaster.scale.setScalar(0.4);
+		layout.body.add(rightBlaster);
+	} catch (e) {
+		console.error("Failed to load blaster.glb", e);
+	}
 
 	const spawnY = getWorldTerrainY(spawn.x, spawn.z) + spawn.clearance;
 
@@ -158,5 +187,7 @@ export async function createCar(
 		isDestroyed: false,
 		timeSinceDestroyed: 0,
 		hasExploded: false,
+		leftExhaust,
+		rightExhaust,
 	};
 }

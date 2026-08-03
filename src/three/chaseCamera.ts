@@ -4,6 +4,7 @@ import type { CarEntity } from "../entities/car/createCar";
 import { getCarGroundForward } from "../entities/car/cameraDrive";
 import type { ChaseCameraInput } from "./chaseCameraInput";
 import type { HumanEntity } from "../entities/human/HumanEntity";
+import { getWorldTerrainY } from "../terrain/islandHeight";
 
 const CAM_HEIGHT = 2.8;
 const CAM_LOOK_AHEAD = 5;
@@ -70,6 +71,9 @@ export function updateChaseCamera(
 		_carPos.y + lift + CAM_HEIGHT,
 		_carPos.z - Math.cos(camYaw) * horizDist
 	);
+
+	const terrainY = getWorldTerrainY(_targetCam.x, _targetCam.z);
+	_targetCam.y = Math.max(_targetCam.y, terrainY + 0.5);
 
 	const blend = 1 - Math.exp(-CAM_SMOOTH * dt);
 	camera.position.lerp(_targetCam, blend);
@@ -171,6 +175,9 @@ export function updateHumanCamera(
 		_humanPos.y + lift + CAM_HEIGHT - 1.0,
 		_humanPos.z - Math.cos(camYaw) * horizDist
 	);
+
+	const terrainY = getWorldTerrainY(_humanTargetCam.x, _humanTargetCam.z);
+	_humanTargetCam.y = Math.max(_humanTargetCam.y, terrainY + 0.5);
 
 	const blend = 1 - Math.exp(-CAM_SMOOTH * dt * 1.5);
 	camera.position.lerp(_humanTargetCam, blend);

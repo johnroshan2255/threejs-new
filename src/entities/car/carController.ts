@@ -1,11 +1,13 @@
 import type { DynamicRayCastVehicleController } from "@dimforge/rapier3d-compat";
 import type RAPIER from "@dimforge/rapier3d-compat";
+import * as THREE from "three";
 import { CAR_CONFIG } from "./carConfig";
 
 export type DriveInput = {
 	throttle: number;
 	steer: number;
 	braking: boolean;
+	nitro?: boolean;
 };
 
 export class CarController {
@@ -19,6 +21,7 @@ export class CarController {
 	private driftFactor = 0;
 	private drifting = false;
 	private smokeAccum = 0;
+	private nitroActive = false;
 
 	constructor(
 		private body: RAPIER.RigidBody,
@@ -83,6 +86,7 @@ export class CarController {
 	applyInput(dt: number, input: DriveInput) {
 		this.braking = input.braking;
 		this.steerInput = input.steer;
+		this.nitroActive = input.nitro ?? false;
 
 		const { drive, drift } = CAR_CONFIG;
 
@@ -146,6 +150,15 @@ export class CarController {
 
 		this.applyFrontBrakesOnly();
 		this.applyDriftYaw(dt);
+
+		if (this.nitroActive) {
+			const rot = this.body.rotation();
+			const q = new THREE.Quaternion(rot.x, rot.y, rot.z, rot.w);
+			const forward = new THREE.Vector3(0, 0, 1).applyQuaternion(q);
+			// Apply a strong forward impulse
+			const force = 1500 * dt; 
+			this.body.applyImpulse({ x: forward.x * force, y: forward.y * force, z: forward.z * force }, true);
+		}
 	}
 
 	private applyDriftGrip() {
@@ -207,11 +220,12 @@ export class CarController {
 	afterPhysics(dt: number) {
 		this.vehicle.updateVehicle(dt);
 		this.applyAntiRollStabilization();
-		if (this.drifting) {
-			this.clampSpeed(CAR_CONFIG.drift.maxDriftSpeed);
-		} else {
-			this.clampSpeed(CAR_CONFIG.drive.maxSpeed);
+		
+		let maxSpeed = this.drifting ? CAR_CONFIG.drift.maxDriftSpeed : CAR_CONFIG.drive.maxSpeed;
+		if (this.nitroActive) {
+			maxSpeed *= 2.5; // 150% speed boost limit during nitro
 		}
+		this.clampSpeed(maxSpeed);
 	}
 
 	private applyAntiRollStabilization() {

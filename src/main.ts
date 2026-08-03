@@ -97,8 +97,11 @@ import {
 import { setCharacterAlbedo } from "./entities/human/toonCharacter";
 import { SmokeTrailSystem } from "./environment/smokeTrail";
 import { ExplosionSystem } from "./environment/ExplosionSystem";
+import { NitroSystem } from "./environment/NitroSystem";
+import { createFireflies, type Fireflies } from "./environment/fireflies";
 import { BombSound } from "./audio/BombSound";
 import { HornSound } from "./audio/HornSound";
+import { NitroSound } from "./audio/NitroSound";
 import { ProceduralBridge } from "./environment/ProceduralBridge";
 import {
 	createMobileControls,
@@ -145,6 +148,7 @@ type RemotePlayer = {
 	benchSeat?: 0 | 1 | null;
 	hp?: number;
 	dead?: boolean;
+	nitro?: boolean;
 };
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:3000";
@@ -251,6 +255,8 @@ export class FluffyGrass {
 	private vehicleGrapple: VehicleGrapple | null = null;
 	private chaseCameraInput: ChaseCameraInput | null = null;
 	private engineSound: EngineSound | null = null;
+	private hornSound: HornSound | null = null;
+	private nitroSound: NitroSound | null = null;
 	private carOutOfWorldTimer = 0;
 	private humanOutOfWorldTimer = 0;
 
@@ -328,6 +334,7 @@ export class FluffyGrass {
 	private proceduralBridge: ProceduralBridge | null = null;
 	private smokeSystem: SmokeTrailSystem | null = null;
 	private explosionSystem: ExplosionSystem | null = null;
+	private nitroSystem: NitroSystem | null = null;
 	private mobileControls: MobileControls | null = null;
 	private orientationGate: OrientationGate | null = null;
 	private carHeadlights: CarHeadlights | null = null;
@@ -552,6 +559,9 @@ export class FluffyGrass {
 		this.explosionSystem = new ExplosionSystem();
 		this.scene.add(this.explosionSystem.mesh);
 
+		this.nitroSystem = new NitroSystem();
+		this.scene.add(this.nitroSystem.mesh);
+
 		this.bulletSystem = new BulletSystem();
 		this.scene.add(this.bulletSystem.group);
 		this.bulletSystem.getGroundY = (x, z) => getWorldTerrainY(x, z);
@@ -595,6 +605,9 @@ export class FluffyGrass {
 			const proceed = (_action: "play", user: AuthUser | null) => {
 				this.userData = user;
 				this.isGameActive = true;
+				this.engineSound = new EngineSound();
+				this.hornSound = new HornSound();
+				this.nitroSound = new NitroSound();
 				this.settings.show();
 				this.healthHud?.setVisible(true);
 				this.healthHud?.setHp(this.localHp);
@@ -1218,6 +1231,7 @@ export class FluffyGrass {
 
 			if (typeof state.hp === "number") rp.hp = state.hp;
 			if (typeof state.dead === "boolean") rp.dead = state.dead;
+			if (typeof state.nitro === "boolean") rp.nitro = state.nitro;
 
 			if (state.activeEntity === "human") {
 				rp.carGroup.visible = true; // Wait, actually should carGroup be true here? Yes, if they left it. But humanGroup should be true too!
@@ -1958,6 +1972,8 @@ export class FluffyGrass {
 		this.carHeadlights.setIntensity(0);
 
 		this.engineSound = new EngineSound();
+		this.hornSound = new HornSound();
+		this.nitroSound = new NitroSound();
 
 		this.carController = new CarController(
 			car.body,
@@ -3410,6 +3426,18 @@ export class FluffyGrass {
 				}
 			}
 
+			if (this.carInput?.isNitroActive() && this.nitroSystem && this.car) {
+				const _smokePos = new THREE.Vector3();
+				const forward = new THREE.Vector3(0, 0, 1).applyQuaternion(this.car.mesh.quaternion);
+				this.car.leftExhaust.getWorldPosition(_smokePos);
+				this.nitroSystem.emit(_smokePos, forward);
+				this.car.rightExhaust.getWorldPosition(_smokePos);
+				this.nitroSystem.emit(_smokePos, forward);
+				if (this.nitroSound && !this.nitroSound.isPlaying) this.nitroSound.play();
+			} else {
+				if (this.nitroSound && this.nitroSound.isPlaying) this.nitroSound.stop();
+			}
+
 			if (this.engineSound && this.carController) {
 				if (this.activePlayer === "car") {
 					const speed = this.carController.getSpeed();
@@ -3594,6 +3622,7 @@ export class FluffyGrass {
 			this.smokeSystem.update(dt);
 		}
 		this.explosionSystem?.update(dt);
+		this.nitroSystem?.update(dt);
 
 		// Multiplayer Synchronization Loop
 		if (this.socket && this.socket.connected && this.roomCode && this.isGameActive) {
@@ -3609,6 +3638,7 @@ export class FluffyGrass {
 						this.sitState === "sitting" || this.sitState === "entering"
 							? this.sitSeatIndex
 							: null,
+					nitro: this.carInput?.isNitroActive() ?? false,
 				};
 
 				if (this.human) {
@@ -3684,6 +3714,13 @@ export class FluffyGrass {
 				if (rp.carBody) {
 					rp.carBody.setNextKinematicTranslation(rp.carGroup.position);
 					rp.carBody.setNextKinematicRotation(rp.carGroup.quaternion);
+				}
+				if (rp.nitro && this.nitroSystem) {
+					const forward = new THREE.Vector3(0, 0, 1).applyQuaternion(rp.carGroup.quaternion);
+					const lx = new THREE.Vector3(-0.4, 0.2, -1.8).applyMatrix4(rp.carGroup.matrixWorld);
+					const rx = new THREE.Vector3(0.4, 0.2, -1.8).applyMatrix4(rp.carGroup.matrixWorld);
+					this.nitroSystem.emit(lx, forward);
+					this.nitroSystem.emit(rx, forward);
 				}
 			} else {
 				if (rp.carBody) {
