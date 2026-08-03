@@ -47,7 +47,9 @@ export const REFERENCE_WATER_LOOK = {
 	speed: 0.85 as const,
 	clarity: 0.9 as const,
 	shoreSoftness: 0.75 as const,
-	shoreFoam: 0.5 as const,
+	// 0.5 blended the rim half way to near-white, which reads as a bright ring
+	// rather than surf. Kept subtle so it brightens the shore without owning it.
+	shoreFoam: 0.18 as const,
 	brightness: 1.15 as const,
 };
 

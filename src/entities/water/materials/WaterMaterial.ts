@@ -72,6 +72,7 @@ export class WaterMaterial {
     this.uniforms.set('uDistortionScale', 0.045);
     this.uniforms.set('uTextureMatrix', new Matrix4());
     this.uniforms.set('uSunDirection', new Vector3(0.3, 1.0, 0.2).normalize());
+    this.uniforms.set('uLightColor', new Color(1, 1, 1));
     this.uniforms.set('uTexelSize', new Vector2(1 / this.simResolution, 1 / this.simResolution));
 
     // Waves per pond, derived from world size: a 20 m pond keeps the tuned 2.5
@@ -210,6 +211,17 @@ export class WaterMaterial {
     const next = current ?? new Vector3();
     next.set(dir.x, dir.y, dir.z).normalize();
     this.uniforms.set('uSunDirection', next);
+  }
+
+  /**
+   * Scene light energy driving specular + foam brightness. Without this they
+   * are constants, which blows out to a white disc once night gets dark.
+   */
+  setLightColor(color: Color): void {
+    const current = this.uniforms.get<Color>('uLightColor');
+    const next = current ?? new Color();
+    next.copy(color);
+    this.uniforms.set('uLightColor', next);
   }
 
   setUniform<T>(name: string, value: T): void {

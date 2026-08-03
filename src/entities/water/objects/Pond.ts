@@ -1,4 +1,4 @@
-import { Mesh, PlaneGeometry, Float32BufferAttribute, type BufferGeometry, type Texture, Vector3 } from 'three';
+import { Mesh, PlaneGeometry, Float32BufferAttribute, type BufferGeometry, type Color, type Texture, Vector3 } from 'three';
 import { DEFAULT_WATER_OPTIONS } from '../core/Constants';
 import { WaterMaterial } from '../materials/WaterMaterial';
 import { WaterRenderer } from '../rendering/WaterRenderer';
@@ -170,6 +170,11 @@ export class Pond {
   /** Sun direction for specular highlights. */
   setSunDirection(dir: Vector3 | { x: number; y: number; z: number }): void {
     this.material.setSunDirection(dir);
+  }
+
+  /** Scene light energy scaling specular + foam (see WaterMaterial). */
+  setLightColor(color: Color): void {
+    this.material.setLightColor(color);
   }
 
   /**

@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import type { GraphicsQuality } from "../ui/GameSettings";
 import type { WorldDefinition } from "../worlds/worldTypes";
+import { BloomChain } from "./BloomChain";
 
 export type VolumetricFogFrameParams = {
 	fogColor: THREE.Color;
@@ -14,6 +15,23 @@ export type VolumetricFogFrameParams = {
 	sunColor: THREE.Color;
 	sunIntensity: number;
 	time: number;
+};
+
+/** Stylised grade applied in the composite, interpolated by the day/night table. */
+export type CompositeGradeParams = {
+	exposure: number;
+	/** Radiance below this passes through untouched; above it rolls off to 1. */
+	shoulder: number;
+	contrast: number;
+	saturation: number;
+	shadowTint: THREE.Color;
+	highlightTint: THREE.Color;
+	/** Hue of the additive lift on darks. */
+	liftColor: THREE.Color;
+	/** Amount of additive lift. 0 for daylight, small positive at night. */
+	lift: number;
+	bloomStrength: number;
+	bloomThreshold: number;
 };
 
 /** Player-centered fog ring inner radius (meters). */
@@ -69,10 +87,22 @@ export function fogDensityScaleForHour(hour: number): number {
 }
 
 /**
- * Screen-space height + radial fog.
- * Uses a plain ShaderMaterial (no chunk includes / no Raw GLSL3) for max compatibility.
+ * The scene's single composite pass.
+ *
+ * Owns the whole back end of the frame: the scene is rendered into a linear
+ * HDR target, bloom is built from it, and one fullscreen blit applies fog
+ * in-scattering, bloom, the tone curve, the stylised grade and the sRGB encode.
+ *
+ * Tone mapping lives *here*, not in the materials — `renderer.toneMapping` must
+ * stay `NoToneMapping` so values above 1.0 reach the bloom threshold instead of
+ * being flattened per-material. Doing all of it in the blit we were already
+ * drawing for fog means bloom and grading cost no extra fullscreen resolve.
+ *
+ * `enabled` gates only the fog raymarch; the composite itself always runs, so
+ * the grade stays consistent on Low quality and in edit/map mode.
  */
 export class VolumetricFogPass {
+	/** Fog raymarch on/off. The composite runs regardless. */
 	enabled = false;
 
 	private depthTexture: THREE.DepthTexture;
@@ -86,6 +116,12 @@ export class VolumetricFogPass {
 	private readonly _sunDir = new THREE.Vector3(0.4, 0.8, 0.2);
 	private steps = 24;
 
+	private readonly bloom = new BloomChain();
+	bloomEnabled = true;
+	private bloomThreshold = 0.75;
+	/** Grade-authored strength, kept separate so a null bloom can't clobber it. */
+	private bloomStrength = 0.4;
+
 	constructor() {
 		this.depthTexture = new THREE.DepthTexture(1, 1);
 		this.depthTexture.format = THREE.DepthFormat;
@@ -96,7 +132,8 @@ export class VolumetricFogPass {
 			depthBuffer: true,
 			stencilBuffer: false,
 			format: THREE.RGBAFormat,
-			type: THREE.UnsignedByteType,
+			// HDR: bloom needs values above 1.0 to exist at all.
+			type: THREE.HalfFloatType,
 			minFilter: THREE.LinearFilter,
 			magFilter: THREE.LinearFilter,
 		});
@@ -105,6 +142,7 @@ export class VolumetricFogPass {
 			uniforms: {
 				tDiffuse: { value: null as THREE.Texture | null },
 				tDepth: { value: null as THREE.Texture | null },
+				tBloom: { value: null as THREE.Texture | null },
 				uInverseProjection: { value: this._invProjection },
 				uInverseView: { value: this._invView },
 				uCameraPosition: { value: new THREE.Vector3() },
@@ -121,6 +159,33 @@ export class VolumetricFogPass {
 				uSteps: { value: 24 },
 				uTime: { value: 0 },
 				uMaxDistance: { value: 500 },
+				uFogEnabled: { value: 0 },
+
+				// Grade
+				uBloomStrength: { value: 0.4 },
+				uExposure: { value: 1.0 },
+				uShoulder: { value: 4.0 },
+				uContrast: { value: 1.1 },
+				uSaturation: { value: 1.25 },
+				uShadowTint: { value: new THREE.Color(1, 1, 1) },
+				uHighlightTint: { value: new THREE.Color(1, 1, 1) },
+				/**
+				 * How far toward the split-tone the image is pushed. Needed because
+				 * luminance-normalising a *saturated* tint yields a huge multiplier
+				 * (a saturated blue has very low luma, so normalising it gives ~3x
+				 * blue). Authored tints must stay pale AND be blended in at partial
+				 * strength, or darks — most of the frame — go monochrome blue.
+				 */
+				uSplitToneStrength: { value: 0.6 },
+				/**
+				 * Additive cool wash on darks. Multiplicative tinting cannot make a
+				 * surface read blue if its albedo has no blue in it — grass at night
+				 * stays green no matter how hard the shadow tint pushes. A lift adds
+				 * light instead of scaling it, which is what gives night its cast.
+				 */
+				uLiftColor: { value: new THREE.Color(0x2f4f96) },
+				uLift: { value: 0.0 },
+				uVignette: { value: 0.16 },
 			},
 			vertexShader: /* glsl */ `
 				varying vec2 vUv;
@@ -135,6 +200,7 @@ export class VolumetricFogPass {
 
 				uniform sampler2D tDiffuse;
 				uniform sampler2D tDepth;
+				uniform sampler2D tBloom;
 				uniform mat4 uInverseProjection;
 				uniform mat4 uInverseView;
 				uniform vec3 uCameraPosition;
@@ -151,8 +217,23 @@ export class VolumetricFogPass {
 				uniform int uSteps;
 				uniform float uTime;
 				uniform float uMaxDistance;
+				uniform int uFogEnabled;
+
+				uniform float uBloomStrength;
+				uniform float uExposure;
+				uniform float uShoulder;
+				uniform float uContrast;
+				uniform float uSaturation;
+				uniform vec3 uShadowTint;
+				uniform vec3 uHighlightTint;
+				uniform float uSplitToneStrength;
+				uniform vec3 uLiftColor;
+				uniform float uLift;
+				uniform float uVignette;
 
 				varying vec2 vUv;
+
+				const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
 
 				vec3 worldFromDepth(vec2 uv, float depth) {
 					vec4 ndc = vec4(uv * 2.0 - 1.0, depth * 2.0 - 1.0, 1.0);
@@ -194,23 +275,48 @@ export class VolumetricFogPass {
 					);
 				}
 
-				void main() {
-					vec4 sceneSample = texture2D(tDiffuse, vUv);
-					float depth = texture2D(tDepth, vUv).r;
+				/**
+				 * Linear up to uShoulder, then a soft asymptote to 1.0.
+				 *
+				 * Neither ACES nor Reinhard is right for this look. Both are
+				 * photographic: they compress the *midtones*, mapping a fully-lit
+				 * surface (radiance 1.0) to ~0.5 — mid grey. That is precisely what
+				 * reads as "moody" and "no brightness", and no amount of saturation
+				 * afterwards recovers it. Here midtones pass through untouched and
+				 * only genuine highlights roll off, so lit surfaces stay lit.
+				 */
+				vec3 toneMap(vec3 c, float shoulder) {
+					c = max(c, vec3(0.0));
+					float k = clamp(shoulder, 0.05, 0.95);
+					float range = 1.0 - k;
+					vec3 lo = min(c, vec3(k));
+					vec3 hi = max(c - k, vec3(0.0));
+					return lo + range * (hi / (hi + range));
+				}
 
-					vec3 rayOrigin = uCameraPosition;
-					vec3 worldPos = worldFromDepth(vUv, clamp(depth, 0.0, 0.999999));
-					vec3 toPoint = worldPos - rayOrigin;
-					float geoDist = length(toPoint);
-					float dist = min(max(geoDist, 1.0), uMaxDistance);
-					vec3 rayDir = toPoint / max(geoDist, 1e-4);
+				/**
+				 * Contrast pivoted on linear mid-grey (0.18), applied in HDR before
+				 * the curve. Pivoting on 0.5 — as if this were display-referred —
+				 * darkens everything below 0.5, which is nearly the whole frame, and
+				 * drives a dark night scene negative.
+				 */
+				vec3 applyContrast(vec3 c, float amount) {
+					const float PIVOT = 0.18;
+					return max((c - PIVOT) * amount + PIVOT, vec3(0.0));
+				}
 
+				/** Hue-only tint: normalised so split-toning never shifts exposure. */
+				vec3 normTint(vec3 t) {
+					return t / max(dot(t, LUMA), 1e-4);
+				}
+
+				vec3 raymarchFog(vec3 rayOrigin, vec3 rayDir, float dist, out float transmittance) {
 					int steps = uSteps;
 					if (steps < 4) steps = 4;
 					if (steps > 48) steps = 48;
 					float stepSize = dist / float(steps);
 
-					float transmittance = 1.0;
+					transmittance = 1.0;
 					vec3 inScattered = vec3(0.0);
 					vec3 sunDir = normalize(uSunDirection);
 
@@ -243,7 +349,63 @@ export class VolumetricFogPass {
 						if (transmittance < 0.015) break;
 					}
 
-					vec3 color = sceneSample.rgb * transmittance + inScattered;
+					return inScattered;
+				}
+
+				void main() {
+					vec4 sceneSample = texture2D(tDiffuse, vUv);
+					vec3 color = sceneSample.rgb;
+
+					if (uFogEnabled == 1) {
+						float depth = texture2D(tDepth, vUv).r;
+						vec3 rayOrigin = uCameraPosition;
+						vec3 worldPos = worldFromDepth(vUv, clamp(depth, 0.0, 0.999999));
+						vec3 toPoint = worldPos - rayOrigin;
+						float geoDist = length(toPoint);
+						float dist = min(max(geoDist, 1.0), uMaxDistance);
+						vec3 rayDir = toPoint / max(geoDist, 1e-4);
+
+						float transmittance = 1.0;
+						vec3 inScattered = raymarchFog(rayOrigin, rayDir, dist, transmittance);
+						color = color * transmittance + inScattered;
+					}
+
+					// --- Bloom, added while still HDR so it can actually blow out ---
+					color += texture2D(tBloom, vUv).rgb * uBloomStrength;
+
+					// --- Exposure and contrast, both in HDR before the curve ---
+					color = applyContrast(color * uExposure, uContrast);
+
+					// --- Tone curve ---
+					color = toneMap(color, uShoulder);
+
+					// --- Split-tone: cool darks, warm brights. The complementary
+					// split is what reads as "vivid" rather than merely bright. ---
+					float luma = dot(color, LUMA);
+					vec3 tint = mix(
+						normTint(uShadowTint),
+						normTint(uHighlightTint),
+						smoothstep(0.0, 1.0, luma)
+					);
+					color *= mix(vec3(1.0), tint, uSplitToneStrength);
+
+					// --- Additive lift on darks (night cast) ---
+					// Normalised by max channel, not luma, so uLift alone controls
+					// magnitude regardless of how saturated the lift colour is.
+					vec3 liftHue = uLiftColor /
+						max(max(uLiftColor.r, max(uLiftColor.g, uLiftColor.b)), 1e-4);
+					color += liftHue * uLift * (1.0 - smoothstep(0.0, 0.55, luma));
+
+					// --- Saturation ---
+					float luma2 = dot(max(color, vec3(0.0)), LUMA);
+					color = mix(vec3(luma2), color, uSaturation);
+
+					// Subtle vignette to pull the eye centre-frame.
+					vec2 vd = vUv - 0.5;
+					float vig = 1.0 - uVignette * dot(vd, vd) * 2.0;
+					color *= vig;
+
+					color = clamp(color, 0.0, 1.0);
 					gl_FragColor = vec4(linearTosRGB(color), 1.0);
 				}
 			`,
@@ -260,12 +422,15 @@ export class VolumetricFogPass {
 	setQuality(quality: GraphicsQuality) {
 		this.steps = quality === "High" ? 24 : quality === "Medium" ? 12 : 8;
 		this.material.uniforms.uSteps.value = this.steps;
+		// Fewer, wider mips on lower tiers — the glow stays broad, taps drop.
+		this.bloom.setLevels(quality === "High" ? 5 : quality === "Medium" ? 4 : 3);
 	}
 
 	setSize(width: number, height: number) {
 		const w = Math.max(1, Math.floor(width));
 		const h = Math.max(1, Math.floor(height));
 		this.sceneRT.setSize(w, h);
+		this.bloom.setSize(w, h);
 	}
 
 	setParams(p: VolumetricFogFrameParams) {
@@ -283,20 +448,43 @@ export class VolumetricFogPass {
 		u.uTime.value = p.time;
 	}
 
+	setGrade(g: CompositeGradeParams) {
+		const u = this.material.uniforms;
+		u.uExposure.value = g.exposure;
+		u.uShoulder.value = g.shoulder;
+		u.uContrast.value = g.contrast;
+		u.uSaturation.value = g.saturation;
+		u.uShadowTint.value.copy(g.shadowTint);
+		u.uHighlightTint.value.copy(g.highlightTint);
+		u.uLiftColor.value.copy(g.liftColor);
+		u.uLift.value = g.lift;
+		this.bloomStrength = g.bloomStrength;
+		this.bloomThreshold = g.bloomThreshold;
+	}
+
+	/** Vignette strength (0 disables). */
+	setVignette(amount: number) {
+		this.material.uniforms.uVignette.value = Math.max(0, amount);
+	}
+
+	/** 0 = no split-tone (neutral), 1 = full authored tint. */
+	setSplitTone(strength: number) {
+		this.material.uniforms.uSplitToneStrength.value = THREE.MathUtils.clamp(
+			strength,
+			0,
+			1
+		);
+	}
+
 	render(
 		renderer: THREE.WebGLRenderer,
 		scene: THREE.Scene,
 		camera: THREE.Camera
 	) {
-		if (!this.enabled) {
-			renderer.setRenderTarget(null);
-			renderer.render(scene, camera);
-			return;
-		}
-
 		const u = this.material.uniforms;
 		u.tDiffuse.value = this.sceneRT.texture;
 		u.tDepth.value = this.depthTexture;
+		u.uFogEnabled.value = this.enabled ? 1 : 0;
 
 		camera.updateMatrixWorld(true);
 		this._invProjection.copy(camera.projectionMatrix).invert();
@@ -307,12 +495,18 @@ export class VolumetricFogPass {
 		const prevAutoClear = renderer.autoClear;
 		const prevOutputColorSpace = renderer.outputColorSpace;
 
-		// Tone-mapped scene into RT without canvas sRGB encode (we encode in the blit).
+		// Scene into the HDR target with no encode — the blit tone maps and encodes.
 		renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
 		renderer.setRenderTarget(this.sceneRT);
 		renderer.autoClear = true;
 		renderer.clear();
 		renderer.render(scene, camera);
+
+		const bloomTex = this.bloomEnabled
+			? this.bloom.render(renderer, this.sceneRT.texture, this.bloomThreshold)
+			: null;
+		u.tBloom.value = bloomTex;
+		u.uBloomStrength.value = bloomTex ? this.bloomStrength : 0;
 
 		renderer.setRenderTarget(null);
 		renderer.autoClear = true;
@@ -327,6 +521,7 @@ export class VolumetricFogPass {
 		this.sceneRT.dispose();
 		this.depthTexture.dispose();
 		this.material.dispose();
+		this.bloom.dispose();
 		(this.fsMesh.geometry as THREE.BufferGeometry).dispose();
 	}
 }

@@ -29,103 +29,255 @@ type PeriodKey = {
 	moonIntensity: number;
 	fireflies: number;
 	grassLight: number;
+
+	// --- Stylised grade (consumed by the composite pass) ---
+	/** Pre-tonemap multiplier. */
+	exposure: number;
+	/** Radiance below this passes through untouched; above it rolls off to 1. */
+	shoulder: number;
+	/** S-curve amount around 0.5. */
+	contrast: number;
+	/** >1 pushes toward the vivid anime look; <1 for night, which reads as dark
+	 *  and desaturated rather than blue-tinted. */
+	saturation: number;
+	/** Split-tone colour applied to darks (luminance-normalised). */
+	shadowTint: string;
+	/** Split-tone colour applied to brights (luminance-normalised). */
+	highlightTint: string;
+	bloomStrength: number;
+	bloomThreshold: number;
+	/** Hue of the additive lift applied to darks. */
+	liftColor: string;
+	/** Additive lift on darks. Kept small — just enough to stop black crush.
+	 *  Pushing it high is what turns a night into a blue wash. */
+	lift: number;
+
+	// --- Character NPR ---
+	/** Silhouette rim light colour. */
+	rimColor: string;
+	rimStrength: number;
+	/** Hue pushed into the unlit side of characters. */
+	charShadowTint: string;
+
+	// --- Clouds (drawn in the sky dome shader) ---
+	/** 0 = clear sky, 1 = overcast. */
+	cloudCoverage: number;
+	cloudOpacity: number;
+	/** Lit tops. */
+	cloudLight: string;
+	/** Shadowed undersides / thin edges. */
+	cloudDark: string;
+
+	// --- Grass (its shader is decoupled from the light rig) ---
+	/** Cool fill the grass gets regardless of sun direction. */
+	grassAmbient: string;
+	/** Multiplier tinting grass inside cast shadows. */
+	grassShadowTint: string;
 };
 
+/**
+ * Stylised (Genshin-leaning) rig. Two rules drive every value here:
+ *
+ *  1. Strong key, weak fill. Ambient + hemisphere stay well under the sun so
+ *     surfaces keep a clear lit/unlit side. Raising fill to fix "too dark" is
+ *     what flattens the image — brighten via exposure in the grade instead.
+ *  2. Never grey by day. Light is warm, shadow/fill is cool. Two hues in every
+ *     frame is what separates "vivid" from "dull"; a neutral rig cannot look
+ *     vivid no matter how it is graded.
+ *  3. Night is the exception: dark and *desaturated*, lit by near-neutral silver
+ *     moonlight, keeping surface hues readable. The blue belongs in the sky, not
+ *     painted over the ground.
+ */
 export const DAY_PERIODS: Record<DayPeriod, PeriodKey> = {
 	morning: {
 		hour: 7,
-		zenith: "#7eb0d8",
-		horizon: "#e8d4b8",
-		fog: "#d0dde8",
+		zenith: "#5f9fd8",
+		horizon: "#f2d5ab",
+		fog: "#bcd2ea",
 		fogDensity: 0.009,
-		ambientColor: "#e0e0e0",
-		ambientIntensity: 0.6, // boosted
-		hemiSky: "#ffffff",
-		hemiGround: "#888888",
-		hemiIntensity: 0.6, // boosted
-		sunColor: "#ffffff",
-		sunIntensity: 1.0, // lowered
+		ambientColor: "#8194b8",
+		ambientIntensity: 0.18,
+		hemiSky: "#b2c8ea",
+		hemiGround: "#4a5230",
+		hemiIntensity: 0.28,
+		sunColor: "#ffd2a1",
+		sunIntensity: 3.0,
 		sunGlow: 1.1,
-		moonColor: "#ffffff",
+		moonColor: "#9fc0ff",
 		moonIntensity: 0,
 		fireflies: 0,
-		grassLight: 1.0,
+		grassLight: 0.78,
+		exposure: 1.05,
+		shoulder: 0.7,
+		contrast: 1.1,
+		saturation: 1.14,
+		shadowTint: "#a8b8d8",
+		highlightTint: "#ffeccd",
+		bloomStrength: 0.42,
+		bloomThreshold: 0.72,
+		liftColor: "#3a5a9c",
+		lift: 0.0,
+		rimColor: "#ffe6c0",
+		rimStrength: 0.7,
+		charShadowTint: "#aabcdf",
+		grassAmbient: "#40608f",
+		grassShadowTint: "#b2c2de",
+		cloudCoverage: 0.52,
+		cloudOpacity: 0.9,
+		cloudLight: "#fff4e4",
+		cloudDark: "#b9c6dd",
 	},
 	noon: {
 		hour: 12.5,
-		zenith: "#4aa0e0",
-		horizon: "#c8e4f5",
-		fog: "#d8eef5",
+		zenith: "#3f92dc",
+		horizon: "#bfe0f7",
+		fog: "#c4e0f2",
 		fogDensity: 0.007,
-		ambientColor: "#ffffff",
-		ambientIntensity: 0.7, // boosted
-		hemiSky: "#ffffff",
-		hemiGround: "#aaaaaa",
-		hemiIntensity: 0.7, // boosted
-		sunColor: "#ffffff",
-		sunIntensity: 1.5, // lowered
+		ambientColor: "#8b9dc0",
+		ambientIntensity: 0.2,
+		hemiSky: "#bcd4f0",
+		hemiGround: "#5a6438",
+		hemiIntensity: 0.32,
+		sunColor: "#fff2d8",
+		sunIntensity: 3.6,
 		sunGlow: 0.55,
-		moonColor: "#ffffff",
+		moonColor: "#9fc0ff",
 		moonIntensity: 0,
 		fireflies: 0,
-		grassLight: 1.15,
+		grassLight: 0.9,
+		exposure: 1.0,
+		shoulder: 0.72,
+		contrast: 1.08,
+		saturation: 1.16,
+		shadowTint: "#b0c0dc",
+		highlightTint: "#fff2dd",
+		bloomStrength: 0.34,
+		bloomThreshold: 0.78,
+		liftColor: "#3a5a9c",
+		lift: 0.0,
+		rimColor: "#fff4dc",
+		rimStrength: 0.55,
+		charShadowTint: "#b0c4e4",
+		grassAmbient: "#476b9c",
+		grassShadowTint: "#b8c6e0",
+		cloudCoverage: 0.46,
+		cloudOpacity: 0.85,
+		cloudLight: "#ffffff",
+		cloudDark: "#c6d6ea",
 	},
 	evening: {
 		hour: 16.2,
-		zenith: "#a8d0ea",
-		horizon: "#e8f2f6",
-		fog: "#e0eaf0",
+		zenith: "#79b4e4",
+		horizon: "#e4eef7",
+		fog: "#cfe0ee",
 		fogDensity: 0.007,
-		ambientColor: "#e0e0e0",
-		ambientIntensity: 0.65, // boosted
-		hemiSky: "#ffffff",
-		hemiGround: "#888888",
-		hemiIntensity: 0.65, // boosted
-		sunColor: "#ffffff",
-		sunIntensity: 1.2, // lowered
+		ambientColor: "#8898bc",
+		ambientIntensity: 0.18,
+		hemiSky: "#b6cbec",
+		hemiGround: "#55572f",
+		hemiIntensity: 0.3,
+		sunColor: "#ffcf9a",
+		sunIntensity: 3.1,
 		sunGlow: 0.25,
-		moonColor: "#ffffff",
+		moonColor: "#9fc0ff",
 		moonIntensity: 0,
 		fireflies: 0,
-		grassLight: 1.12,
+		grassLight: 0.86,
+		exposure: 1.04,
+		shoulder: 0.7,
+		contrast: 1.1,
+		saturation: 1.18,
+		shadowTint: "#a8b8d8",
+		highlightTint: "#ffe8c4",
+		bloomStrength: 0.44,
+		bloomThreshold: 0.7,
+		liftColor: "#3a5a9c",
+		lift: 0.0,
+		rimColor: "#ffe2b4",
+		rimStrength: 0.72,
+		charShadowTint: "#a8bade",
+		grassAmbient: "#446590",
+		grassShadowTint: "#b2c2de",
+		cloudCoverage: 0.5,
+		cloudOpacity: 0.88,
+		cloudLight: "#fff4e4",
+		cloudDark: "#bfcde2",
 	},
 	sunset: {
 		hour: 17.85,
-		zenith: "#7aa8c8",
-		horizon: "#e8dcc8",
-		fog: "#d8d0c0",
+		zenith: "#3f5fa4",
+		horizon: "#ffb078",
+		fog: "#e0a887",
 		fogDensity: 0.008,
-		ambientColor: "#cccccc",
-		ambientIntensity: 0.55, // boosted
-		hemiSky: "#dddddd",
-		hemiGround: "#666666",
-		hemiIntensity: 0.55, // boosted
-		sunColor: "#ffffff",
-		sunIntensity: 0.8, // lowered
+		ambientColor: "#8083b4",
+		ambientIntensity: 0.2,
+		hemiSky: "#bda6d0",
+		hemiGround: "#4a3a34",
+		hemiIntensity: 0.3,
+		sunColor: "#ff9d5c",
+		sunIntensity: 2.6,
 		sunGlow: 0.85,
-		moonColor: "#ffffff",
+		moonColor: "#9fc0ff",
 		moonIntensity: 0,
 		fireflies: 0.12,
-		grassLight: 0.98,
+		grassLight: 0.72,
+		exposure: 1.08,
+		shoulder: 0.66,
+		contrast: 1.12,
+		saturation: 1.2,
+		shadowTint: "#a8a8d6",
+		highlightTint: "#ffdcb0",
+		bloomStrength: 0.62,
+		bloomThreshold: 0.6,
+		liftColor: "#6a6490",
+		lift: 0.014,
+		rimColor: "#ffb884",
+		rimStrength: 0.95,
+		charShadowTint: "#a8a8dc",
+		grassAmbient: "#4a4a86",
+		grassShadowTint: "#b0acd8",
+		cloudCoverage: 0.58,
+		cloudOpacity: 0.95,
+		cloudLight: "#ffd0a4",
+		cloudDark: "#8f7ba8",
 	},
 	night: {
 		hour: 22.5,
-		zenith: "#050814",
-		horizon: "#0a1020",
-		fog: "#070b16",
+		zenith: "#0a1330",
+		horizon: "#17284e",
+		fog: "#1a2230",
 		fogDensity: 0.015,
-		ambientColor: "#444444",
-		ambientIntensity: 0.45, // boosted
-		hemiSky: "#555555",
-		hemiGround: "#222222",
-		hemiIntensity: 0.45, // boosted
-		sunColor: "#ffffff",
+		ambientColor: "#525c6e",
+		ambientIntensity: 0.3,
+		hemiSky: "#5b6678",
+		hemiGround: "#161a1e",
+		hemiIntensity: 0.4,
+		sunColor: "#ffd2a1",
 		sunIntensity: 0,
 		sunGlow: 0,
-		moonColor: "#ffffff",
-		moonIntensity: 1.2, // adjusted
+		moonColor: "#cdd8ea",
+		moonIntensity: 1.7,
 		fireflies: 1,
-		grassLight: 0.7,
+		grassLight: 0.42,
+		exposure: 1.1,
+		shoulder: 0.85,
+		contrast: 1.05,
+		saturation: 0.88,
+		shadowTint: "#aeb6c6",
+		highlightTint: "#e2e8f2",
+		bloomStrength: 0.6,
+		bloomThreshold: 0.62,
+		liftColor: "#5a6478",
+		lift: 0.022,
+		rimColor: "#d2dced",
+		rimStrength: 1.15,
+		charShadowTint: "#a4acbc",
+		grassAmbient: "#3a4658",
+		grassShadowTint: "#aab2c2",
+		cloudCoverage: 0.42,
+		cloudOpacity: 0.7,
+		cloudLight: "#9aa4b8",
+		cloudDark: "#1a1f2c",
 	},
 };
 
@@ -186,6 +338,55 @@ type Sampled = {
 	moonIntensity: number;
 	fireflies: number;
 	grassLight: number;
+	exposure: number;
+	shoulder: number;
+	contrast: number;
+	saturation: number;
+	shadowTint: THREE.Color;
+	highlightTint: THREE.Color;
+	bloomStrength: number;
+	bloomThreshold: number;
+	liftColor: THREE.Color;
+	lift: number;
+	rimColor: THREE.Color;
+	rimStrength: number;
+	charShadowTint: THREE.Color;
+	cloudCoverage: number;
+	cloudOpacity: number;
+	cloudLight: THREE.Color;
+	cloudDark: THREE.Color;
+	grassAmbient: THREE.Color;
+	grassShadowTint: THREE.Color;
+};
+
+/** Interpolated grade for the composite pass. */
+export type GradeParams = {
+	exposure: number;
+	shoulder: number;
+	contrast: number;
+	saturation: number;
+	shadowTint: THREE.Color;
+	highlightTint: THREE.Color;
+	liftColor: THREE.Color;
+	lift: number;
+	bloomStrength: number;
+	bloomThreshold: number;
+};
+
+/** Interpolated NPR params for character materials. */
+export type CharacterLightParams = {
+	rimColor: THREE.Color;
+	rimStrength: number;
+	shadowTint: THREE.Color;
+};
+
+/** Interpolated tints for the (light-rig-decoupled) grass shader. */
+export type GrassLightParams = {
+	/** Key light colour — grass multiplies this by its own light intensity. */
+	keyColor: THREE.Color;
+	intensity: number;
+	ambient: THREE.Color;
+	shadowTint: THREE.Color;
 };
 
 function hourToSunDirection(hour: number, out: THREE.Vector3): THREE.Vector3 {
@@ -248,6 +449,52 @@ function sampleAtHour(hour: number, out: Sampled): Sampled {
 	out.moonIntensity = THREE.MathUtils.lerp(from.moonIntensity, to.moonIntensity, t);
 	out.fireflies = THREE.MathUtils.lerp(from.fireflies, to.fireflies, t);
 	out.grassLight = THREE.MathUtils.lerp(from.grassLight, to.grassLight, t);
+
+	out.exposure = THREE.MathUtils.lerp(from.exposure, to.exposure, t);
+	out.shoulder = THREE.MathUtils.lerp(from.shoulder, to.shoulder, t);
+	out.contrast = THREE.MathUtils.lerp(from.contrast, to.contrast, t);
+	out.saturation = THREE.MathUtils.lerp(from.saturation, to.saturation, t);
+	out.shadowTint
+		.copy(getColor(from.shadowTint))
+		.lerp(getColor(to.shadowTint), t);
+	out.highlightTint
+		.copy(getColor(from.highlightTint))
+		.lerp(getColor(to.highlightTint), t);
+	out.bloomStrength = THREE.MathUtils.lerp(
+		from.bloomStrength,
+		to.bloomStrength,
+		t
+	);
+	out.bloomThreshold = THREE.MathUtils.lerp(
+		from.bloomThreshold,
+		to.bloomThreshold,
+		t
+	);
+	out.liftColor.copy(getColor(from.liftColor)).lerp(getColor(to.liftColor), t);
+	out.lift = THREE.MathUtils.lerp(from.lift, to.lift, t);
+
+	out.rimColor.copy(getColor(from.rimColor)).lerp(getColor(to.rimColor), t);
+	out.rimStrength = THREE.MathUtils.lerp(from.rimStrength, to.rimStrength, t);
+	out.charShadowTint
+		.copy(getColor(from.charShadowTint))
+		.lerp(getColor(to.charShadowTint), t);
+
+	out.cloudCoverage = THREE.MathUtils.lerp(
+		from.cloudCoverage,
+		to.cloudCoverage,
+		t
+	);
+	out.cloudOpacity = THREE.MathUtils.lerp(from.cloudOpacity, to.cloudOpacity, t);
+	out.cloudLight
+		.copy(getColor(from.cloudLight))
+		.lerp(getColor(to.cloudLight), t);
+	out.cloudDark.copy(getColor(from.cloudDark)).lerp(getColor(to.cloudDark), t);
+	out.grassAmbient
+		.copy(getColor(from.grassAmbient))
+		.lerp(getColor(to.grassAmbient), t);
+	out.grassShadowTint
+		.copy(getColor(from.grassShadowTint))
+		.lerp(getColor(to.grassShadowTint), t);
 	return out;
 }
 
@@ -266,12 +513,22 @@ function createSkyMaterial() {
 			uSunGlow: { value: 1 },
 			uSunIntensity: { value: 1 },
 			uMoonIntensity: { value: 0 },
+			uTime: { value: 0 },
+			uCloudCoverage: { value: 0.45 },
+			uCloudOpacity: { value: 0.85 },
+			uCloudLight: { value: new THREE.Color("#ffffff") },
+			uCloudDark: { value: new THREE.Color("#c6d6ea") },
+			/** Larger = smaller, more numerous clouds. */
+			uCloudScale: { value: 0.65 },
+			uCloudSpeed: { value: 1 },
 		},
 		vertexShader: /* glsl */ `
 			varying vec3 vDir;
 			void main() {
-				vec4 world = modelMatrix * vec4(position, 1.0);
-				vDir = normalize(world.xyz);
+				// Direction from the dome's own centre, not from the world origin, so
+				// the dome can be re-centred on the camera each frame without the sky
+				// sliding as the player walks.
+				vDir = normalize(position);
 				gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
 			}
 		`,
@@ -285,7 +542,43 @@ function createSkyMaterial() {
 			uniform float uSunGlow;
 			uniform float uSunIntensity;
 			uniform float uMoonIntensity;
+			uniform float uTime;
+			uniform float uCloudCoverage;
+			uniform float uCloudOpacity;
+			uniform vec3 uCloudLight;
+			uniform vec3 uCloudDark;
+			uniform float uCloudScale;
+			uniform float uCloudSpeed;
 			varying vec3 vDir;
+
+			float hash21(vec2 p) {
+				p = fract(p * vec2(123.34, 456.21));
+				p += dot(p, p + 45.32);
+				return fract(p.x * p.y);
+			}
+
+			float vnoise(vec2 p) {
+				vec2 i = floor(p);
+				vec2 f = fract(p);
+				f = f * f * (3.0 - 2.0 * f);
+				float a = hash21(i);
+				float b = hash21(i + vec2(1.0, 0.0));
+				float c = hash21(i + vec2(0.0, 1.0));
+				float d = hash21(i + vec2(1.0, 1.0));
+				return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+			}
+
+			/** 4 octaves — enough for billowy shapes without a heavy sky pass. */
+			float fbm(vec2 p) {
+				float v = 0.0;
+				float a = 0.5;
+				for (int i = 0; i < 4; i++) {
+					v += a * vnoise(p);
+					p = p * 2.02 + vec2(17.3, 9.1);
+					a *= 0.5;
+				}
+				return v;
+			}
 
 			void main() {
 				vec3 dir = normalize(vDir);
@@ -328,6 +621,48 @@ function createSkyMaterial() {
 				sky += uMoonColor * moonDisc * 1.4;
 				sky += uMoonColor * pow(moonDot, 40.0) * uMoonIntensity * 0.25;
 
+				// ---- Clouds -------------------------------------------------------
+				// Projected onto a virtual flat plane overhead: dividing by dir.y is
+				// what makes them converge and flatten toward the horizon instead of
+				// wrapping the dome like wallpaper.
+				float cloudFade = smoothstep(0.015, 0.20, elev);
+				if (cloudFade > 0.001 && uCloudOpacity > 0.001) {
+					vec2 cuv = (dir.xz / max(elev, 0.06)) * uCloudScale;
+					vec2 drift = vec2(uTime * 0.0075, uTime * 0.003) * uCloudSpeed;
+
+					// Domain warp — straight FBM gives soft blobs; warping it gives the
+					// curled, billowed silhouette that reads as cumulus.
+					vec2 w = vec2(
+						fbm(cuv * 0.5 + drift),
+						fbm(cuv * 0.5 + drift + 3.7)
+					) - 0.5;
+					float n = fbm(cuv + drift + w * 1.35);
+
+					float thresh = 1.0 - uCloudCoverage;
+					float cov = smoothstep(thresh, thresh + 0.22, n);
+					float density = cov * cloudFade * uCloudOpacity;
+
+					if (density > 0.001) {
+						// Thickness proxy: deeper into the cloud reads as lit top,
+						// thin edges stay dark, which fakes self-shadowing cheaply.
+						vec3 cloudCol = mix(uCloudDark, uCloudLight, smoothstep(0.30, 0.85, n));
+
+						// Sun-side scattering plus a bright rim on thin edges — the
+						// silver lining that sells a stylised sky.
+						float sunAmt = pow(max(dot(dir, sun), 0.0), 3.0);
+						float rim = smoothstep(0.6, 0.15, cov) * sunAmt;
+						float sunScale = clamp(uSunIntensity / 3.0, 0.0, 1.2);
+						cloudCol += uSunColor * (sunAmt * 0.30 + rim * 0.85) * sunScale;
+
+						// Moonlit edges at night.
+						float moonAmt = pow(max(dot(dir, moon), 0.0), 4.0);
+						cloudCol += uMoonColor * moonAmt * uMoonIntensity * 0.18;
+
+						// Drawn last so clouds occlude the sun and moon discs.
+						sky = mix(sky, cloudCol, clamp(density, 0.0, 1.0));
+					}
+				}
+
 				gl_FragColor = vec4(sky, 1.0);
 			}
 		`,
@@ -352,8 +687,27 @@ export type DayNightCycle = {
 	getFogDensity: () => number;
 	/** Unit sun direction (points toward the sun). */
 	getSunDirection: () => THREE.Vector3;
+	/** Current interpolated colour grade for the composite pass. */
+	getGrade: () => GradeParams;
+	/** Current interpolated rim / shadow-tint for character materials. */
+	getCharacterLight: () => CharacterLightParams;
+	/** Current interpolated tints for the grass shader. */
+	getGrassLightParams: () => GrassLightParams;
+	/**
+	 * Re-anchor the shadow frustum. The ortho box is only ±shadowExtent wide, so
+	 * without this shadows silently vanish once the player leaves the origin.
+	 */
+	setFocus: (x: number, z: number) => void;
+	/**
+	 * Shadow map resolution and ortho half-extent. The extent must cover the
+	 * visible range or its edge becomes a moving hard cutoff; resolution then
+	 * decides how crisp that coverage is.
+	 */
+	setShadowQuality: (mapSize: number, extent: number) => void;
 	dispose: () => void;
 	overrideColors: boolean;
+	/** Multiplier on ambient + hemisphere intensity. 1 = as authored. */
+	fillScale: number;
 };
 
 /**
@@ -364,7 +718,13 @@ export function createDayNightCycle(
 	scene: THREE.Scene,
 	options: { shadowExtent?: number } = {}
 ): DayNightCycle {
-	const shadowExtent = options.shadowExtent ?? 90;
+	/**
+	 * Must cover everything that can be seen, or the box edge becomes a hard
+	 * shadow cutoff that sweeps through the world as the player moves — distant
+	 * shadows snapping on and off. Trees stay visible to 200 m, so 90 m left a
+	 * cutoff right through the visible range.
+	 */
+	let shadowExtent = options.shadowExtent ?? 200;
 	const group = new THREE.Group();
 	group.name = "day-night";
 
@@ -373,19 +733,43 @@ export function createDayNightCycle(
 
 	const keyLight = new THREE.DirectionalLight(0xfff5e0, 2);
 	keyLight.castShadow = true;
-	keyLight.shadow.camera.far = 500;
+	// Light orbits at 260 with a ±extent box, so casters can sit ~460 out.
+	keyLight.shadow.camera.far = 700;
 	keyLight.shadow.camera.left = -shadowExtent;
 	keyLight.shadow.camera.right = shadowExtent;
 	keyLight.shadow.camera.top = shadowExtent;
 	keyLight.shadow.camera.bottom = -shadowExtent;
 	keyLight.shadow.mapSize.set(2048, 2048);
-	keyLight.shadow.bias = -0.0002;
+
+	/**
+	 * Shadow bias, scaled to the map's world texel size.
+	 *
+	 * normalBias offsets the lookup along the surface normal, which is what
+	 * actually fixes self-shadowing on curved geometry; a constant bias large
+	 * enough to do the same job detaches shadows from their casters instead.
+	 * Leaving it at 0 gave blotchy dark patches on characters — they are only
+	 * ~18 texels tall, so almost every curved surface self-shadowed.
+	 */
+	function applyShadowBias() {
+		const texel = (shadowExtent * 2) / keyLight.shadow.mapSize.x;
+		keyLight.shadow.normalBias = texel * 1.8;
+		keyLight.shadow.bias = -0.00008;
+	}
+	applyShadowBias();
 
 	const skyMat = createSkyMaterial();
 	const sky = new THREE.Mesh(new THREE.SphereGeometry(480, 48, 24), skyMat);
 	sky.name = "sky-dome";
 	sky.frustumCulled = false;
 	sky.renderOrder = -10;
+	// The dome is only 480 units across, so leaving it at the world origin makes
+	// the sky slide as the player walks — obvious once clouds give it detail.
+	// Re-centring per draw also keeps water reflections correct, since the
+	// mirrored camera gets its own dome position.
+	sky.onBeforeRender = (_renderer, _scene, camera) => {
+		sky.position.copy(camera.position);
+		sky.updateMatrixWorld(true);
+	};
 
 	// No separate sun/moon meshes — the sky shader draws a single disc (avoids double sun)
 	group.add(ambient, hemisphere, keyLight, keyLight.target, sky);
@@ -413,10 +797,57 @@ export function createDayNightCycle(
 		moonIntensity: 0,
 		fireflies: 0,
 		grassLight: 1,
+		exposure: 1,
+		shoulder: 0.72,
+		contrast: 1.1,
+		saturation: 1.25,
+		shadowTint: new THREE.Color(),
+		highlightTint: new THREE.Color(),
+		bloomStrength: 0.4,
+		bloomThreshold: 0.75,
+		liftColor: new THREE.Color(),
+		lift: 0,
+		rimColor: new THREE.Color(),
+		rimStrength: 0.7,
+		charShadowTint: new THREE.Color(),
+		grassAmbient: new THREE.Color(),
+		grassShadowTint: new THREE.Color(),
+		cloudCoverage: 0.45,
+		cloudOpacity: 0.85,
+		cloudLight: new THREE.Color(),
+		cloudDark: new THREE.Color(),
+	};
+
+	const grade: GradeParams = {
+		exposure: 1,
+		shoulder: 4,
+		contrast: 1.1,
+		saturation: 1.25,
+		shadowTint: new THREE.Color(1, 1, 1),
+		highlightTint: new THREE.Color(1, 1, 1),
+		liftColor: new THREE.Color(0x2f4f96),
+		lift: 0,
+		bloomStrength: 0.4,
+		bloomThreshold: 0.75,
+	};
+
+	const charLight: CharacterLightParams = {
+		rimColor: new THREE.Color(1, 1, 1),
+		rimStrength: 0.7,
+		shadowTint: new THREE.Color(1, 1, 1),
+	};
+
+	const grassLightParams: GrassLightParams = {
+		keyColor: new THREE.Color(1, 1, 1),
+		intensity: 1,
+		ambient: new THREE.Color(),
+		shadowTint: new THREE.Color(1, 1, 1),
 	};
 
 	const sunDir = new THREE.Vector3();
 	const moonDir = new THREE.Vector3();
+	/** Point the shadow frustum is centred on — tracks the player. */
+	const focus = new THREE.Vector3();
 	const ORBIT = 260;
 
 	let hour = DAY_PERIODS.morning.hour;
@@ -425,6 +856,8 @@ export function createDayNightCycle(
 	let period: DayPeriod = "morning";
 	let fireflyIntensity = 0;
 	let grassLight = 1;
+	/** Wall-clock seconds driving cloud drift. */
+	let skyTime = 0;
 
 	function nearestPeriod(h: number): DayPeriod {
 		let best: DayPeriod = "morning";
@@ -442,6 +875,54 @@ export function createDayNightCycle(
 	}
 
 	let overrideColors = false;
+	/**
+	 * Global multiplier on ambient + hemisphere. The single most useful knob for
+	 * this rig: raising it flattens the image, lowering it deepens shadows.
+	 */
+	let fillScale = 1;
+	/** Whether the key light is currently the sun (vs the moon). */
+	let keyIsSun = true;
+
+	const _up = new THREE.Vector3(0, 1, 0);
+	const _right = new THREE.Vector3();
+	const _camUp = new THREE.Vector3();
+	const _snapped = new THREE.Vector3();
+
+	/**
+	 * Place the key light and its shadow frustum, quantised to the shadow map's
+	 * texel grid.
+	 *
+	 * The grid is aligned to the *light's* view basis, not to world axes, so
+	 * rounding the focus in world XZ (as this used to) does not land on texel
+	 * boundaries at all — it just moves the whole map in jumps, leaving every
+	 * shadow edge crawling as the player drives. Projecting the focus onto the
+	 * light's own basis and rounding there is what actually stabilises it.
+	 */
+	function positionKeyLight() {
+		const dir = keyIsSun ? sunDir : moonDir;
+		const texel = (shadowExtent * 2) / keyLight.shadow.mapSize.x;
+
+		_right.crossVectors(_up, dir);
+		// Degenerate when the light is straight overhead.
+		if (_right.lengthSq() < 1e-8) _right.set(1, 0, 0);
+		_right.normalize();
+		_camUp.crossVectors(dir, _right).normalize();
+
+		const a = Math.round(focus.dot(_right) / texel) * texel;
+		const b = Math.round(focus.dot(_camUp) / texel) * texel;
+		// The component along the light axis does not affect an ortho projection.
+		const c = focus.dot(dir);
+
+		_snapped
+			.set(0, 0, 0)
+			.addScaledVector(_right, a)
+			.addScaledVector(_camUp, b)
+			.addScaledVector(dir, c);
+
+		keyLight.target.position.copy(_snapped);
+		keyLight.position.copy(_snapped).addScaledVector(dir, ORBIT);
+		keyLight.target.updateMatrixWorld();
+	}
 
 	function apply() {
 		sampleAtHour(hour, sample);
@@ -459,10 +940,10 @@ export function createDayNightCycle(
 		}
 
 		ambient.color.copy(sample.ambient);
-		ambient.intensity = sample.ambientIntensity;
+		ambient.intensity = sample.ambientIntensity * fillScale;
 		hemisphere.color.copy(sample.hemiSky);
 		hemisphere.groundColor.copy(sample.hemiGround);
-		hemisphere.intensity = sample.hemiIntensity;
+		hemisphere.intensity = sample.hemiIntensity * fillScale;
 
 		hourToSunDirection(hour, sunDir);
 		moonDir.copy(sunDir).multiplyScalar(-1);
@@ -470,21 +951,21 @@ export function createDayNightCycle(
 		moonDir.normalize();
 
 		const sunUp = sample.sunIntensity > 0.12 && sunDir.y > -0.02;
+		keyIsSun = sunUp;
 		if (sunUp) {
-			keyLight.position.copy(sunDir).multiplyScalar(ORBIT);
-			keyLight.target.position.set(0, 0, 0);
 			keyLight.color.copy(sample.sun);
 			const lowBoost = THREE.MathUtils.smoothstep(0.4, 0.05, sunDir.y);
 			keyLight.intensity = sample.sunIntensity * (1 + lowBoost * 0.2);
 			keyLight.castShadow = true;
 		} else {
-			keyLight.position.copy(moonDir).multiplyScalar(ORBIT);
-			keyLight.target.position.set(0, 0, 0);
 			keyLight.color.copy(sample.moon);
 			keyLight.intensity = sample.moonIntensity;
-			keyLight.castShadow = false;
+			// Moonlight now casts too — a shadowless night reads flat and grey.
+			keyLight.castShadow = sample.moonIntensity > 0.25;
 		}
-		keyLight.target.updateMatrixWorld();
+		// Anchor the frustum on the player, not the world origin, so the ±extent
+		// ortho box travels with them instead of being stranded at (0,0,0).
+		positionKeyLight();
 
 		skyMat.uniforms.uSunDir.value.copy(sunDir);
 		skyMat.uniforms.uMoonDir.value.copy(moonDir);
@@ -495,9 +976,35 @@ export function createDayNightCycle(
 		skyMat.uniforms.uSunGlow.value = sample.sunGlow;
 		skyMat.uniforms.uSunIntensity.value = sample.sunIntensity;
 		skyMat.uniforms.uMoonIntensity.value = sample.moonIntensity;
+		skyMat.uniforms.uCloudCoverage.value = sample.cloudCoverage;
+		skyMat.uniforms.uCloudOpacity.value = sample.cloudOpacity;
+		skyMat.uniforms.uCloudLight.value.copy(sample.cloudLight);
+		skyMat.uniforms.uCloudDark.value.copy(sample.cloudDark);
 
 		fireflyIntensity = sample.fireflies;
 		grassLight = sample.grassLight;
+
+		grade.exposure = sample.exposure;
+		grade.shoulder = sample.shoulder;
+		grade.contrast = sample.contrast;
+		grade.saturation = sample.saturation;
+		grade.shadowTint.copy(sample.shadowTint);
+		grade.highlightTint.copy(sample.highlightTint);
+		grade.liftColor.copy(sample.liftColor);
+		grade.lift = sample.lift;
+		grade.bloomStrength = sample.bloomStrength;
+		grade.bloomThreshold = sample.bloomThreshold;
+
+		charLight.rimColor.copy(sample.rimColor);
+		charLight.rimStrength = sample.rimStrength;
+		charLight.shadowTint.copy(sample.charShadowTint);
+
+		// Grass shades itself, so hand it the key colour explicitly.
+		grassLightParams.keyColor.copy(sunUp ? sample.sun : sample.moon);
+		grassLightParams.intensity = sample.grassLight;
+		grassLightParams.ambient.copy(sample.grassAmbient);
+		grassLightParams.shadowTint.copy(sample.grassShadowTint);
+
 		period = nearestPeriod(hour);
 	}
 
@@ -518,6 +1025,13 @@ export function createDayNightCycle(
 		},
 		set overrideColors(v: boolean) {
 			overrideColors = v;
+		},
+		get fillScale() {
+			return fillScale;
+		},
+		set fillScale(v: number) {
+			fillScale = Math.max(0, v);
+			apply();
 		},
 		get auto() {
 			return auto;
@@ -545,6 +1059,10 @@ export function createDayNightCycle(
 			apply();
 		},
 		update(dt) {
+			// Cloud drift runs off wall-clock time, not the day/night hour, so
+			// clouds keep moving even when the cycle is paused.
+			skyTime += dt;
+			skyMat.uniforms.uTime.value = skyTime;
 			if (auto) {
 				hour = (hour + speed * dt) % 24;
 				apply();
@@ -556,6 +1074,37 @@ export function createDayNightCycle(
 		getFogColor: () => sample.fog,
 		getFogDensity: () => sample.fogDensity,
 		getSunDirection: () => sunDir,
+		getGrade: () => grade,
+		getCharacterLight: () => charLight,
+		getGrassLightParams: () => grassLightParams,
+		setFocus(x, z) {
+			// Store the raw position — quantisation happens in light space inside
+			// positionKeyLight, which is the only place it can be done correctly.
+			if (x === focus.x && z === focus.z) return;
+			focus.set(x, 0, z);
+			// Only the light needs moving; the colour sample is unchanged.
+			positionKeyLight();
+		},
+		setShadowQuality(mapSize, extent) {
+			const size = Math.max(512, Math.min(8192, Math.floor(mapSize)));
+			const next = Math.max(20, extent);
+			if (size === keyLight.shadow.mapSize.x && next === shadowExtent) return;
+			shadowExtent = next;
+			keyLight.shadow.mapSize.set(size, size);
+			keyLight.shadow.camera.left = -shadowExtent;
+			keyLight.shadow.camera.right = shadowExtent;
+			keyLight.shadow.camera.top = shadowExtent;
+			keyLight.shadow.camera.bottom = -shadowExtent;
+			keyLight.shadow.camera.updateProjectionMatrix();
+			// Texel size changed, so the bias has to be rescaled with it.
+			applyShadowBias();
+			// mapSize only takes effect on a fresh target.
+			if (keyLight.shadow.map) {
+				keyLight.shadow.map.dispose();
+				keyLight.shadow.map = null as unknown as THREE.WebGLRenderTarget;
+			}
+			positionKeyLight();
+		},
 		dispose() {
 			group.removeFromParent();
 			sky.geometry.dispose();

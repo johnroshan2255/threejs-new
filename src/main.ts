@@ -94,6 +94,7 @@ import {
 	fogFollowsPlayer,
 	fogRadiusForWorld,
 } from "./environment/VolumetricFogPass";
+import { setCharacterAlbedo } from "./entities/human/toonCharacter";
 import { SmokeTrailSystem } from "./environment/smokeTrail";
 import { ExplosionSystem } from "./environment/ExplosionSystem";
 import { BombSound } from "./audio/BombSound";
@@ -147,6 +148,36 @@ type RemotePlayer = {
 };
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:3000";
+
+/**
+ * Albedo ceiling for untextured character materials.
+ *
+ * Not a stylisation — it compensates for this rig's key light, which is ~2.4x
+ * what it used to be. glTF defaults an absent baseColorFactor to pure white, so
+ * poutine.glb has albedo 1.0; at the current key that pins the whole lit half
+ * into the top few percent of the tone curve and crosses the bloom threshold,
+ * which reads as a washed-out figure. 0.58 restores the response the original
+ * material had under the original lighting. Materials with a colour texture are
+ * skipped — they already carry their own albedo.
+ */
+const CHARACTER_ALBEDO = 0.58;
+
+/**
+ * Pass-through grade for the editor's top-down view. The composite always runs
+ * (so tone mapping is never skipped), but the stylisation is switched off.
+ */
+const NEUTRAL_GRADE = {
+	exposure: 1,
+	shoulder: 0.8,
+	contrast: 1,
+	saturation: 1,
+	shadowTint: new THREE.Color(1, 1, 1),
+	highlightTint: new THREE.Color(1, 1, 1),
+	liftColor: new THREE.Color(1, 1, 1),
+	lift: 0,
+	bloomStrength: 0,
+	bloomThreshold: 1.5,
+};
 
 export class FluffyGrass {
 	private loadingManager: THREE.LoadingManager;
@@ -241,6 +272,9 @@ export class FluffyGrass {
 	private readonly gunHandQuat = new THREE.Quaternion();
 	private readonly gunWorldOffset = new THREE.Vector3();
 	private readonly gunMuzzleWorld = new THREE.Vector3();
+	/** Character roots, so albedo can be re-dialled from the console. */
+	private readonly characterRoots: THREE.Object3D[] = [];
+
 	private readonly gunMuzzleLocal = new THREE.Vector3(0.02, 0.05, 0.42);
 	private readonly gunOffsetPos = new THREE.Vector3(0.05, 0.02, 0.08);
 	private readonly gunOffsetQuat = new THREE.Quaternion().setFromEuler(
@@ -317,6 +351,47 @@ export class FluffyGrass {
 	private initializationPromise: Promise<void>;
 	private currentFogRadius = 65;
 	private volumetricFogDensity = 0.022;
+	/**
+	 * Live look-tuning, exposed as `window.__look` so the grade can be dialled in
+	 * from the console without a rebuild. Multipliers compose on top of the
+	 * interpolated DAY_PERIODS values, so time-of-day still drives everything.
+	 */
+	private lookTuning = {
+		/** Multiplier on grade exposure. */
+		exposure: 1,
+		/** Multiplier on grade contrast. */
+		contrast: 1,
+		/** Multiplier on grade saturation. */
+		saturation: 1,
+		/** Absolute 0..1. How much cool-shadow/warm-highlight split is applied. */
+		splitTone: 0.6,
+		/** Multiplier on bloom strength. */
+		bloom: 1,
+		/** Absolute vignette amount. */
+		vignette: 0.16,
+		/** Multiplier on ambient + hemisphere. Lower = deeper shadows. */
+		fill: 1,
+		/** Multiplier on character rim light. */
+		rim: 1,
+		/** Multiplier on the additive night lift. */
+		lift: 1,
+	};
+	private readonly _waterLight = new THREE.Color();
+	private readonly _waterFill = new THREE.Color();
+	/** Scratch so we never mutate the cycle's own grade object. */
+	private readonly _grade = {
+		exposure: 1,
+		shoulder: 0.72,
+		contrast: 1,
+		saturation: 1,
+		shadowTint: new THREE.Color(1, 1, 1),
+		highlightTint: new THREE.Color(1, 1, 1),
+		liftColor: new THREE.Color(1, 1, 1),
+		lift: 0,
+		bloomStrength: 0,
+		bloomThreshold: 1,
+	};
+
 	private fogFollowPlayer = false;
 	private volumetricFog: VolumetricFogSystem | null = null;
 	private volumetricFogPass: VolumetricFogPass | null = null;
@@ -403,7 +478,10 @@ export class FluffyGrass {
 		this.renderer.shadowMap.autoUpdate = true;
 		this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 		this.renderer.outputColorSpace = THREE.SRGBColorSpace;
-		this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+		// Tone mapping lives in VolumetricFogPass's composite, not per-material.
+		// ACES was actively desaturating highlights; the composite runs a
+		// saturation-preserving curve instead, and needs linear HDR to reach it.
+		this.renderer.toneMapping = THREE.NoToneMapping;
 		this.renderer.setSize(window.innerWidth, window.innerHeight);
 		this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 		this.scene.frustumCulled = true;
@@ -425,13 +503,42 @@ export class FluffyGrass {
 			side: THREE.DoubleSide,
 		});
 
+		// Live look tuning from the browser console, e.g.
+		//   __look.tuning.splitTone = 0.3
+		//   __look.tuning.fill = 0.6
+		//   __look.outline.uOutlineWidth.value = 1.6
+		//   __look.character.uCharShadowTintStrength.value = 0.2
+		(window as unknown as { __look?: unknown }).__look = {
+			tuning: this.lookTuning,
+			grass: this.grassMaterial.uniforms,
+			/**
+			 * Character albedo ceiling. The GLB is untextured pure white (albedo
+			 * 1.0), which saturates the tone curve and blooms. Lower = more form.
+			 */
+			charAlbedo: (v: number) => {
+				for (const root of this.characterRoots) setCharacterAlbedo(root, v);
+				console.log(`[char] albedo ceiling -> ${v}`);
+			},
+			/** Toggle character shadow casting, to isolate shadow artefacts. */
+			charShadows: (on: boolean) => {
+				for (const root of this.characterRoots) {
+					root.traverse((o) => {
+						const m = o as THREE.Mesh;
+						if (m.isMesh && !m.userData.isToonOutline) m.castShadow = on;
+					});
+				}
+				this.renderer.shadowMap.needsUpdate = true;
+				console.log(`[char] cast shadows -> ${on}`);
+			},
+		};
+
 		this.setupStats();
 		this.setupTextures();
 		this.setupEventListeners();
 		this.setupInteractionUI();
 		this.healthHud = new HealthHud();
 		this.orientationGate = createOrientationGate();
-		this.dayNight = createDayNightCycle(this.scene, { shadowExtent: 90 });
+		this.dayNight = createDayNightCycle(this.scene, { shadowExtent: 200 });
 		this.dayNight.auto = this.dayNightGui.auto;
 		this.worldLoading = new WorldLoadingOverlay();
 		this.setupSettings();
@@ -996,6 +1103,8 @@ export class FluffyGrass {
 				const humanGltf = await this.loadGltfFull("/poutine.glb");
 				const humanGroup = humanGltf.scene;
 				humanGroup.scale.setScalar(this.sceneProps.humanScale);
+				setCharacterAlbedo(humanGroup, CHARACTER_ALBEDO);
+				this.characterRoots.push(humanGroup);
 				this.scene.add(humanGroup);
 
 				const mixer = new THREE.AnimationMixer(humanGroup);
@@ -1898,6 +2007,10 @@ export class FluffyGrass {
 		// Default to the scale in sceneProps
 		scene.scale.setScalar(this.sceneProps.humanScale);
 
+		// Original GLB material, only the albedo ceiling (see CHARACTER_ALBEDO).
+		setCharacterAlbedo(scene, CHARACTER_ALBEDO);
+		this.characterRoots.push(scene);
+
 		this.human = new HumanEntity(
 			scene,
 			gltf.animations,
@@ -2339,7 +2452,6 @@ export class FluffyGrass {
 		};
 	}
 
-	/** Snap the world-space gun mesh to the animated right-hand bone. */
 	private syncGunToHand() {
 		if (!this.gunMesh || !this.human || !this.gunMesh.visible) return;
 		const hand = this.human.rightHandBone;
@@ -2844,6 +2956,9 @@ export class FluffyGrass {
 			// Set rotation to face the camera. (Math.PI / 4 is exactly forward!)
 			clone.rotation.set(0, Math.PI / 4, 0);
 
+			setCharacterAlbedo(clone, CHARACTER_ALBEDO);
+			this.characterRoots.push(clone);
+
 			// Position exactly aligned with 4 columns at z = -5, moved down slightly to sit nicely
 			clone.position.set(startX + (i * spacing), -1.0, -5.0);
 
@@ -3037,14 +3152,85 @@ export class FluffyGrass {
 				this.settings.setAutoDayNight(this.dayNight.auto);
 			}
 
-			const grassLight = this.dayNight.getGrassLight();
-			this.grassMaterial.uniforms.uGrassLightIntensity.value = grassLight;
+			// Grass shades itself, so hand it the key/fill/shadow colours directly.
+			this.grassMaterial.setLightParams(this.dayNight.getGrassLightParams());
+
+
+			if (this.dayNight.fillScale !== this.lookTuning.fill) {
+				this.dayNight.fillScale = this.lookTuning.fill;
+			}
+
+			// Water's specular + shore foam were hardcoded white, so they stayed
+			// fully bright at midnight and read as a glowing disc. Feed them the
+			// actual light energy instead.
+			const keyL = this.dayNight.lights.keyLight;
+			const ambL = this.dayNight.lights.ambient;
+			this._waterLight
+				.copy(keyL.color)
+				.multiplyScalar(keyL.intensity * 0.28)
+				.add(this._waterFill.copy(ambL.color).multiplyScalar(ambL.intensity));
+			if (this.pond) {
+				this.pond.setLightColor(this._waterLight);
+				this.pond.setSunDirection(this.dayNight.getSunDirection());
+			}
+
+			// Composite grade — exposure, tone curve, split-tone, bloom. The
+			// editor's top-down view gets a neutral pass-through instead: a
+			// stylised grade there fights readability, same reason fog is off.
+			if (this.volumetricFogPass) {
+				if (this.sceneProps.mapMode) {
+					this.volumetricFogPass.setGrade(NEUTRAL_GRADE);
+					this.volumetricFogPass.setSplitTone(0);
+					this.volumetricFogPass.setVignette(0);
+				} else {
+					const t = this.lookTuning;
+					const base = this.dayNight.getGrade();
+					const g = this._grade;
+					g.exposure = base.exposure * t.exposure;
+					g.shoulder = base.shoulder;
+					g.contrast = base.contrast * t.contrast;
+					g.saturation = base.saturation * t.saturation;
+					g.shadowTint.copy(base.shadowTint);
+					g.highlightTint.copy(base.highlightTint);
+					g.liftColor.copy(base.liftColor);
+					g.lift = base.lift * t.lift;
+					g.bloomStrength = base.bloomStrength * t.bloom;
+					g.bloomThreshold = base.bloomThreshold;
+					this.volumetricFogPass.setGrade(g);
+					this.volumetricFogPass.setSplitTone(t.splitTone);
+					this.volumetricFogPass.setVignette(t.vignette);
+				}
+			}
+
+			// Keep the ±90 m shadow frustum centred on whoever we're following,
+			// otherwise it stays stranded at the world origin.
+			//
+			// Only re-anchor on frames where the shadow map is actually redrawn.
+			// Medium quality refreshes it every 6th frame, so moving the frustum
+			// every frame leaves the map's contents describing a stale frustum —
+			// which reads as shadows blinking at ~10 Hz.
+			const shadowsWillRedraw =
+				this.renderer.shadowMap.enabled &&
+				(this.renderer.shadowMap.autoUpdate ||
+					this.renderer.shadowMap.needsUpdate);
+			if (shadowsWillRedraw) {
+				const shadowFocus =
+					this.activePlayer === "human" && this.human?.mesh
+						? this.human.mesh.position
+						: (this.car?.mesh?.position ?? this.camera.position);
+				this.dayNight.setFocus(shadowFocus.x, shadowFocus.z);
+			}
 
 			if (this.terrainMat) {
 				const sunY = this.dayNight.getSunDirection().y;
 				// Fade emissive in as sun drops below horizon (sunY from 0.1 to -0.1)
 				const nightFactor = THREE.MathUtils.clamp((0.1 - sunY) / 0.2, 0, 1);
-				this.terrainMat.emissive.set(this.sceneProps.terrainColor).multiplyScalar(0.7 * nightFactor);
+				// Was terrainColor * 0.7 — a green self-glow, added back when night was
+				// too dark to see. The rig no longer needs it, and a *cool* trace
+				// keeps the ground from going flat black without turning it green.
+				this.terrainMat.emissive
+					.copy(this.dayNight.getGrade().liftColor)
+					.multiplyScalar(0.1 * nightFactor);
 			}
 
 			// Headlights on through evening → night
@@ -3608,6 +3794,10 @@ export class FluffyGrass {
 		this.renderer.shadowMap.enabled = shadowsEnabled;
 		this.renderer.shadowMap.autoUpdate = quality === "High";
 		if (shadowsEnabled) this.renderer.shadowMap.needsUpdate = true;
+		// The shadow box has to span the visible range (200 m) to avoid a moving
+		// cutoff, so resolution carries the crispness: 4096 over 400 m gives
+		// ~0.098 m texels, about what 2048 over 180 m used to.
+		this.dayNight?.setShadowQuality(quality === "High" ? 4096 : 2048, 200);
 		this.grassMaterial.updateGrassGraphicsChange(quality === "High");
 		this.waterUpdateInterval =
 			quality === "Low" ? 4 : quality === "Medium" ? 3 : 2;
@@ -3693,7 +3883,9 @@ export class FluffyGrass {
 			heightFalloff: Math.LN2 / 15,
 			sunDirection: sunDir,
 			sunColor: key.color,
-			sunIntensity: Math.min(0.85, key.intensity * 0.16),
+			// Key intensity roughly doubled in the rig retune; scale the coupling
+			// down so haze stays sun-shaped rather than washing the frame.
+			sunIntensity: Math.min(0.85, key.intensity * 0.11),
 			time: timeSec,
 		});
 
