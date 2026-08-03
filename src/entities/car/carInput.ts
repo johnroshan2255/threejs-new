@@ -2,13 +2,33 @@ import { CarController } from "./carController";
 import type { DriveInput } from "./carController";
 import type { MobileControls } from "../../ui/mobileControls";
 import { HornSound } from "../../audio/HornSound";
+import { isGameKeyBlocked } from "../../ui/gameInputFocus";
 
-const GAME_KEYS = new Set(["KeyW", "KeyA", "KeyS", "KeyD", "Space", "KeyR", "KeyE"]);
+const GAME_KEYS = new Set([
+	"KeyW",
+	"KeyA",
+	"KeyS",
+	"KeyD",
+	"Space",
+	"KeyR",
+	"KeyE",
+	"KeyT",
+	"KeyH",
+	"KeyF",
+]);
 
 export class CarInput {
 	public isEnabled = false;
 	private mobile: MobileControls | null = null;
 	private horn: HornSound;
+	/** True while T is held (vehicle grapple reel). */
+	private grappleHeld = false;
+	/** Latched true for one applyInput frame after T goes down. */
+	private grappleJustPressed = false;
+	/** Latched true for one applyInput frame after H goes down (detach). */
+	private grappleDetachPressed = false;
+	/** Latched true for one applyInput frame after F goes down (FPV toggle). */
+	private fpvJustPressed = false;
 
 	constructor(
 		private controller: CarController,
@@ -22,6 +42,30 @@ export class CarInput {
 
 	public get isHonking() {
 		return this.horn.isPlaying;
+	}
+
+	public get isGrappleHeld() {
+		return this.grappleHeld;
+	}
+
+	/** Consumes the edge-triggered press for this frame. */
+	public consumeGrapplePress(): boolean {
+		const pressed = this.grappleJustPressed;
+		this.grappleJustPressed = false;
+		return pressed;
+	}
+
+	public consumeGrappleDetach(): boolean {
+		const pressed = this.grappleDetachPressed;
+		this.grappleDetachPressed = false;
+		return pressed;
+	}
+
+	/** Consumes F-toggle press for this frame. */
+	public consumeFpvToggle(): boolean {
+		const pressed = this.fpvJustPressed;
+		this.fpvJustPressed = false;
+		return pressed;
 	}
 
 	/** Call when leaving the car so the horn can't keep blaring. */
@@ -43,6 +87,11 @@ export class CarInput {
 
 	private onKeyDown = (e: KeyboardEvent) => {
 		if (!this.isEnabled) return;
+		// Typing in a form (login, etc.) must never steer the car.
+		if (isGameKeyBlocked(e)) {
+			this.clearKeys();
+			return;
+		}
 		if (e.code === "KeyR") {
 			e.preventDefault();
 			if (e.repeat) return;
@@ -60,15 +109,47 @@ export class CarInput {
 			return;
 		}
 
+		if (e.code === "KeyT") {
+			this.grappleHeld = true;
+			this.grappleJustPressed = true;
+			return;
+		}
+
+		if (e.code === "KeyH") {
+			this.grappleDetachPressed = true;
+			return;
+		}
+
+		if (e.code === "KeyF") {
+			this.fpvJustPressed = true;
+			return;
+		}
+
 		this.set(e, true);
 	};
 
 	private onKeyUp = (e: KeyboardEvent) => {
 		if (!GAME_KEYS.has(e.code)) return;
-		e.preventDefault();
+		// Releases always clear (a key held when a form opens must not stick),
+		// but a form's keystrokes are left alone.
+		if (!isGameKeyBlocked(e)) e.preventDefault();
 
 		if (e.code === "KeyE") {
 			if (this.isEnabled) this.horn.stop();
+			return;
+		}
+
+		if (e.code === "KeyT") {
+			this.grappleHeld = false;
+			this.grappleJustPressed = false;
+			return;
+		}
+
+		if (e.code === "KeyH") {
+			return;
+		}
+
+		if (e.code === "KeyF") {
 			return;
 		}
 
@@ -83,6 +164,9 @@ export class CarInput {
 		this.keys.a = false;
 		this.keys.d = false;
 		this.keys.space = false;
+		this.grappleHeld = false;
+		this.grappleJustPressed = false;
+		this.grappleDetachPressed = false;
 	};
 
 	private set(e: KeyboardEvent, val: boolean) {

@@ -20,6 +20,7 @@
     "socket.io-client": "^4.8.3",
     "stats-gl": "^2.0.1",
     "three": "^0.159.0",
-    "three-custom-shader-material": "^4.0.0"
+    "three-custom-shader-material": "^4.0.0",
+    "three-mesh-bvh": "^0.9.13"
   }
 }

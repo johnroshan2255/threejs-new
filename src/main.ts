@@ -1,4 +1,9 @@
 import * as THREE from "three";
+import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from "three-mesh-bvh";
+THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
+THREE.Mesh.prototype.raycast = acceleratedRaycast;
+
 import Stats from "stats-gl";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import RAPIER from "@dimforge/rapier3d-compat";
@@ -11,7 +16,7 @@ import {
 	createTerrainHeightfieldCollider,
 	type TerrainColliderHandle,
 } from "./physics/terrainCollider";
-import { setIslandTerrain, getWorldTerrainY } from "./terrain/islandHeight";
+import { setIslandTerrain, getWorldTerrainY, findSafeTerrainSpawn, isOutsideTerrain } from "./terrain/islandHeight";
 import { createLargeTerrain, TERRAIN_CONFIG } from "./terrain/createLargeTerrain";
 import { Pond, REFERENCE_WATER_LOOK } from "./entities/water";
 import { createCar, type CarEntity } from "./entities/car/createCar";
@@ -27,15 +32,25 @@ import {
 } from "./entities/car/carHeadlights";
 import { CAR_CONFIG } from "./entities/car/carConfig";
 import { EngineSound } from "./entities/car/EngineSound";
+import { VehicleGrapple } from "./entities/car/vehicleGrapple";
 import { updateChaseCamera, updateHumanCamera } from "./three/chaseCamera";
 import { ChaseCameraInput } from "./three/chaseCameraInput";
-import { HumanEntity } from "./entities/human/HumanEntity";
+import { HumanEntity, findCombatBones, hitReactionAnimName, stripRootMotion, type CombatBones, type HitReaction } from "./entities/human/HumanEntity";
 import { HumanInput } from "./entities/human/HumanInput";
+import { BulletSystem } from "./entities/human/BulletSystem";
+import {
+	BLAST_KILL_RADIUS,
+	PLAYER_MAX_HP,
+	damageForPart,
+	type DeathCause,
+	type GunHitPart,
+} from "./entities/human/playerCombat";
 import {
 	createTree,
 	updateFoliageWind,
 	type TreeHandle,
 } from "./entities/tree";
+import { TreeInstancedMesh } from "./entities/tree/TreeInstancedMesh";
 import {
 	createPondStones,
 	type PondStoneHandle,
@@ -52,13 +67,13 @@ import {
 	createProceduralTerrain,
 	grassCountForSize,
 	ISLAND_GRASS_DENSITY,
-	ISLAND_TERRAIN_CELL,
 	ISLAND_WORLD,
 	paintTerrainMudShore,
 	VALLEY_WORLD,
 	type WorldDefinition,
 } from "./worlds";
-import { CUSTOM_WORLDS_KEY } from "./editor/types";
+import type { WorldListItem } from "./editor/WorldEditApi";
+import { purgeLegacyWorldStorage } from "./editor/WorldEditStore";
 import {
 	createDayNightCycle,
 	type DayNightCycle,
@@ -70,12 +85,31 @@ import {
 	type LampFireflyGlow,
 } from "./environment/lampFireflyGlow";
 import { VolumetricFogSystem } from "./environment/VolumetricFogSystem";
+import {
+	VolumetricFogPass,
+	PLAYER_FOG_BAND,
+	PLAYER_FOG_RADIUS,
+	fogDensityForWorld,
+	fogDensityScaleForHour,
+	fogFollowsPlayer,
+	fogRadiusForWorld,
+} from "./environment/VolumetricFogPass";
 import { SmokeTrailSystem } from "./environment/smokeTrail";
 import { ExplosionSystem } from "./environment/ExplosionSystem";
 import { BombSound } from "./audio/BombSound";
 import { HornSound } from "./audio/HornSound";
 import { ProceduralBridge } from "./environment/ProceduralBridge";
-import { createMobileControls, type MobileControls } from "./ui/mobileControls";
+import {
+	createMobileControls,
+	isMobileDevice,
+	type MobileControls,
+} from "./ui/mobileControls";
+import {
+	isGameKeyBlocked,
+	isKeyboardCapturedByUi,
+	isTextEntryFocused,
+	isTextEntryTarget,
+} from "./ui/gameInputFocus";
 import { createOrientationGate, type OrientationGate } from "./ui/orientationGate";
 import { AuthService, type AuthUser } from "./auth/AuthService";
 import { GameNavigation } from "./ui/GameNavigation";
@@ -86,6 +120,7 @@ import {
 	type GraphicsQuality,
 } from "./ui/GameSettings";
 import { WorldLoadingOverlay } from "./ui/WorldLoadingOverlay";
+import { HealthHud } from "./ui/HealthHud";
 
 type RemotePlayer = {
 	loaded: boolean;
@@ -98,6 +133,7 @@ type RemotePlayer = {
 	mixer?: THREE.AnimationMixer;
 	animations?: Map<string, THREE.AnimationAction>;
 	currentAction?: THREE.AnimationAction | null;
+	combatBones?: CombatBones;
 	targetHumanPosition: THREE.Vector3;
 	targetHumanQuaternion: THREE.Quaternion;
 	targetCarPosition: THREE.Vector3;
@@ -106,6 +142,8 @@ type RemotePlayer = {
 	isCarryingPlayer?: boolean;
 	/** Occupied island bench seat (0 | 1), or null if not sitting. */
 	benchSeat?: 0 | 1 | null;
+	hp?: number;
+	dead?: boolean;
 };
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:3000";
@@ -122,7 +160,7 @@ export class FluffyGrass {
 	private stats: Stats;
 	private sceneProps = {
 		fogColor: "#eeeeee",
-		terrainColor: "#5e875e",
+		terrainColor: "#1d360c",
 		fogDensity: 0.012,
 		humanScale: 0.03,
 		mapMode: false,
@@ -131,6 +169,9 @@ export class FluffyGrass {
 
 	// Interactive Objects
 	private bombs: { mesh: THREE.Group, body: RAPIER.RigidBody | null, id: number, isFlying?: boolean, flightTime?: number }[] = [];
+	/** Prevent double-detonation (bullet + land fuse, chain, etc.). */
+	private readonly detonatingBombIds = new Set<number>();
+	private readonly _bombWorldPos = new THREE.Vector3();
 
 	Uniforms = {
 		uTime: { value: 0 },
@@ -153,7 +194,10 @@ export class FluffyGrass {
 	private customHeights: Float32Array | null = null;
 	private customTerrainHandle: TerrainColliderHandle | null = null;
 	private activeWorldDef: WorldDefinition = ISLAND_WORLD;
+	/** Custom world defs known this session (created here or fetched from the DB). */
 	private customWorldDefs: WorldDefinition[] = [];
+	/** Last GET /api/worlds?mine=1 result — the source of truth for the picker. */
+	private savedWorldList: WorldListItem[] = [];
 	private graphicsQuality: GraphicsQuality = "High";
 	private waterUpdateInterval = 1;
 	private waterFrameCounter = 0;
@@ -173,6 +217,7 @@ export class FluffyGrass {
 	private car: CarEntity | null = null;
 	private carInput: CarInput | null = null;
 	private carController: CarController | null = null;
+	private vehicleGrapple: VehicleGrapple | null = null;
 	private chaseCameraInput: ChaseCameraInput | null = null;
 	private engineSound: EngineSound | null = null;
 	private carOutOfWorldTimer = 0;
@@ -181,8 +226,35 @@ export class FluffyGrass {
 	private audioListener: THREE.AudioListener | null = null;
 
 	private activePlayer: "car" | "human" = "car";
+	private carFpvMode = false;
 	private human: HumanEntity | null = null;
 	private humanInput: HumanInput | null = null;
+	/** Held firearm mesh — lives in the scene, snapped to the right hand each frame. */
+	private gunMesh: THREE.Object3D | null = null;
+	private bulletSystem: BulletSystem | null = null;
+	private localHp = PLAYER_MAX_HP;
+	private localDead = false;
+	private deathTimer = 0;
+	private deathCause: DeathCause | null = null;
+	private healthHud: HealthHud | null = null;
+	private readonly gunHandPos = new THREE.Vector3();
+	private readonly gunHandQuat = new THREE.Quaternion();
+	private readonly gunWorldOffset = new THREE.Vector3();
+	private readonly gunMuzzleWorld = new THREE.Vector3();
+	private readonly gunMuzzleLocal = new THREE.Vector3(0.02, 0.05, 0.42);
+	private readonly gunOffsetPos = new THREE.Vector3(0.05, 0.02, 0.08);
+	private readonly gunOffsetQuat = new THREE.Quaternion().setFromEuler(
+		new THREE.Euler(-Math.PI * 0.5, Math.PI, 0.2)
+	);
+	private readonly _shotOrigin = new THREE.Vector3();
+	private readonly _shotDir = new THREE.Vector3();
+	private readonly _shotAim = new THREE.Vector3();
+	private readonly _shotClosest = new THREE.Vector3();
+	private treeManager!: TreeInstancedMesh;
+
+	private readonly _shotTo = new THREE.Vector3();
+	/** Dedupe networked hit tracers (attacker->victim). */
+	private readonly recentGunFxAt = new Map<string, number>();
 	private interactionPrompt: HTMLElement | null = null;
 
 	private socket: Socket | null = null;
@@ -244,12 +316,22 @@ export class FluffyGrass {
 	private valleySpawn = new THREE.Vector3(0, 4, 5);
 	private initializationPromise: Promise<void>;
 	private currentFogRadius = 65;
+	private volumetricFogDensity = 0.022;
+	private fogFollowPlayer = false;
 	private volumetricFog: VolumetricFogSystem | null = null;
+	private volumetricFogPass: VolumetricFogPass | null = null;
+	/** Residual FogExp2 while the screen-space pass does the heavy lifting. */
+	private residualFogDensity = 0.0008;
+	/** Full FogExp2 density to restore when the volumetric pass is off. */
+	private atmosphereFogDensity = 0.012;
+	private readonly _fogCenter = new THREE.Vector3();
+	private readonly _fogColorTmp = new THREE.Color();
 	/** Snapshot while edit/map mode disables fog so top view stays readable. */
 	private editFogBackup: {
 		density: number;
 		bg: THREE.Color;
 		volVisible: boolean;
+		passEnabled: boolean;
 	} | null = null;
 	/** Day/night state while editing — editor uses fixed noon; peers keep their own cycle. */
 	private editDayNightBackup: { auto: boolean; hour: number } | null = null;
@@ -300,7 +382,7 @@ export class FluffyGrass {
 		this.scene.add(this.customWorldGroup);
 		this.newWorldGroup.visible = false;
 		this.customWorldGroup.visible = false;
-		this.loadCustomWorldDefs();
+		purgeLegacyWorldStorage();
 
 		this.audioListener = new THREE.AudioListener();
 		this.camera.add(this.audioListener);
@@ -326,6 +408,13 @@ export class FluffyGrass {
 		this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 		this.scene.frustumCulled = true;
 
+		this.volumetricFogPass = new VolumetricFogPass();
+		this.volumetricFogPass.setSize(
+			window.innerWidth * this.renderer.getPixelRatio(),
+			window.innerHeight * this.renderer.getPixelRatio()
+		);
+		this.volumetricFogPass.setQuality(this.graphicsQuality);
+
 		this.grassMaterial = new GrassMaterial();
 		this.terrainMat = new THREE.MeshPhongMaterial({
 			color: this.sceneProps.terrainColor,
@@ -340,6 +429,7 @@ export class FluffyGrass {
 		this.setupTextures();
 		this.setupEventListeners();
 		this.setupInteractionUI();
+		this.healthHud = new HealthHud();
 		this.orientationGate = createOrientationGate();
 		this.dayNight = createDayNightCycle(this.scene, { shadowExtent: 90 });
 		this.dayNight.auto = this.dayNightGui.auto;
@@ -355,14 +445,25 @@ export class FluffyGrass {
 		this.explosionSystem = new ExplosionSystem();
 		this.scene.add(this.explosionSystem.mesh);
 
+		this.bulletSystem = new BulletSystem();
+		this.scene.add(this.bulletSystem.group);
+		this.bulletSystem.getGroundY = (x, z) => getWorldTerrainY(x, z);
+
+		this.treeManager = new TreeInstancedMesh(this.loadingManager);
+
 		this.initializationPromise = (async () => {
+			await this.treeManager.initialize();
+			this.worldGroup.add(this.treeManager.group);
+
 			await initPhysics();
 			await this.buildIslandWorld();
 			await this.setupCar();
 			await this.setupHuman();
 
-			// Initialize Volumetric Fog
-			this.volumetricFog = new VolumetricFogSystem(300);
+			// Billboard fog kept only as a Low-quality fallback (hidden when the
+			// screen-space volumetric pass is active).
+			this.volumetricFog = new VolumetricFogSystem(180);
+			this.volumetricFog.group.visible = false;
 			this.scene.add(this.volumetricFog.group);
 
 			await this.createLobbyModels();
@@ -388,6 +489,8 @@ export class FluffyGrass {
 				this.userData = user;
 				this.isGameActive = true;
 				this.settings.show();
+				this.healthHud?.setVisible(true);
+				this.healthHud?.setHp(this.localHp);
 				if (this.carInput) this.carInput.isEnabled = this.activePlayer === "car";
 				if (this.humanInput) {
 					this.humanInput.isEnabled = this.activePlayer === "human";
@@ -432,6 +535,7 @@ export class FluffyGrass {
 				onUserChanged: (user) => {
 					this.userData = user;
 					this.editMode?.onAuthChanged();
+					void this.refreshSavedWorldList();
 				},
 				onHost: () => this.connectSocket("host"),
 				onJoin: () => this.fetchRooms(),
@@ -442,6 +546,7 @@ export class FluffyGrass {
 			const restoredUser = await this.authService.restoreSession();
 			this.userData = restoredUser;
 			this.gameNavigation.setUser(restoredUser);
+			void this.refreshSavedWorldList();
 
 			this.loadingScreenController = new LoadingScreenController({
 				auth: this.authService,
@@ -450,6 +555,7 @@ export class FluffyGrass {
 					this.userData = user;
 					this.gameNavigation?.setUser(user);
 					this.editMode?.onAuthChanged();
+					void this.refreshSavedWorldList();
 				},
 			});
 			this.loadingScreenController.initialize();
@@ -510,338 +616,560 @@ export class FluffyGrass {
 		this.socket = io(SERVER_URL, {
 			transports: ["websocket"],
 			upgrade: false
-		  });
+		});
 		this.editMode?.attachSocket(this.socket);
 
-			this.socket.on("room-updated", (players: any[]) => {
-				for (let i = 0; i < 4; i++) {
-					const slot = document.querySelector(`#player-slot-${i} .slot-content`);
-					if (slot) {
-						if (i < players.length) {
-							slot.textContent = players[i].user.username;
-							slot.classList.remove("empty");
-							slot.classList.add("filled");
-							if (this.lobbyModels[i]) this.lobbyModels[i].visible = !this.isGameActive;
-						} else {
-							slot.textContent = "Waiting...";
-							slot.classList.remove("filled");
-							slot.classList.add("empty");
-							if (this.lobbyModels[i]) this.lobbyModels[i].visible = false;
-						}
-					}
-				}
-
-				// Enable Start Game if host and >= 2 players
-				const startBtn = document.getElementById("start-game-btn") as HTMLButtonElement;
-				if (startBtn && this.socket?.id === players[0]?.socketId) {
-					if (players.length >= 2) {
-						startBtn.disabled = false;
-						startBtn.textContent = "Start Game";
+		this.socket.on("room-updated", (players: any[]) => {
+			for (let i = 0; i < 4; i++) {
+				const slot = document.querySelector(`#player-slot-${i} .slot-content`);
+				if (slot) {
+					if (i < players.length) {
+						slot.textContent = players[i].user.username;
+						slot.classList.remove("empty");
+						slot.classList.add("filled");
+						if (this.lobbyModels[i]) this.lobbyModels[i].visible = !this.isGameActive;
 					} else {
-						startBtn.disabled = true;
-						startBtn.textContent = "Waiting for players...";
+						slot.textContent = "Waiting...";
+						slot.classList.remove("filled");
+						slot.classList.add("empty");
+						if (this.lobbyModels[i]) this.lobbyModels[i].visible = false;
 					}
 				}
-			});
+			}
 
-			this.socket.on("host-migrated", (newHostId: string) => {
-				if (newHostId === this.socket?.id) {
-					const startBtn = document.getElementById("start-game-btn");
-					if (startBtn) startBtn.style.display = "block";
+			// Enable Start Game if host and >= 2 players
+			const startBtn = document.getElementById("start-game-btn") as HTMLButtonElement;
+			if (startBtn && this.socket?.id === players[0]?.socketId) {
+				if (players.length >= 2) {
+					startBtn.disabled = false;
+					startBtn.textContent = "Start Game";
+				} else {
+					startBtn.disabled = true;
+					startBtn.textContent = "Waiting for players...";
 				}
-			});
+			}
+		});
 
-			this.socket.on("room-closed", () => {
-				this.roomCode = "";
-				for (const [id, rp] of this.remotePlayers.entries()) {
-					if (rp.carGroup) this.scene.remove(rp.carGroup);
-					if (rp.humanGroup) this.scene.remove(rp.humanGroup);
-					if (rp.carBody) getWorld().removeRigidBody(rp.carBody);
-					if (rp.humanBody) getWorld().removeRigidBody(rp.humanBody);
-					if (rp.engineSound) rp.engineSound.dispose();
-					if (rp.hornSound) rp.hornSound.stop();
-				}
-				this.remotePlayers.clear();
-			});
+		this.socket.on("host-migrated", (newHostId: string) => {
+			if (newHostId === this.socket?.id) {
+				const startBtn = document.getElementById("start-game-btn");
+				if (startBtn) startBtn.style.display = "block";
+			}
+		});
 
-			this.socket.on("player-left", (socketId: string) => {
-				const rp = this.remotePlayers.get(socketId);
-				if (rp) {
-					if (rp.carGroup) this.scene.remove(rp.carGroup);
-					if (rp.humanGroup) this.scene.remove(rp.humanGroup);
-					if (rp.engineSound) rp.engineSound.dispose();
-					if (rp.hornSound) rp.hornSound.stop();
-					this.remotePlayers.delete(socketId);
-				}
-			});
+		this.socket.on("room-closed", () => {
+			this.roomCode = "";
+			for (const [id, rp] of this.remotePlayers.entries()) {
+				if (rp.carGroup) this.scene.remove(rp.carGroup);
+				if (rp.humanGroup) this.scene.remove(rp.humanGroup);
+				if (rp.carBody) getWorld().removeRigidBody(rp.carBody);
+				if (rp.humanBody) getWorld().removeRigidBody(rp.humanBody);
+				if (rp.engineSound) rp.engineSound.dispose();
+				if (rp.hornSound) rp.hornSound.stop();
+			}
+			this.remotePlayers.clear();
+		});
 
-			this.socket.on("game-started", (players: any[]) => {
-				if (players) {
-					const idx = players.findIndex(p => p.socketId === this.socket?.id);
-					if (idx !== -1) this.mySlotIndex = idx;
-				}
-				document.getElementById("lobby-panel")!.style.display = "none";
-				const proceedPlay = (window as any).proceedPlayFn; // We will attach proceed to window in start()
-				if (proceedPlay) {
-					proceedPlay("play", this.userData);
-				}
-			});
-
-			this.socket.on("bomb-picked-up", (data: any) => {
-				const { socketId, bombId } = data;
-				const rp = this.remotePlayers.get(socketId);
-				const bombData = this.bombs.find(b => b.id === bombId);
-
-				if (rp && rp.loaded && bombData) {
-					bombData.isFlying = false;
-					// Remove physics body
-					if (bombData.body) {
-						getWorld().removeRigidBody(bombData.body);
-						bombData.body = null;
-					}
-
-					let hand: THREE.Object3D | null = null;
-					rp.humanGroup.traverse((child: any) => {
-						if (child.name.toLowerCase().includes("righthand") && !hand) hand = child;
-					});
-
-					if (hand) {
-						bombData.mesh.position.set(0, 0.1, 0);
-						hand.add(bombData.mesh);
-					} else {
-						bombData.mesh.position.set(0, 0.5, 0.5);
-						rp.humanGroup.add(bombData.mesh);
-					}
-				}
-			});
-
-			this.socket.on("bomb-thrown", (data: any) => {
-				const { bombId, position, velocity } = data;
-				const bombData = this.bombs.find(b => b.id === bombId);
-
-				if (bombData) {
-					// Add back to scene
-					this.scene.add(bombData.mesh);
-					bombData.mesh.position.set(position.x, position.y, position.z);
-
-					// Recreate physics
-					const rbDesc = RAPIER.RigidBodyDesc.dynamic()
-						.setTranslation(position.x, position.y, position.z)
-						.setLinearDamping(0.1)
-						.setAngularDamping(0.5);
-					const body = getWorld().createRigidBody(rbDesc);
-
-					const colDesc = RAPIER.ColliderDesc.ball(0.5).setMass(10);
-					getWorld().createCollider(colDesc, body);
-
-					bombData.body = body;
-					bombData.isFlying = true;
-					bombData.flightTime = 0;
-					body.applyImpulse(velocity, true);
-
-					BombSound.playThrowSound(bombData.mesh.position);
-				}
-			});
-
-			this.socket.on("player-picked-up", (data: any) => {
-				const { socketId, targetSocketId } = data;
-				if (targetSocketId === this.socket?.id) {
-					// We are being carried!
-					this.isBeingCarriedBy = socketId;
-				}
-				
-				// Update remote player state
-				const carrier = this.remotePlayers.get(socketId);
-				if (carrier) carrier.isCarryingPlayer = true;
-				
-				const target = this.remotePlayers.get(targetSocketId);
-				if (target) target.isBeingCarried = true;
-			});
-
-			this.socket.on("player-thrown", (data: any) => {
-				const { socketId, targetSocketId, position, velocity } = data;
-				if (targetSocketId === this.socket?.id) {
-					// We were thrown!
-					this.isBeingCarriedBy = null;
-					if (this.human && this.humanInput) {
-						this.human.body.setTranslation(position, true);
-						this.humanInput.applyKnockback(new THREE.Vector3(velocity.x, velocity.y, velocity.z));
-						this.humanInput.startRecoverySequence();
-					}
-				}
-				
-				// Update remote player state
-				const carrier = this.remotePlayers.get(socketId);
-				if (carrier) carrier.isCarryingPlayer = false;
-				
-				const target = this.remotePlayers.get(targetSocketId);
-				if (target) target.isBeingCarried = false;
-			});
-
-			this.socket.on("player-state-updated", async (data: any) => {
-				const { socketId, state } = data;
-
-				// Ensure remote player object exists
-				let rp = this.remotePlayers.get(socketId);
-				if (!rp) {
-					// Async load the remote models
-					rp = {
-						loaded: false,
-						targetHumanPosition: new THREE.Vector3(),
-						targetHumanQuaternion: new THREE.Quaternion(),
-						targetCarPosition: new THREE.Vector3(),
-						targetCarQuaternion: new THREE.Quaternion()
-					};
-					this.remotePlayers.set(socketId, rp);
-
-					const humanGltf = await this.loadGltfFull("/poutine.glb");
-					const humanGroup = humanGltf.scene;
-					humanGroup.scale.setScalar(this.sceneProps.humanScale);
-					this.scene.add(humanGroup);
-
-					const mixer = new THREE.AnimationMixer(humanGroup);
-					const animations = new Map<string, THREE.AnimationAction>();
-					humanGltf.animations.forEach((clip: any) => {
-						const nameLower = clip.name.toLowerCase();
-						if (nameLower.includes("walk") || nameLower.includes("run")) {
-							clip.tracks.forEach((track: any) => {
-								if (track.name.toLowerCase().includes(".position")) {
-									const values = track.values;
-									const startX = values[0];
-									const startZ = values[2];
-									for (let i = 0; i < values.length; i += 3) {
-										values[i] = startX;
-										values[i + 2] = startZ;
-									}
-								}
-							});
-						}
-						const action = mixer.clipAction(clip);
-						if (nameLower === "being carried" || nameLower === "fall down" || nameLower === "sit to stand" || nameLower === "sweep fall" || nameLower === "stand to sit") {
-							action.setLoop(THREE.LoopOnce, 1);
-							action.clampWhenFinished = true;
-						} else {
-							action.setLoop(THREE.LoopRepeat, Infinity);
-						}
-						animations.set(nameLower, action);
-					});
-
-					const layout = await loadKenneySuvVisual(CAR_CONFIG.colliderYOffset, this.loadingManager);
-					const carGroup = new THREE.Group();
-					carGroup.add(layout.body);
-					layout.physicsWheelPositions.forEach(pos => {
-						const wheel = layout.wheelTemplate.clone();
-						wheel.position.set(pos[0], pos[1], pos[2]);
-						carGroup.add(wheel);
-					});
-					this.scene.add(carGroup);
-
-					// Create Kinematic Physics Bodies
-					const humanRadius = 0.45;
-					const humanHalfHeight = 1.5;
-					const humanDesc = RAPIER.RigidBodyDesc.kinematicPositionBased();
-					const humanBody = getWorld().createRigidBody(humanDesc);
-					const humanCollider = RAPIER.ColliderDesc.capsule(humanHalfHeight, humanRadius)
-						.setTranslation(0, HumanEntity.MESH_Y_OFFSET, 0); // Offset upwards from feet
-					getWorld().createCollider(humanCollider, humanBody);
-
-					const hx = Math.max(0.1, (layout.chassisSize.x / 2) - CAR_CONFIG.colliderRoundness);
-					const hy = layout.chassisSize.y / 2;
-					const hz = Math.max(0.1, (layout.chassisSize.z / 2) - CAR_CONFIG.colliderRoundness);
-					const colliderHy = Math.max(0.1, (hy * CAR_CONFIG.colliderHeightScale) - CAR_CONFIG.colliderRoundness);
-					const colliderLocalY = CAR_CONFIG.colliderYOffset + hy * CAR_CONFIG.colliderLocalYFactor;
-
-					const carDesc = RAPIER.RigidBodyDesc.kinematicPositionBased();
-					const carBody = getWorld().createRigidBody(carDesc);
-					const carCollider = RAPIER.ColliderDesc.roundCuboid(hx, colliderHy, hz, CAR_CONFIG.colliderRoundness)
-						.setTranslation(0, colliderLocalY, 0);
-					getWorld().createCollider(carCollider, carBody);
-
-					rp.loaded = true;
-					rp.humanGroup = humanGroup;
-					rp.carGroup = carGroup;
-					rp.humanBody = humanBody;
-					rp.carBody = carBody;
-					rp.mixer = mixer;
-					rp.animations = animations;
-					rp.currentAction = null;
-
-					// Avoid overwriting if they disconnected while loading
-					if (!this.remotePlayers.has(socketId)) {
-						this.scene.remove(humanGroup);
-						this.scene.remove(carGroup);
-						getWorld().removeRigidBody(humanBody);
-						getWorld().removeRigidBody(carBody);
-						return;
-					}
-				}
-
-				if (!rp.loaded) return;
-
-				// Apply State Target
-				if (state.humanPosition) {
-					rp.targetHumanPosition.set(state.humanPosition.x, state.humanPosition.y, state.humanPosition.z);
-					rp.targetHumanQuaternion.set(state.humanQuaternion.x, state.humanQuaternion.y, state.humanQuaternion.z, state.humanQuaternion.w);
-				}
-				if (state.carPosition) {
-					rp.targetCarPosition.set(state.carPosition.x, state.carPosition.y, state.carPosition.z);
-					rp.targetCarQuaternion.set(state.carQuaternion.x, state.carQuaternion.y, state.carQuaternion.z, state.carQuaternion.w);
-				}
-
-				if (!rp.engineSound) {
-					rp.engineSound = new EngineSound(true);
-					rp.engineSound.init();
-				}
-				if (!rp.hornSound) {
-					rp.hornSound = new HornSound();
-				}
-
-				if (state.honking && !rp.hornSound.isPlaying) {
-					rp.hornSound.play();
-				} else if (!state.honking && rp.hornSound.isPlaying) {
-					rp.hornSound.stop();
-				}
-
-				rp.benchSeat =
-					state.benchSeat === 0 || state.benchSeat === 1 ? state.benchSeat : null;
-
-				if (state.activeEntity === "human") {
-					rp.carGroup.visible = true; // Wait, actually should carGroup be true here? Yes, if they left it. But humanGroup should be true too!
-					rp.humanGroup.visible = true;
-					rp.engineSound.update(0, 0, rp.carGroup.position);
-
-					// Handle Animation
-					if (rp.isBeingCarried && rp.animations.has("being carried")) {
-						if (rp.currentAction !== rp.animations.get("being carried")) {
-							if (rp.currentAction) rp.currentAction.fadeOut(0.2);
-							rp.currentAction = rp.animations.get("being carried");
-							rp.currentAction!.reset().fadeIn(0.2).play();
-						}
-					} else if (state.animation && rp.animations.has(state.animation)) {
-						if (rp.currentAction !== rp.animations.get(state.animation)) {
-							if (rp.currentAction) rp.currentAction.fadeOut(0.2);
-							rp.currentAction = rp.animations.get(state.animation);
-							rp.currentAction!.reset().fadeIn(0.2).play();
-						}
-					}
-				} else if (state.activeEntity === "car") {
-					rp.humanGroup.visible = false;
-					rp.carGroup.visible = true;
-					rp.engineSound.update(state.speed || 0, state.throttle || 0, rp.carGroup.position);
-				}
-			});
-
-			this.socket.on("user-disconnected", (socketId: string) => {
-				const rp = this.remotePlayers.get(socketId);
-				if (rp && rp.loaded) {
-					this.scene.remove(rp.humanGroup!);
-					this.scene.remove(rp.carGroup!);
-					if (rp.carBody) getWorld().removeRigidBody(rp.carBody);
-					if (rp.humanBody) getWorld().removeRigidBody(rp.humanBody);
-					if (rp.engineSound) rp.engineSound.dispose();
-				}
+		this.socket.on("player-left", (socketId: string) => {
+			const rp = this.remotePlayers.get(socketId);
+			if (rp) {
+				if (rp.carGroup) this.scene.remove(rp.carGroup);
+				if (rp.humanGroup) this.scene.remove(rp.humanGroup);
+				if (rp.engineSound) rp.engineSound.dispose();
+				if (rp.hornSound) rp.hornSound.stop();
 				this.remotePlayers.delete(socketId);
-			});
+			}
+		});
+
+		this.socket.on("game-started", (players: any[]) => {
+			if (players) {
+				const idx = players.findIndex(p => p.socketId === this.socket?.id);
+				if (idx !== -1) this.mySlotIndex = idx;
+			}
+			document.getElementById("lobby-panel")!.style.display = "none";
+			const proceedPlay = (window as any).proceedPlayFn; // We will attach proceed to window in start()
+			if (proceedPlay) {
+				proceedPlay("play", this.userData);
+			}
+		});
+
+		this.socket.on("bomb-picked-up", (data: any) => {
+			const { socketId, bombId } = data;
+			const rp = this.remotePlayers.get(socketId);
+			const bombData = this.bombs.find(b => b.id === bombId);
+
+			if (rp && rp.loaded && bombData) {
+				bombData.isFlying = false;
+				// Remove physics body
+				if (bombData.body) {
+					getWorld().removeRigidBody(bombData.body);
+					bombData.body = null;
+				}
+
+				let hand: THREE.Object3D | null = null;
+				rp.humanGroup.traverse((child: any) => {
+					if (child.name.toLowerCase().includes("righthand") && !hand) hand = child;
+				});
+
+				if (hand) {
+					bombData.mesh.position.set(0, 0.1, 0);
+					hand.add(bombData.mesh);
+				} else {
+					bombData.mesh.position.set(0, 0.5, 0.5);
+					rp.humanGroup.add(bombData.mesh);
+				}
+			}
+		});
+
+		this.socket.on("bomb-thrown", (data: any) => {
+			const { bombId, position, velocity } = data;
+			const bombData = this.bombs.find(b => b.id === bombId);
+
+			if (bombData) {
+				// Add back to scene
+				this.scene.add(bombData.mesh);
+				bombData.mesh.position.set(position.x, position.y, position.z);
+
+				// Recreate physics
+				const rbDesc = RAPIER.RigidBodyDesc.dynamic()
+					.setTranslation(position.x, position.y, position.z)
+					.setLinearDamping(0.1)
+					.setAngularDamping(0.5);
+				const body = getWorld().createRigidBody(rbDesc);
+
+				const colDesc = RAPIER.ColliderDesc.ball(0.5).setMass(10);
+				getWorld().createCollider(colDesc, body);
+
+				bombData.body = body;
+				bombData.isFlying = true;
+				bombData.flightTime = 0;
+				body.applyImpulse(velocity, true);
+
+				BombSound.playThrowSound(bombData.mesh.position);
+			}
+		});
+
+		this.socket.on("player-picked-up", (data: any) => {
+			const { socketId, targetSocketId } = data;
+			if (targetSocketId === this.socket?.id) {
+				// We are being carried!
+				this.isBeingCarriedBy = socketId;
+			}
+
+			// Update remote player state
+			const carrier = this.remotePlayers.get(socketId);
+			if (carrier) carrier.isCarryingPlayer = true;
+
+			const target = this.remotePlayers.get(targetSocketId);
+			if (target) target.isBeingCarried = true;
+		});
+
+		this.socket.on("player-thrown", (data: any) => {
+			const { socketId, targetSocketId, position, velocity } = data;
+			if (targetSocketId === this.socket?.id) {
+				// We were thrown!
+				this.isBeingCarriedBy = null;
+				if (this.human && this.humanInput) {
+					this.human.body.setTranslation(position, true);
+					this.humanInput.applyKnockback(new THREE.Vector3(velocity.x, velocity.y, velocity.z));
+					this.humanInput.startRecoverySequence();
+				}
+			}
+
+			// Update remote player state
+			const carrier = this.remotePlayers.get(socketId);
+			if (carrier) carrier.isCarryingPlayer = false;
+
+			const target = this.remotePlayers.get(targetSocketId);
+			if (target) target.isBeingCarried = false;
+		});
+
+		this.socket.on("player-hit", (data: any) => {
+			const { targetSocketId, hitZone } = data;
+			const reaction: HitReaction =
+				hitZone === "uppercut" || hitZone === "sweep" || hitZone === "side"
+					? hitZone
+					: hitZone === "head"
+						? "uppercut"
+						: "side";
+			const animName = hitReactionAnimName(reaction);
+
+			// Local player was hit — play reaction (syncs out via player-state)
+			if (targetSocketId === this.socket?.id) {
+				if (this.localDead) return;
+				this.humanInput?.applyHitReaction(reaction);
+				return;
+			}
+
+			// Eagerly play on the remote victim for snappier feedback
+			const rp = this.remotePlayers.get(targetSocketId);
+			if (!rp?.loaded || !rp.animations || rp.dead) return;
+			const action = [...rp.animations.entries()].find(
+				([name]) => name === animName || name.includes(animName)
+			)?.[1];
+			if (!action) return;
+			if (rp.currentAction !== action) {
+				if (rp.currentAction) rp.currentAction.fadeOut(0.15);
+				action.reset().setLoop(THREE.LoopOnce, 1);
+				action.clampWhenFinished = true;
+				action.fadeIn(0.15).play();
+				rp.currentAction = action;
+			}
+		});
+
+		this.socket.on("player-damage", (data: any) => {
+			const { targetSocketId, part, damage, socketId: attackerId } = data;
+			const hitPart: GunHitPart = part === "head" ? "head" : "body";
+			const dmg =
+				typeof damage === "number" ? damage : damageForPart(hitPart);
+
+			if (targetSocketId === this.socket?.id) {
+				this.applyLocalDamage(hitPart, dmg, attackerId);
+			} else {
+				// Optimistic remote HP (no flinch anim on gun hits)
+				const rp = this.remotePlayers.get(targetSocketId);
+				if (rp && !rp.dead) {
+					rp.hp = Math.max(0, (rp.hp ?? PLAYER_MAX_HP) - dmg);
+				}
+			}
+
+			// Every client sees a tracer into the victim's local body (matches HP sync)
+			if (attackerId && targetSocketId) {
+				this.spawnSyncedHitTracer(attackerId, targetSocketId, hitPart);
+			}
+		});
+
+		this.socket.on("player-died", (data: any) => {
+			const { socketId, cause, position, animation } = data;
+			if (socketId === this.socket?.id) return;
+			const rp = this.remotePlayers.get(socketId);
+			if (!rp?.loaded || !rp.humanGroup) return;
+			rp.dead = true;
+			rp.hp = 0;
+			if (position) {
+				rp.targetHumanPosition.set(position.x, position.y, position.z);
+				rp.humanGroup.position.copy(rp.targetHumanPosition);
+			}
+			const anim =
+				animation ||
+				(cause === "bomb" ? "fall down" : "dying");
+			if (rp.animations) {
+				const action = [...rp.animations.entries()].find(
+					([name]) => name === anim || name.includes(anim)
+				)?.[1];
+				if (action) {
+					if (rp.currentAction) rp.currentAction.fadeOut(0.1);
+					action.reset().setLoop(THREE.LoopOnce, 1);
+					action.clampWhenFinished = true;
+					action.fadeIn(0.1).play();
+					rp.currentAction = action;
+				}
+			}
+		});
+
+		this.socket.on("player-respawned", (data: any) => {
+			const { socketId, position, hp } = data;
+			if (socketId === this.socket?.id) return;
+			const rp = this.remotePlayers.get(socketId);
+			if (!rp?.loaded || !rp.humanGroup || !position) return;
+			rp.dead = false;
+			rp.hp = typeof hp === "number" ? hp : PLAYER_MAX_HP;
+			rp.targetHumanPosition.set(position.x, position.y, position.z);
+			rp.humanGroup.position.copy(rp.targetHumanPosition);
+			if (rp.humanBody) {
+				rp.humanBody.setNextKinematicTranslation({
+					x: position.x,
+					y: position.y + HumanEntity.MESH_Y_OFFSET,
+					z: position.z,
+				});
+			}
+			if (rp.animations?.has("idle")) {
+				const idle = rp.animations.get("idle")!;
+				if (rp.currentAction) rp.currentAction.fadeOut(0.15);
+				idle.reset().fadeIn(0.15).play();
+				rp.currentAction = idle;
+			}
+		});
+
+		this.socket.on("bomb-blast", (data: any) => {
+			const { bombId, position, socketId } = data;
+			if (socketId === this.socket?.id) return; // we already detonated locally
+			if (typeof bombId === "number" && this.detonatingBombIds.has(bombId)) {
+				return;
+			}
+			const blastPos = new THREE.Vector3(
+				position.x,
+				position.y,
+				position.z
+			);
+			this.applyRemoteBombBlast(bombId, blastPos);
+		});
+
+		this.socket.on("gun-shot", (data: any) => {
+			const { socketId, origin, direction, targetId } = data;
+			if (socketId === this.socket?.id) return;
+			if (!origin || !direction || !this.bulletSystem) return;
+			const ox = Number(origin.x);
+			const oy = Number(origin.y);
+			const oz = Number(origin.z);
+			const dx = Number(direction.x);
+			const dy = Number(direction.y);
+			const dz = Number(direction.z);
+			if (![ox, oy, oz, dx, dy, dz].every((n) => Number.isFinite(n))) return;
+
+			this._shotOrigin.set(ox, oy, oz);
+			this._shotDir.set(dx, dy, dz).normalize();
+			this.spawnRemoteGunTracer(
+				socketId,
+				this._shotOrigin,
+				this._shotDir,
+				typeof targetId === "string" ? targetId : null
+			);
+		});
+
+		this.socket.on("player-reposition", (data: any) => {
+			const { socketId, position, quaternion, animation } = data;
+			if (socketId === this.socket?.id) return;
+			const rp = this.remotePlayers.get(socketId);
+			if (!rp?.loaded || !rp.humanGroup || !position) return;
+
+			// Snap remote to baked post-hit position (skip lerp lag)
+			rp.targetHumanPosition.set(position.x, position.y, position.z);
+			rp.humanGroup.position.set(position.x, position.y, position.z);
+			if (quaternion) {
+				rp.targetHumanQuaternion.set(
+					quaternion.x,
+					quaternion.y,
+					quaternion.z,
+					quaternion.w
+				);
+				rp.humanGroup.quaternion.copy(rp.targetHumanQuaternion);
+			}
+			if (rp.humanBody) {
+				rp.humanBody.setNextKinematicTranslation(rp.humanGroup.position);
+				rp.humanBody.setNextKinematicRotation(rp.humanGroup.quaternion);
+			}
+
+			if (animation && rp.animations) {
+				const action = [...rp.animations.entries()].find(
+					([name]) => name === animation || name.includes(animation)
+				)?.[1];
+				if (action && rp.currentAction !== action) {
+					if (rp.currentAction) rp.currentAction.fadeOut(0.15);
+					const once =
+						animation.includes("sit to stand") ||
+						animation.includes("sweep") ||
+						animation.includes("uppercut") ||
+						animation.includes("hit on side") ||
+						animation.includes("dying") ||
+						animation.includes("fall down");
+					if (once) {
+						action.reset().setLoop(THREE.LoopOnce, 1);
+						action.clampWhenFinished = true;
+					} else {
+						action.reset().setLoop(THREE.LoopRepeat, Infinity);
+					}
+					action.fadeIn(0.15).play();
+					rp.currentAction = action;
+				}
+			}
+		});
+
+		this.socket.on("player-state-updated", async (data: any) => {
+			const { socketId, state } = data;
+
+			// Ensure remote player object exists
+			let rp = this.remotePlayers.get(socketId);
+			if (!rp) {
+				// Async load the remote models
+				rp = {
+					loaded: false,
+					targetHumanPosition: new THREE.Vector3(),
+					targetHumanQuaternion: new THREE.Quaternion(),
+					targetCarPosition: new THREE.Vector3(),
+					targetCarQuaternion: new THREE.Quaternion(),
+					hp: PLAYER_MAX_HP,
+					dead: false,
+				};
+				this.remotePlayers.set(socketId, rp);
+
+				const humanGltf = await this.loadGltfFull("/poutine.glb");
+				const humanGroup = humanGltf.scene;
+				humanGroup.scale.setScalar(this.sceneProps.humanScale);
+				this.scene.add(humanGroup);
+
+				const mixer = new THREE.AnimationMixer(humanGroup);
+				const animations = new Map<string, THREE.AnimationAction>();
+				humanGltf.animations.forEach((clip: any) => {
+					const nameLower = clip.name.toLowerCase();
+					if (nameLower.includes("walk") || nameLower.includes("run")) {
+						stripRootMotion(clip);
+					}
+					const action = mixer.clipAction(clip);
+					if (
+						nameLower === "being carried" ||
+						nameLower === "fall down" ||
+						nameLower === "sit to stand" ||
+						nameLower === "sweep fall" ||
+						nameLower === "stand to sit" ||
+						nameLower.includes("receiving an uppercut") ||
+						nameLower.includes("hit on side of body") ||
+						nameLower === "punch one" ||
+						nameLower === "drop kick" ||
+						nameLower === "dying" ||
+						nameLower.includes("dying")
+					) {
+						action.setLoop(THREE.LoopOnce, 1);
+						action.clampWhenFinished = true;
+					} else {
+						action.setLoop(THREE.LoopRepeat, Infinity);
+					}
+					animations.set(nameLower, action);
+				});
+
+				const layout = await loadKenneySuvVisual(CAR_CONFIG.colliderYOffset, this.loadingManager);
+				const carGroup = new THREE.Group();
+				carGroup.add(layout.body);
+				layout.physicsWheelPositions.forEach(pos => {
+					const wheel = layout.wheelTemplate.clone();
+					wheel.position.set(pos[0], pos[1], pos[2]);
+					carGroup.add(wheel);
+				});
+				this.scene.add(carGroup);
+
+				// Create Kinematic Physics Bodies
+				const humanRadius = 0.45;
+				const humanHalfHeight = 1.5;
+				const humanDesc = RAPIER.RigidBodyDesc.kinematicPositionBased();
+				const humanBody = getWorld().createRigidBody(humanDesc);
+				const humanCollider = RAPIER.ColliderDesc.capsule(humanHalfHeight, humanRadius)
+					.setTranslation(0, HumanEntity.MESH_Y_OFFSET, 0); // Offset upwards from feet
+				getWorld().createCollider(humanCollider, humanBody);
+
+				const hx = Math.max(0.1, (layout.chassisSize.x / 2) - CAR_CONFIG.colliderRoundness);
+				const hy = layout.chassisSize.y / 2;
+				const hz = Math.max(0.1, (layout.chassisSize.z / 2) - CAR_CONFIG.colliderRoundness);
+				const colliderHy = Math.max(0.1, (hy * CAR_CONFIG.colliderHeightScale) - CAR_CONFIG.colliderRoundness);
+				const colliderLocalY = CAR_CONFIG.colliderYOffset + hy * CAR_CONFIG.colliderLocalYFactor;
+
+				const carDesc = RAPIER.RigidBodyDesc.kinematicPositionBased();
+				const carBody = getWorld().createRigidBody(carDesc);
+				const carCollider = RAPIER.ColliderDesc.roundCuboid(hx, colliderHy, hz, CAR_CONFIG.colliderRoundness)
+					.setTranslation(0, colliderLocalY, 0);
+				getWorld().createCollider(carCollider, carBody);
+
+				rp.loaded = true;
+				rp.humanGroup = humanGroup;
+				rp.carGroup = carGroup;
+				rp.humanBody = humanBody;
+				rp.carBody = carBody;
+				rp.mixer = mixer;
+				rp.animations = animations;
+				rp.currentAction = null;
+				rp.combatBones = findCombatBones(humanGroup);
+
+				// Avoid overwriting if they disconnected while loading
+				if (!this.remotePlayers.has(socketId)) {
+					this.scene.remove(humanGroup);
+					this.scene.remove(carGroup);
+					getWorld().removeRigidBody(humanBody);
+					getWorld().removeRigidBody(carBody);
+					return;
+				}
+			}
+
+			if (!rp.loaded) return;
+
+			// Apply State Target
+			if (state.humanPosition) {
+				rp.targetHumanPosition.set(state.humanPosition.x, state.humanPosition.y, state.humanPosition.z);
+				rp.targetHumanQuaternion.set(state.humanQuaternion.x, state.humanQuaternion.y, state.humanQuaternion.z, state.humanQuaternion.w);
+			}
+			if (state.carPosition) {
+				rp.targetCarPosition.set(state.carPosition.x, state.carPosition.y, state.carPosition.z);
+				rp.targetCarQuaternion.set(state.carQuaternion.x, state.carQuaternion.y, state.carQuaternion.z, state.carQuaternion.w);
+			}
+
+			if (!rp.engineSound) {
+				rp.engineSound = new EngineSound(true);
+				rp.engineSound.init();
+			}
+			if (!rp.hornSound) {
+				rp.hornSound = new HornSound();
+			}
+
+			if (state.honking && !rp.hornSound.isPlaying) {
+				rp.hornSound.play();
+			} else if (!state.honking && rp.hornSound.isPlaying) {
+				rp.hornSound.stop();
+			}
+
+			rp.benchSeat =
+				state.benchSeat === 0 || state.benchSeat === 1 ? state.benchSeat : null;
+
+			if (typeof state.hp === "number") rp.hp = state.hp;
+			if (typeof state.dead === "boolean") rp.dead = state.dead;
+
+			if (state.activeEntity === "human") {
+				rp.carGroup.visible = true; // Wait, actually should carGroup be true here? Yes, if they left it. But humanGroup should be true too!
+				rp.humanGroup.visible = true;
+				rp.engineSound.update(0, 0, rp.carGroup.position, true);
+
+				// Handle Animation
+				if (rp.isBeingCarried && rp.animations.has("being carried")) {
+					if (rp.currentAction !== rp.animations.get("being carried")) {
+						if (rp.currentAction) rp.currentAction.fadeOut(0.2);
+						rp.currentAction = rp.animations.get("being carried");
+						rp.currentAction!.reset().fadeIn(0.2).play();
+					}
+				} else if (state.animation && rp.animations.has(state.animation)) {
+					if (rp.currentAction !== rp.animations.get(state.animation)) {
+						if (rp.currentAction) rp.currentAction.fadeOut(0.2);
+						const next = rp.animations.get(state.animation)!;
+						const anim = String(state.animation).toLowerCase();
+						const once =
+							anim.includes("dying") ||
+							anim.includes("fall down") ||
+							anim.includes("sit to stand") ||
+							anim.includes("sweep") ||
+							anim.includes("uppercut") ||
+							anim.includes("hit on side") ||
+							anim.includes("punch") ||
+							anim.includes("drop kick");
+						next.reset();
+						if (once) {
+							next.setLoop(THREE.LoopOnce, 1);
+							next.clampWhenFinished = true;
+						} else {
+							next.setLoop(THREE.LoopRepeat, Infinity);
+							next.clampWhenFinished = false;
+						}
+						next.fadeIn(0.2).play();
+						rp.currentAction = next;
+					}
+				}
+			} else if (state.activeEntity === "car") {
+				rp.humanGroup.visible = false;
+				rp.carGroup.visible = true;
+				rp.engineSound.update(
+					state.speed || 0,
+					state.throttle || 0,
+					rp.carGroup.position
+				);
+			}
+		});
+
+		this.socket.on("user-disconnected", (socketId: string) => {
+			const rp = this.remotePlayers.get(socketId);
+			if (rp && rp.loaded) {
+				this.scene.remove(rp.humanGroup!);
+				this.scene.remove(rp.carGroup!);
+				if (rp.carBody) getWorld().removeRigidBody(rp.carBody);
+				if (rp.humanBody) getWorld().removeRigidBody(rp.humanBody);
+				if (rp.engineSound) rp.engineSound.dispose();
+			}
+			this.remotePlayers.delete(socketId);
+		});
 	}
 
 	private async tryOpenSharedWorldFromUrl() {
@@ -864,7 +1192,7 @@ export class FluffyGrass {
 
 		if (action === "host") {
 			const worldId = this.editMode?.getActiveWorldId() ?? this.activeWorldDef.id;
-			const worldDefinition = this.resolveWorldDefinition(worldId);
+			const worldDefinition = this.knownWorldDefinition(worldId);
 			this.socket!.emit(
 				"create-room",
 				{
@@ -878,6 +1206,7 @@ export class FluffyGrass {
 						this.editMode?.attachSocket(this.socket);
 						void this.editMode?.onRoomWorldBound(res.worldId ?? worldId);
 						this.isGameActive = false;
+						this.healthHud?.setVisible(false);
 						if (lobbyPanel) lobbyPanel.style.display = "flex";
 						if (startBtn) startBtn.style.display = "block";
 						if (loadingScreen) loadingScreen.style.display = "none";
@@ -903,6 +1232,7 @@ export class FluffyGrass {
 							res.worldId ?? this.activeWorldDef.id
 						);
 						this.isGameActive = false;
+						this.healthHud?.setVisible(false);
 						if (lobbyPanel) lobbyPanel.style.display = "flex";
 						if (startBtn) startBtn.style.display = "none";
 						if (loadingScreen) loadingScreen.style.display = "none";
@@ -1141,18 +1471,29 @@ export class FluffyGrass {
 			const spacing = Math.sqrt(1 / ISLAND_GRASS_DENSITY);
 			const fullCount = (size * size) * ISLAND_GRASS_DENSITY;
 			const keepProb = Math.min(1, this.grassCount / Math.max(1, fullCount));
+			const stride = nrows + 1;
+			/**
+			 * Bilinear over the terrain grid. The rendered surface interpolates
+			 * between vertices, so nearest-vertex snapping would sink blades into
+			 * slopes (or float them) by up to half a cell × tan(slope) — metres on
+			 * big worlds, where cells reach ~39 m at the 254-segment cap.
+			 */
 			const sampleH = (x: number, z: number) => {
-				const col = THREE.MathUtils.clamp(
-					Math.round(((x + half) / size) * ncols),
-					0,
-					ncols
-				);
-				const row = THREE.MathUtils.clamp(
-					Math.round(((z + half) / size) * nrows),
-					0,
-					nrows
-				);
-				return heights[row + col * (nrows + 1)]!;
+				const fx = THREE.MathUtils.clamp(((x + half) / size) * ncols, 0, ncols);
+				const fz = THREE.MathUtils.clamp(((z + half) / size) * nrows, 0, nrows);
+				const col0 = Math.floor(fx);
+				const row0 = Math.floor(fz);
+				const col1 = Math.min(col0 + 1, ncols);
+				const row1 = Math.min(row0 + 1, nrows);
+				const tx = fx - col0;
+				const tz = fz - row0;
+				const h00 = heights[row0 + col0 * stride]!;
+				const h10 = heights[row0 + col1 * stride]!;
+				const h01 = heights[row1 + col0 * stride]!;
+				const h11 = heights[row1 + col1 * stride]!;
+				const hRow0 = h00 + (h10 - h00) * tx;
+				const hRow1 = h01 + (h11 - h01) * tx;
+				return hRow0 + (hRow1 - hRow0) * tz;
 			};
 			const sampleN = (x: number, z: number, out: THREE.Vector3) => {
 				const e = Math.max(spacing * 0.5, size / ncols);
@@ -1163,13 +1504,20 @@ export class FluffyGrass {
 				).normalize();
 			};
 
-			for (let gz = -half + spacing * 0.5; gz < half; gz += spacing) {
+			let rowIndex = 0;
+			for (let gz = -half + spacing * 0.5; gz < half; gz += spacing, rowIndex++) {
 				if (matrices.length >= this.grassCount) break;
-				for (let gx = -half + spacing * 0.5; gx < half; gx += spacing) {
+				// Offset every other row by half a cell (hex-style packing). A square
+				// lattice lines blades up in axis-aligned rows, and the seam between
+				// rows reads as a bare stripe on any hillside seen face-on.
+				const rowShift = (rowIndex & 1) * spacing * 0.5;
+				for (let gx = -half + spacing * 0.5 + rowShift; gx < half; gx += spacing) {
 					if (matrices.length >= this.grassCount) break;
 					if (keepProb < 1 && Math.random() > keepProb) continue;
-					const x = gx + (Math.random() - 0.5) * spacing * 0.9;
-					const z = gz + (Math.random() - 0.5) * spacing * 0.9;
+					// Full-cell jitter (stratified). At 0.9 every cell kept a 5%
+					// no-blade margin, and those margins joined up into grid lines.
+					const x = gx + (Math.random() - 0.5) * spacing;
+					const z = gz + (Math.random() - 0.5) * spacing;
 					if (x < -half || x > half || z < -half || z > half) continue;
 					sampleN(x, z, normal);
 					// Only bare on steep slopes (> maxSlopeDeg). Gentle hills keep grass.
@@ -1194,10 +1542,10 @@ export class FluffyGrass {
 					if (steepness < 0.7 && Math.random() > 0.15) continue;
 					const clusterNoise =
 						Math.sin(position.x * 0.4 + position.z * 0.3) *
-							Math.cos(position.z * 0.5 - position.x * 0.2) +
+						Math.cos(position.z * 0.5 - position.x * 0.2) +
 						Math.sin(position.x * 0.8 + 2.1) *
-							Math.cos(position.z * 0.7 + 1.3) *
-							0.5;
+						Math.cos(position.z * 0.7 + 1.3) *
+						0.5;
 					if (clusterNoise < 0.2) continue;
 				} else if (normal.y < minNormalY) {
 					continue;
@@ -1281,7 +1629,7 @@ export class FluffyGrass {
 			let foundGrass = false;
 			grassScene.traverse((child) => {
 				if (child instanceof THREE.Mesh && child.name.includes("LOD00")) {
-					child.geometry.scale(5, 1, 5);
+					child.geometry.scale(10, 10, 10);
 					this.grassGeometry = child.geometry;
 					foundGrass = true;
 				}
@@ -1421,6 +1769,7 @@ export class FluffyGrass {
 			inflate: 0.12,
 			leafLayers: 5,
 			manager: this.loadingManager,
+			useInstancing: false,
 		});
 		this.trees = [tree];
 		this.worldGroup.add(tree.group);
@@ -1515,6 +1864,10 @@ export class FluffyGrass {
 			}
 		});
 
+		this.vehicleGrapple?.dispose();
+		this.vehicleGrapple = new VehicleGrapple(car);
+		assignCarLightingLayer(this.vehicleGrapple.group);
+
 		this.mobileControls = createMobileControls(() => {
 			if (this.car && this.carController) {
 				resetCarUpright(this.car, this.carController);
@@ -1522,7 +1875,19 @@ export class FluffyGrass {
 		});
 		this.carInput.setMobileControls(this.mobileControls);
 
-		this.chaseCameraInput = new ChaseCameraInput(this.canvas);
+		this.chaseCameraInput = new ChaseCameraInput(this.canvas, {
+			// Mouse-look only while actually driving / walking: never in the
+			// lobby, never in edit mode (needs the cursor), never on touch.
+			isFreeLookAllowed: () =>
+				this.isGameActive &&
+				!this.isWorldSwitching &&
+				!this.sceneProps.mapMode &&
+				!this.editMode?.isEnabled &&
+				// A login / logout form or the room list needs a usable cursor.
+				!isKeyboardCapturedByUi() &&
+				!isTextEntryFocused() &&
+				!isMobileDevice(),
+		});
 		syncCar(car);
 	}
 
@@ -1546,6 +1911,64 @@ export class FluffyGrass {
 		if (this.mobileControls) {
 			this.humanInput.setMobileControls(this.mobileControls);
 		}
+
+		// Free gun — kept in scene (world space), snapped to the right hand each
+		// frame. Parenting under humanScale (~0.03) made the mesh vanish.
+		try {
+			const gunGltf = await this.loadGltfFull("/gun.glb");
+			const gunVisual = gunGltf.scene as THREE.Group;
+			gunVisual.traverse((child: THREE.Object3D) => {
+				if (child instanceof THREE.Mesh) {
+					child.castShadow = true;
+					child.receiveShadow = true;
+					const mats = Array.isArray(child.material)
+						? child.material
+						: [child.material];
+					for (const m of mats) {
+						if (m && "metalness" in m) {
+							(m as THREE.MeshStandardMaterial).metalness = Math.min(
+								(m as THREE.MeshStandardMaterial).metalness ?? 0.4,
+								0.45
+							);
+						}
+						if (m) m.side = THREE.DoubleSide;
+					}
+				}
+			});
+
+			const rawBox = new THREE.Box3().setFromObject(gunVisual);
+			const rawSize = new THREE.Vector3();
+			rawBox.getSize(rawSize);
+			const longest = Math.max(rawSize.x, rawSize.y, rawSize.z, 1e-3);
+			// World-space length ~0.5m (not affected by humanScale)
+			gunVisual.scale.setScalar(0.5 / longest);
+			rawBox.setFromObject(gunVisual);
+			const center = new THREE.Vector3();
+			rawBox.getCenter(center);
+			gunVisual.position.sub(center);
+
+			const grip = new THREE.Group();
+			grip.name = "GunGrip";
+			grip.add(gunVisual);
+			grip.visible = false;
+			this.scene.add(grip);
+			this.gunMesh = grip;
+			console.log(
+				"[setupHuman] Gun ready in world space, scale",
+				gunVisual.scale.x.toFixed(4)
+			);
+		} catch (err) {
+			console.warn("[setupHuman] Failed to load /gun.glb", err);
+		}
+
+		this.humanInput.onWeaponEquip = () => {
+			if (!this.gunMesh || !this.humanInput) return;
+			this.gunMesh.visible = this.humanInput.shouldShowGun();
+		};
+
+		this.humanInput.onWeaponWheelToggle = (open) => {
+			this.chaseCameraInput?.setUiCapture(open);
+		};
 
 		// Connect the procedural pickup animation to grab the object
 		this.humanInput.checkCanPickup = () => {
@@ -1649,6 +2072,9 @@ export class FluffyGrass {
 			if (!this.human) return;
 			if (obj.parent !== this.worldGroup) return; // already picked up
 
+			// Hide gun while a bomb occupies the hand
+			if (this.gunMesh) this.gunMesh.visible = false;
+
 			// Remove physics body from the world so it stops falling
 			const bombData = this.bombs.find(b => b.mesh === obj);
 			if (bombData && bombData.body) {
@@ -1656,11 +2082,7 @@ export class FluffyGrass {
 				bombData.body = null;
 			}
 
-			let hand: THREE.Object3D | null = null;
-			this.human.mesh.traverse(child => {
-				if (child.name.toLowerCase().includes("righthand") && !hand) hand = child;
-			});
-
+			const hand = this.human.rightHandBone;
 			if (hand) {
 				// Attach the object to the character's hand
 				obj.position.set(0, 0.1, 0); // local to hand
@@ -1679,7 +2101,7 @@ export class FluffyGrass {
 			if (!this.human) return null;
 			let nearestPlayerId: string | null = null;
 			let minDst = Infinity;
-			
+
 			for (const [socketId, rp] of this.remotePlayers.entries()) {
 				if (!rp.loaded || !rp.humanGroup) continue;
 				if (rp.humanGroup.visible) {
@@ -1708,19 +2130,19 @@ export class FluffyGrass {
 			forward.applyQuaternion(this.human.mesh.quaternion);
 			forward.y = 0;
 			forward.normalize();
-			
+
 			const worldPos = new THREE.Vector3();
 			worldPos.copy(this.human.mesh.position);
-			worldPos.y += 1.5; 
+			worldPos.y += 1.5;
 			worldPos.y += HumanEntity.MESH_Y_OFFSET; // Account for physics body offset so they don't spawn underground!
 			worldPos.addScaledVector(forward, 1.5);
-			
+
 			const vel = {
 				x: forward.x * 3, // Toss them gently forward
 				y: 3,             // and slightly upward
 				z: forward.z * 3
 			};
-			
+
 			if (this.socket && this.roomCode) {
 				this.socket.emit("player-throw", {
 					roomCode: this.roomCode,
@@ -1729,11 +2151,671 @@ export class FluffyGrass {
 					velocity: vel
 				});
 			}
-			
+
 			const target = this.remotePlayers.get(socketId);
 			if (target) target.isBeingCarried = false;
 		};
+
+		const _punchHead = new THREE.Vector3();
+		const _punchSpine = new THREE.Vector3();
+
+		this.humanInput.getPunchTargets = () => {
+			const results: Array<{
+				id: string;
+				head: THREE.Vector3;
+				spine: THREE.Vector3;
+				feetY: number;
+				position: THREE.Vector3;
+				quaternion: THREE.Quaternion;
+			}> = [];
+			if (!this.human) return results;
+
+			for (const [socketId, rp] of this.remotePlayers.entries()) {
+				if (!rp.loaded || !rp.humanGroup || !rp.humanGroup.visible) continue;
+				if (rp.isBeingCarried) continue;
+				if (rp.dead) continue;
+
+				rp.humanGroup.updateMatrixWorld(true);
+				const feetY = rp.humanGroup.position.y;
+				const bones = rp.combatBones;
+
+				if (bones?.head) {
+					bones.head.getWorldPosition(_punchHead);
+				} else {
+					_punchHead.set(
+						rp.humanGroup.position.x,
+						feetY + 1.65,
+						rp.humanGroup.position.z
+					);
+				}
+
+				if (bones?.spine) {
+					bones.spine.getWorldPosition(_punchSpine);
+				} else {
+					_punchSpine.set(
+						rp.humanGroup.position.x,
+						feetY + 1.05,
+						rp.humanGroup.position.z
+					);
+				}
+
+				results.push({
+					id: socketId,
+					head: _punchHead.clone(),
+					spine: _punchSpine.clone(),
+					feetY,
+					position: rp.humanGroup.position.clone(),
+					quaternion: rp.humanGroup.quaternion.clone(),
+				});
+			}
+			return results;
+		};
+
+		this.humanInput.onPunchHit = (targetId, reaction) => {
+			if (this.socket && this.roomCode) {
+				this.socket.emit("player-hit", {
+					roomCode: this.roomCode,
+					targetSocketId: targetId,
+					hitZone: reaction,
+				});
+			}
+
+			// Optimistic remote reaction (victim also applies from player-hit)
+			const rp = this.remotePlayers.get(targetId);
+			if (!rp?.loaded || !rp.animations) return;
+			const animName = hitReactionAnimName(reaction);
+			const action = [...rp.animations.entries()].find(
+				([name]) => name === animName || name.includes(animName)
+			)?.[1];
+			if (!action) return;
+			if (rp.currentAction) rp.currentAction.fadeOut(0.15);
+			action.reset().setLoop(THREE.LoopOnce, 1);
+			action.clampWhenFinished = true;
+			action.fadeIn(0.15).play();
+			rp.currentAction = action;
+		};
+
+		const _raycaster = new THREE.Raycaster();
+		const _lastCarHitPoint = new THREE.Vector3();
+		this.humanInput.customShootRaycast = (origin, dir) => {
+			if (!this.car || !this.car.mesh) return null;
+			_raycaster.set(origin, dir);
+			_raycaster.far = 80;
+			const hits = _raycaster.intersectObject(this.car.mesh, true);
+			if (hits.length > 0) {
+				_lastCarHitPoint.copy(hits[0].point);
+				return { id: "car-local", dist: hits[0].distance };
+			}
+			return null;
+		};
+
+		this.humanInput.onGunHit = (targetId, part) => {
+			const dmg = damageForPart(part);
+			if (this.socket && this.roomCode) {
+				this.socket.emit("player-damage", {
+					roomCode: this.roomCode,
+					targetSocketId: targetId,
+					part,
+					damage: dmg,
+				});
+			}
+			// Optimistic remote HP (victim applies real death; no flinch anim)
+			const rp = this.remotePlayers.get(targetId);
+			if (!rp || rp.dead) return;
+			rp.hp = Math.max(0, (rp.hp ?? PLAYER_MAX_HP) - dmg);
+		};
+
+		this.humanInput.getMuzzleWorldPosition = () => {
+			if (!this.gunMesh || !this.gunMesh.visible) return null;
+			this.gunMuzzleLocal.set(0.02, 0.05, 0.42);
+			this.gunMuzzleLocal.applyQuaternion(this.gunMesh.quaternion);
+			this.gunMuzzleWorld.copy(this.gunMesh.position).add(this.gunMuzzleLocal);
+			return this.gunMuzzleWorld;
+		};
+
+		this.humanInput.onFireProjectile = (origin, direction) => {
+			const ownerId = this.socket?.id ?? null;
+			this.bulletSystem?.spawn(origin, direction, {
+				dealDamage: true,
+				ownerId,
+			});
+			if (this.socket && this.roomCode) {
+				const predictedId = this.predictShotTargetId(origin, direction);
+				this.socket.emit("gun-shot", {
+					roomCode: this.roomCode,
+					origin: {
+						x: origin.x,
+						y: origin.y,
+						z: origin.z,
+					},
+					direction: {
+						x: direction.x,
+						y: direction.y,
+						z: direction.z,
+					},
+					targetId: predictedId,
+				});
+			}
+		};
+
+		if (this.bulletSystem) {
+			this.bulletSystem.onHit = (targetId, point, part) => {
+				if (targetId === "car-local") {
+					if (this.smokeSystem) {
+						this.smokeSystem.emit(point); // bullet impact puff
+					}
+					if (this.car && !this.car.isDestroyed) {
+						this.car.health -= 15; // 7 shots to kill (100 / 15)
+					}
+					return;
+				}
+				this.humanInput?.onGunHit?.(targetId, part);
+			};
+			this.bulletSystem.onBombHit = (bombId) => {
+				this.detonateBomb(bombId);
+			};
+		}
+
+		this.humanInput.onHitRepositioned = (pos, quat) => {
+			if (!this.socket || !this.roomCode || !this.human) return;
+			const animation = this.human.activeAnimationName;
+			this.socket.emit("player-reposition", {
+				roomCode: this.roomCode,
+				position: { x: pos.x, y: pos.y, z: pos.z },
+				quaternion: { x: quat.x, y: quat.y, z: quat.z, w: quat.w },
+				animation,
+			});
+			// Also push a full state tick so animation/pos stay aligned
+			this.socket.emit("player-state", {
+				roomCode: this.roomCode,
+				state: {
+					activeEntity: this.activePlayer,
+					humanPosition: { x: pos.x, y: pos.y, z: pos.z },
+					humanQuaternion: { x: quat.x, y: quat.y, z: quat.z, w: quat.w },
+					animation,
+					benchSeat: null,
+				},
+			});
+		};
 	}
+
+	/** Snap the world-space gun mesh to the animated right-hand bone. */
+	private syncGunToHand() {
+		if (!this.gunMesh || !this.human || !this.gunMesh.visible) return;
+		const hand = this.human.rightHandBone;
+		if (!hand) {
+			this.gunMesh.position.copy(this.human.mesh.position);
+			this.gunMesh.position.y += 1.2;
+			this.gunMesh.quaternion.copy(this.human.mesh.quaternion);
+			return;
+		}
+		this.human.mesh.updateMatrixWorld(true);
+		hand.getWorldPosition(this.gunHandPos);
+		hand.getWorldQuaternion(this.gunHandQuat);
+
+		// Offset in hand local space → world
+		this.gunWorldOffset.copy(this.gunOffsetPos).applyQuaternion(this.gunHandQuat);
+		this.gunMesh.position.copy(this.gunHandPos).add(this.gunWorldOffset);
+		this.gunMesh.quaternion.copy(this.gunHandQuat).multiply(this.gunOffsetQuat);
+	}
+
+	/** Who the shot will likely hit on this client (for network visual aim). */
+	private predictShotTargetId(
+		origin: THREE.Vector3,
+		direction: THREE.Vector3
+	): string | null {
+		const targets = this.humanInput?.getPunchTargets?.() ?? [];
+		const dir = this._shotDir.copy(direction).normalize();
+		let bestId: string | null = null;
+		let bestDist = 80;
+		const radius = 0.95;
+
+		for (const t of targets) {
+			for (const point of [t.head, t.spine, t.position]) {
+				this._shotTo.copy(point).sub(origin);
+				const along = this._shotTo.dot(dir);
+				if (along < 0.4 || along > bestDist) continue;
+				this._shotClosest.copy(origin).addScaledVector(dir, along);
+				if (this._shotClosest.distanceTo(point) > radius) continue;
+				bestDist = along;
+				bestId = t.id;
+			}
+		}
+		return bestId;
+	}
+
+	private getPlayerShotAimPoint(
+		playerId: string,
+		part: GunHitPart = "body"
+	): THREE.Vector3 | null {
+		if (playerId === this.socket?.id) {
+			if (!this.human || this.localDead) return null;
+			this.human.mesh.updateMatrixWorld(true);
+			if (part === "head" && this.human.headBone) {
+				this.human.headBone.getWorldPosition(this._shotAim);
+				return this._shotAim;
+			}
+			if (this.human.spineBone) {
+				this.human.spineBone.getWorldPosition(this._shotAim);
+				return this._shotAim;
+			}
+			this._shotAim.copy(this.human.mesh.position);
+			this._shotAim.y += part === "head" ? 1.65 : 1.05;
+			return this._shotAim;
+		}
+
+		const rp = this.remotePlayers.get(playerId);
+		if (!rp?.loaded || !rp.humanGroup || rp.dead) return null;
+		rp.humanGroup.updateMatrixWorld(true);
+		if (part === "head" && rp.combatBones?.head) {
+			rp.combatBones.head.getWorldPosition(this._shotAim);
+			return this._shotAim;
+		}
+		if (rp.combatBones?.spine) {
+			rp.combatBones.spine.getWorldPosition(this._shotAim);
+			return this._shotAim;
+		}
+		this._shotAim.copy(rp.humanGroup.position);
+		this._shotAim.y += part === "head" ? 1.65 : 1.05;
+		return this._shotAim;
+	}
+
+	private getRemoteMuzzleWorld(shooterId: string): THREE.Vector3 | null {
+		const rp = this.remotePlayers.get(shooterId);
+		if (!rp?.loaded || !rp.humanGroup) return null;
+		rp.humanGroup.updateMatrixWorld(true);
+		const hand = rp.combatBones?.rightHand;
+		if (hand) {
+			hand.getWorldPosition(this._shotOrigin);
+			this._shotOrigin.y += 0.08;
+			return this._shotOrigin;
+		}
+		this._shotOrigin.copy(rp.humanGroup.position);
+		this._shotOrigin.y += 1.35;
+		return this._shotOrigin;
+	}
+
+	/**
+	 * Remote gun tracer: start from the shooter's visible body and aim at the
+	 * local representation of the predicted target so all clients see the hit.
+	 */
+	private spawnRemoteGunTracer(
+		shooterId: string,
+		netOrigin: THREE.Vector3,
+		netDir: THREE.Vector3,
+		targetId: string | null
+	) {
+		if (!this.bulletSystem) return;
+
+		const muzzle = this.getRemoteMuzzleWorld(shooterId);
+		const origin = muzzle ? muzzle.clone() : netOrigin.clone();
+
+		let aimId = targetId;
+		if (!aimId) {
+			// Fall back: whoever sits near the networked ray on THIS client
+			aimId = this.predictShotTargetId(origin, netDir);
+		}
+		// Always consider the local player for visual aim (they aren't in getPunchTargets)
+		if (!aimId && this.human && !this.localDead && this.socket?.id) {
+			const head = this.getPlayerShotAimPoint(this.socket.id, "head");
+			const spine = this.getPlayerShotAimPoint(this.socket.id, "body");
+			if (head && spine) {
+				const dir = this._shotDir.copy(netDir).normalize();
+				let bestDist = 80;
+				for (const point of [head, spine, this.human.mesh.position]) {
+					this._shotTo.copy(point).sub(origin);
+					const along = this._shotTo.dot(dir);
+					if (along < 0.4 || along > bestDist) continue;
+					this._shotClosest.copy(origin).addScaledVector(dir, along);
+					if (this._shotClosest.distanceTo(point) > 1.1) continue;
+					bestDist = along;
+					aimId = this.socket.id;
+				}
+			}
+		}
+
+		let dir = netDir.clone().normalize();
+		if (aimId) {
+			const aimAt = this.getPlayerShotAimPoint(aimId, "body");
+			if (aimAt) {
+				dir.copy(aimAt).sub(origin);
+				if (dir.lengthSq() > 1e-6) dir.normalize();
+				else dir.copy(netDir).normalize();
+				const fxKey = `${shooterId}->${aimId}`;
+				this.recentGunFxAt.set(fxKey, performance.now());
+			}
+		}
+
+		this.bulletSystem.spawn(origin, dir, {
+			dealDamage: false,
+			ownerId: shooterId,
+		});
+	}
+
+	/** Authoritative hit FX when damage is applied — aims into local victim body. */
+	private spawnSyncedHitTracer(
+		attackerId: string,
+		victimId: string,
+		part: GunHitPart
+	) {
+		if (!this.bulletSystem) return;
+		if (attackerId === this.socket?.id) return; // shooter already has local bullet
+
+		const fxKey = `${attackerId}->${victimId}`;
+		const now = performance.now();
+		const prev = this.recentGunFxAt.get(fxKey) ?? 0;
+		if (now - prev < 550) return; // gun-shot tracer already covered this hit
+		this.recentGunFxAt.set(fxKey, now);
+
+		const muzzle =
+			this.getRemoteMuzzleWorld(attackerId)?.clone() ??
+			(() => {
+				const rp = this.remotePlayers.get(attackerId);
+				if (!rp?.humanGroup) return null;
+				return rp.humanGroup.position
+					.clone()
+					.add(new THREE.Vector3(0, 1.35, 0));
+			})();
+		const aimAt = this.getPlayerShotAimPoint(victimId, part);
+		if (!muzzle || !aimAt) return;
+
+		const dir = aimAt.clone().sub(muzzle);
+		if (dir.lengthSq() < 1e-6) return;
+		dir.normalize();
+
+		this.bulletSystem.spawn(muzzle, dir, {
+			dealDamage: false,
+			ownerId: attackerId,
+		});
+	}
+
+	/**
+	 * Full bomb detonation — same VFX / SFX / knockback as a thrown landing fuse.
+	 * Safe to call from bullet hits or the land timer.
+	 */
+	private detonateBomb(blastId: number) {
+		if (this.detonatingBombIds.has(blastId)) return;
+		const bomb = this.bombs.find((x) => x.id === blastId);
+		if (!bomb) return;
+
+		this.detonatingBombIds.add(blastId);
+		bomb.isFlying = false;
+
+		const blastPos = new THREE.Vector3();
+		bomb.mesh.getWorldPosition(blastPos);
+
+		// If still attached to a hand, drop back into the world for the blast/reset
+		if (bomb.mesh.parent !== this.worldGroup) {
+			this.worldGroup.add(bomb.mesh);
+			bomb.mesh.position.copy(blastPos);
+		}
+
+		BombSound.playBlastSound(blastPos);
+		this.explosionSystem?.emit(blastPos);
+
+		// --- WATER SPLASH ---
+		if (this.pond) {
+			const distToPond = Math.hypot(blastPos.x - -20, blastPos.z - 5);
+			const waterY = this.pond.mesh.position.y;
+			if (distToPond < 15 && Math.abs(blastPos.y - waterY) < 4.0) {
+				this.pond.createRipple({
+					position: blastPos,
+					strength: 1.5,
+					radius: 5.0,
+				});
+			}
+		}
+
+		const blastRadius = BLAST_KILL_RADIUS;
+
+		// Instant kill if local player is in blast radius
+		if (this.human && this.humanInput && !this.localDead) {
+			const dist = this.human.mesh.position.distanceTo(blastPos);
+			if (dist < blastRadius) {
+				this.dieLocal("bomb");
+			}
+		}
+
+		// Car knockback
+		if (this.car?.body) {
+			const dist = this.car.mesh.position.distanceTo(blastPos);
+			if (dist < blastRadius + 2.0) {
+				const dir = new THREE.Vector3().subVectors(this.car.mesh.position, blastPos);
+				dir.y = Math.max(0.5, dir.y + 1.0);
+				dir.normalize();
+				const force = 25000 * (1 - dist / (blastRadius + 2.0));
+				this.car.body.applyImpulse(dir.multiplyScalar(force), true);
+			}
+		}
+
+		// Other bombs (chain reaction)
+		for (const otherBomb of this.bombs) {
+			if (
+				otherBomb.id !== blastId &&
+				otherBomb.body &&
+				otherBomb.mesh.parent === this.worldGroup
+			) {
+				const dist = otherBomb.mesh.position.distanceTo(blastPos);
+				if (dist < blastRadius) {
+					const dir = new THREE.Vector3().subVectors(
+						otherBomb.mesh.position,
+						blastPos
+					);
+					dir.y = Math.max(0.5, dir.y + 1.0);
+					dir.normalize();
+					const force = 150 * (1 - dist / blastRadius);
+					otherBomb.body.applyImpulse(dir.multiplyScalar(force), true);
+					otherBomb.isFlying = true;
+					otherBomb.flightTime = 0;
+				}
+			}
+		}
+
+		// Respawn this bomb elsewhere
+		if (bomb.body) {
+			const newPos = new THREE.Vector3(
+				(Math.random() - 0.5) * 50,
+				0,
+				(Math.random() - 0.5) * 50
+			);
+			newPos.y = getWorldTerrainY(newPos.x, newPos.z) + 5.0;
+			bomb.body.setTranslation(newPos, true);
+			bomb.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+			bomb.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+			bomb.mesh.position.copy(newPos);
+		} else {
+			// Was held / no body — recreate a simple dynamic body at a random spot
+			const newPos = new THREE.Vector3(
+				(Math.random() - 0.5) * 50,
+				0,
+				(Math.random() - 0.5) * 50
+			);
+			newPos.y = getWorldTerrainY(newPos.x, newPos.z) + 5.0;
+			const rbDesc = RAPIER.RigidBodyDesc.dynamic()
+				.setTranslation(newPos.x, newPos.y, newPos.z)
+				.setLinearDamping(0.1)
+				.setAngularDamping(0.5);
+			const body = getWorld().createRigidBody(rbDesc);
+			getWorld().createCollider(RAPIER.ColliderDesc.ball(0.5).setMass(10), body);
+			bomb.body = body;
+			if (bomb.mesh.parent !== this.worldGroup) {
+				this.worldGroup.add(bomb.mesh);
+			}
+			bomb.mesh.position.copy(newPos);
+		}
+
+		if (this.socket && this.roomCode) {
+			this.socket.emit("bomb-blast", {
+				roomCode: this.roomCode,
+				bombId: blastId,
+				position: { x: blastPos.x, y: blastPos.y, z: blastPos.z },
+			});
+		}
+
+		this.detonatingBombIds.delete(blastId);
+	}
+
+	/** Remote client received a bomb blast (VFX + local kill check + bomb reset). */
+	private applyRemoteBombBlast(bombId: number, blastPos: THREE.Vector3) {
+		if (typeof bombId === "number") {
+			if (this.detonatingBombIds.has(bombId)) return;
+			this.detonatingBombIds.add(bombId);
+		}
+
+		BombSound.playBlastSound(blastPos);
+		this.explosionSystem?.emit(blastPos);
+
+		if (this.pond) {
+			const distToPond = Math.hypot(blastPos.x - -20, blastPos.z - 5);
+			const waterY = this.pond.mesh.position.y;
+			if (distToPond < 15 && Math.abs(blastPos.y - waterY) < 4.0) {
+				this.pond.createRipple({
+					position: blastPos,
+					strength: 1.5,
+					radius: 5.0,
+				});
+			}
+		}
+
+		if (this.human && !this.localDead) {
+			const dist = this.human.mesh.position.distanceTo(blastPos);
+			if (dist < BLAST_KILL_RADIUS) {
+				this.dieLocal("bomb");
+			}
+		}
+
+		if (this.car?.body) {
+			const dist = this.car.mesh.position.distanceTo(blastPos);
+			if (dist < BLAST_KILL_RADIUS + 2.0) {
+				const dir = new THREE.Vector3().subVectors(this.car.mesh.position, blastPos);
+				dir.y = Math.max(0.5, dir.y + 1.0);
+				dir.normalize();
+				const force = 25000 * (1 - dist / (BLAST_KILL_RADIUS + 2.0));
+				this.car.body.applyImpulse(dir.multiplyScalar(force), true);
+			}
+		}
+
+		const bomb = this.bombs.find((x) => x.id === bombId);
+		if (bomb?.body) {
+			const newPos = new THREE.Vector3(
+				(Math.random() - 0.5) * 50,
+				0,
+				(Math.random() - 0.5) * 50
+			);
+			newPos.y = getWorldTerrainY(newPos.x, newPos.z) + 5.0;
+			bomb.body.setTranslation(newPos, true);
+			bomb.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+			bomb.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+			bomb.mesh.position.copy(newPos);
+			bomb.isFlying = false;
+		}
+
+		if (typeof bombId === "number") {
+			this.detonatingBombIds.delete(bombId);
+		}
+	}
+
+	private applyLocalDamage(
+		part: GunHitPart,
+		damage: number,
+		_attackerId?: string
+	) {
+		if (this.localDead || !this.humanInput) return;
+		this.localHp = Math.max(0, this.localHp - damage);
+		this.healthHud?.setHp(this.localHp);
+		if (this.localHp <= 0) {
+			this.dieLocal("gun");
+		}
+	}
+
+	private dieLocal(cause: DeathCause) {
+		if (this.localDead || !this.human || !this.humanInput) return;
+		this.localDead = true;
+		this.localHp = 0;
+		this.healthHud?.setHp(0);
+		this.deathCause = cause;
+		this.humanInput.isDead = true;
+		this.humanInput.clearAimLock();
+		this.humanInput.releaseControls();
+
+		const anim = cause === "bomb" ? "fall down" : "dying";
+		const duration = this.human.playAnimation(anim, 0.15, true);
+		this.deathTimer = Math.max(duration, 1.2) + 0.6;
+
+		if (this.gunMesh) this.gunMesh.visible = false;
+
+		if (this.socket && this.roomCode) {
+			const p = this.human.mesh.position;
+			this.socket.emit("player-died", {
+				roomCode: this.roomCode,
+				cause,
+				position: { x: p.x, y: p.y, z: p.z },
+				animation: this.human.activeAnimationName,
+			});
+		}
+	}
+
+	private updateLocalDeath(dt: number) {
+		if (!this.localDead) return;
+		this.deathTimer -= dt;
+		if (this.human && this.deathCause) {
+			const anim = this.deathCause === "bomb" ? "fall down" : "dying";
+			this.human.playAnimation(anim);
+		}
+		if (this.deathTimer <= 0) {
+			this.respawnLocal();
+		}
+	}
+
+	/** Snap human onto safe terrain (combat / out-of-bounds). */
+	private respawnHumanOnTerrain(preferX?: number, preferZ?: number) {
+		if (!this.human) return;
+		const px =
+			preferX ??
+			(this.car ? this.car.mesh.position.x + 3 : this.human.mesh.position.x);
+		const pz =
+			preferZ ??
+			(this.car ? this.car.mesh.position.z : this.human.mesh.position.z);
+		const spawn = findSafeTerrainSpawn(px, pz, 2.5);
+		this.human.body.setTranslation(
+			{
+				x: spawn.x,
+				y: spawn.y + HumanEntity.MESH_Y_OFFSET,
+				z: spawn.z,
+			},
+			true
+		);
+		this.human.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+		this.human.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+		this.human.mesh.position.copy(spawn);
+	}
+
+	private respawnLocal() {
+		if (!this.human || !this.humanInput) return;
+		this.respawnHumanOnTerrain();
+		this.human.playAnimation("idle");
+
+		this.localHp = PLAYER_MAX_HP;
+		this.localDead = false;
+		this.deathCause = null;
+		this.deathTimer = 0;
+		this.humanInput.isDead = false;
+		this.humanInput.isEnabled = this.activePlayer === "human";
+		this.healthHud?.setHp(this.localHp);
+		if (this.gunMesh) {
+			this.gunMesh.visible = this.humanInput.shouldShowGun();
+		}
+
+		if (this.socket && this.roomCode) {
+			const p = this.human.mesh.position;
+			this.socket.emit("player-respawned", {
+				roomCode: this.roomCode,
+				position: { x: p.x, y: p.y, z: p.z },
+				hp: PLAYER_MAX_HP,
+			});
+		}
+	}
+
 	private async createLobbyModels() {
 		// Add a light to the camera so the models are always visible in the lobby
 		const camLight = new THREE.PointLight(0xffffff, 1.5, 20);
@@ -1801,7 +2883,9 @@ export class FluffyGrass {
 		this.Uniforms.uTime.value += this.clock.getDelta();
 
 		if (this.car) {
-			const fogCenter = this.currentWorld === "valley" ? this.car.mesh.position : undefined;
+			const fogCenter = this.fogFollowPlayer
+				? this.car.mesh.position
+				: undefined;
 			const fogUpdateInterval = this.graphicsQuality === "High" ? 2 : 3;
 			if (
 				this.volumetricFog?.group.visible &&
@@ -1931,6 +3015,10 @@ export class FluffyGrass {
 			}
 		}
 
+		// Hand the cursor back the moment mouse-look stops being allowed
+		// (lobby, edit mode, world switch).
+		this.chaseCameraInput?.syncFreeLook();
+
 		if (this.dayNight) {
 			const fireflyIntensity = this.dayNight.update(dt);
 			this.dayNightGui.hour = this.dayNight.hour;
@@ -1939,6 +3027,8 @@ export class FluffyGrass {
 			if (this.sceneProps.mapMode) {
 				// Day/night re-applies FogExp2 every frame — keep it off in edit top-down.
 				this.suppressFogForEditMode();
+			} else {
+				this.syncVolumetricFogFrame(now * 0.001);
 			}
 			if (now - this.lastSettingsSync >= 200) {
 				this.lastSettingsSync = now;
@@ -1949,6 +3039,13 @@ export class FluffyGrass {
 
 			const grassLight = this.dayNight.getGrassLight();
 			this.grassMaterial.uniforms.uGrassLightIntensity.value = grassLight;
+
+			if (this.terrainMat) {
+				const sunY = this.dayNight.getSunDirection().y;
+				// Fade emissive in as sun drops below horizon (sunY from 0.1 to -0.1)
+				const nightFactor = THREE.MathUtils.clamp((0.1 - sunY) / 0.2, 0, 1);
+				this.terrainMat.emissive.set(this.sceneProps.terrainColor).multiplyScalar(0.7 * nightFactor);
+			}
 
 			// Headlights on through evening → night
 			const hour = this.dayNight.hour;
@@ -1975,13 +3072,39 @@ export class FluffyGrass {
 			if (playAllowed) {
 				if (this.activePlayer === "car") {
 					this.carInput.applyInput(dt);
+					
+					if (this.carInput.consumeFpvToggle()) {
+						this.carFpvMode = !this.carFpvMode;
+						if (this.car.fpvInterior) {
+							this.car.fpvInterior.visible = this.carFpvMode;
+						}
+					}
+					
+					if (this.vehicleGrapple) {
+						const justPressed = this.carInput.consumeGrapplePress();
+						const detachPressed = this.carInput.consumeGrappleDetach();
+						this.vehicleGrapple.update(
+							dt,
+							this.carInput.isGrappleHeld,
+							justPressed,
+							detachPressed
+						);
+					}
 				} else {
-					if (!this.isBeingCarriedBy && this.sitState === "none") {
+					this.vehicleGrapple?.release();
+					if (this.localDead) {
+						this.humanInput.forceCloseWeaponWheel();
+						this.humanInput.isEnabled = false;
+					} else if (!this.isBeingCarriedBy && this.sitState === "none") {
 						this.humanInput.isEnabled = true;
 						this.humanInput.update(dt, this.camera);
 					} else {
+						this.humanInput.forceCloseWeaponWheel();
 						this.humanInput.isEnabled = false;
 					}
+				}
+				if (this.localDead) {
+					this.updateLocalDeath(dt);
 				}
 			}
 
@@ -1990,16 +3113,16 @@ export class FluffyGrass {
 				if (carrier && carrier.loaded && carrier.humanGroup) {
 					const forward = new THREE.Vector3(0, 0, 1).applyQuaternion(carrier.humanGroup.quaternion).normalize();
 					const right = new THREE.Vector3(-1, 0, 0).applyQuaternion(carrier.humanGroup.quaternion).normalize();
-					
+
 					const worldPos = new THREE.Vector3();
 					carrier.humanGroup.getWorldPosition(worldPos);
 					worldPos.addScaledVector(forward, 0.65); // Move forward into hands (increased distance)
 					worldPos.addScaledVector(right, 0.7); // Move to the right side (centered slightly more)
 					worldPos.y += 1.4; // Hands height for mesh
 					worldPos.y += HumanEntity.MESH_Y_OFFSET; // Add physics body offset
-					
+
 					this.human.body.setTranslation(worldPos, true);
-					this.human.body.setLinvel({x:0, y:0, z:0}, true);
+					this.human.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
 				}
 				this.human.playAnimation("being carried");
 			}
@@ -2009,15 +3132,106 @@ export class FluffyGrass {
 			if (playAllowed) {
 				if (this.activePlayer === "car") {
 					this.carInput.afterPhysics(dt);
+					if (this.vehicleGrapple?.isAttached()) {
+						this.vehicleGrapple.afterPhysics(dt);
+					}
 				}
 				this.human.update(dt);
 			}
 			syncCar(this.car);
 
+			if (this.car) {
+				if (this.car.health <= 0 && !this.car.isDestroyed) {
+					this.car.isDestroyed = true;
+					this.car.timeSinceDestroyed = 0;
+					if (this.carInput) {
+						this.carInput.releaseControls();
+						this.carInput.isEnabled = false;
+					}
+				}
+
+				if (this.car.isDestroyed) {
+					this.car.timeSinceDestroyed += dt;
+					const hoodPos = this.car.mesh.position.clone().add(
+						new THREE.Vector3(0, 0.8, -1.5).applyQuaternion(this.car.mesh.quaternion)
+					);
+					if (this.smokeSystem) {
+						if (Math.random() > 0.4) this.smokeSystem.emitDarkSmoke(hoodPos);
+						if (Math.random() > 0.3) this.smokeSystem.emitFire(hoodPos);
+					}
+
+					if (!this.car.hasExploded && this.car.timeSinceDestroyed > 3.0) {
+						this.car.hasExploded = true;
+						if (this.explosionSystem) {
+							this.explosionSystem.emit(this.car.mesh.position);
+							BombSound.playBlastSound(this.car.mesh.position);
+						}
+						const impulse = new THREE.Vector3(
+							(Math.random() - 0.5) * 600,
+							4500,
+							(Math.random() - 0.5) * 600
+						);
+						this.car.body.applyImpulse(impulse, true);
+						this.car.body.applyTorqueImpulse(
+							new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).multiplyScalar(2000),
+							true
+						);
+					}
+
+					// Respawn trigger
+					if (this.car.timeSinceDestroyed > 8.0) {
+						this.car.isDestroyed = false;
+						this.car.hasExploded = false;
+						this.car.health = this.car.maxHealth;
+						this.car.timeSinceDestroyed = 0;
+						if (this.carInput && this.activePlayer === "car") {
+							this.carInput.isEnabled = true;
+						}
+						
+						const spawnY = getWorldTerrainY(0, 0) + 1.4;
+						this.car.body.setTranslation({ x: 0, y: spawnY, z: 0 }, true);
+						this.car.body.setRotation({ x: 0, y: 0, z: 0, w: 1 }, true);
+						this.car.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+						this.car.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+					}
+				} else if (this.car.health <= 50) {
+					if (this.smokeSystem && Math.random() > 0.6) {
+						const hoodPos = this.car.mesh.position.clone().add(
+							new THREE.Vector3(0, 0.8, -1.5).applyQuaternion(this.car.mesh.quaternion)
+						);
+						this.smokeSystem.emitDarkSmoke(hoodPos);
+					}
+				}
+			}
+
+			if (
+				this.smokeSystem &&
+				this.carController &&
+				this.activePlayer === "car" &&
+				this.car
+			) {
+				if (this.carController.consumeTireSmokeBurst(dt)) {
+					const driveWheels = this.carController.getDriveWheelIndices();
+					const _smokePos = new THREE.Vector3();
+					// Always both rear tires together.
+					for (const wi of driveWheels) {
+						const wheel = this.car.wheels[wi];
+						if (!wheel) continue;
+						wheel.getWorldPosition(_smokePos);
+						_smokePos.y = getWorldTerrainY(_smokePos.x, _smokePos.z) + 0.12;
+						this.smokeSystem.emitTire(_smokePos);
+					}
+				}
+			}
+
 			if (this.engineSound && this.carController) {
-				const speed = this.carController.getSpeed();
-				const throttle = this.carController.getThrottle();
-				this.engineSound.update(speed, throttle);
+				if (this.activePlayer === "car") {
+					const speed = this.carController.getSpeed();
+					const throttle = this.carController.getThrottle();
+					this.engineSound.update(speed, throttle);
+				} else {
+					this.engineSound.update(0, 0, undefined, true);
+				}
 			}
 
 			// Sync bomb physics
@@ -2036,86 +3250,10 @@ export class FluffyGrass {
 							if (bomb.flightTime > 0.2 && t.y <= ty + 0.8) {
 								bomb.isFlying = false;
 
-								// Trigger blast sound after 1 second
-								const blastPos = bomb.mesh.position.clone();
+								// Fuse delay after landing (same as before)
 								const blastId = bomb.id;
 								setTimeout(() => {
-									BombSound.playBlastSound(blastPos);
-									this.explosionSystem?.emit(blastPos);
-
-									// --- WATER SPLASH ---
-									if (this.pond) {
-										const distToPond = Math.hypot(blastPos.x - (-20), blastPos.z - 5);
-										const waterY = this.pond.mesh.position.y;
-										// If bomb is anywhere near or inside the pond (radius 15 to include shores)
-										if (distToPond < 15 && Math.abs(blastPos.y - waterY) < 4.0) {
-											this.pond.createRipple({
-												position: blastPos,
-												strength: 1.5, // Huge displacement
-												radius: 5.0    // Huge area
-											});
-										}
-									}
-
-									// --- KNOCKBACK PHYSICS ---
-									const blastRadius = 3.5; // Blast radius
-
-									// 1. Player Knockback
-									if (this.human && this.humanInput) {
-										const dist = this.human.mesh.position.distanceTo(blastPos);
-										if (dist < blastRadius) {
-											// Just trigger the animation sequence, do not apply physics knockback
-											this.humanInput.startRecoverySequence("explosion");
-										}
-									}
-
-									// 2. Car Knockback
-									if (this.car && this.car.body) {
-										// Car is large, check distance from center
-										const dist = this.car.mesh.position.distanceTo(blastPos);
-										// Give car slightly larger blast reception radius due to size
-										if (dist < blastRadius + 2.0) {
-											const dir = new THREE.Vector3().subVectors(this.car.mesh.position, blastPos);
-											dir.y = Math.max(0.5, dir.y + 1.0); // Cars should flip!
-											dir.normalize();
-											// Car is massive (e.g. 1500kg). It requires a massive impulse to move/flip.
-											const force = 25000 * (1 - dist / (blastRadius + 2.0));
-											this.car.body.applyImpulse(dir.multiplyScalar(force), true);
-										}
-									}
-
-									// 3. Other Bombs Knockback (Chain Reactions!)
-									for (const otherBomb of this.bombs) {
-										if (otherBomb.id !== blastId && otherBomb.body && otherBomb.mesh.parent === this.worldGroup) {
-											const dist = otherBomb.mesh.position.distanceTo(blastPos);
-											if (dist < blastRadius) {
-												const dir = new THREE.Vector3().subVectors(otherBomb.mesh.position, blastPos);
-												dir.y = Math.max(0.5, dir.y + 1.0);
-												dir.normalize();
-												const force = 150 * (1 - dist / blastRadius);
-												otherBomb.body.applyImpulse(dir.multiplyScalar(force), true);
-
-												// Start their timer too! Chain reactions!
-												otherBomb.isFlying = true;
-												otherBomb.flightTime = 0;
-											}
-										}
-									}
-									// -------------------------
-
-									// Reset bomb position after explosion
-									const b = this.bombs.find(x => x.id === blastId);
-									if (b && b.body) {
-										const newPos = new THREE.Vector3(
-											(Math.random() - 0.5) * 50,
-											0,
-											(Math.random() - 0.5) * 50
-										);
-										newPos.y = getWorldTerrainY(newPos.x, newPos.z) + 5.0;
-										b.body.setTranslation(newPos, true);
-										b.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
-										b.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
-									}
+									this.detonateBomb(blastId);
 								}, 1000);
 							} else {
 								this.smokeSystem?.emit(bomb.mesh.position);
@@ -2127,9 +3265,17 @@ export class FluffyGrass {
 
 			if (!this.sceneProps.mapMode) {
 				if (this.activePlayer === "car") {
-					updateChaseCamera(this.camera, this.car, this.chaseCameraInput, dt);
+					updateChaseCamera(this.camera, this.car, this.chaseCameraInput, dt, this.carFpvMode);
 				} else {
-					updateHumanCamera(this.camera, this.human, this.chaseCameraInput, dt);
+					const aimMode = Boolean(this.humanInput?.isAimingGun());
+					updateHumanCamera(
+						this.camera,
+						this.human,
+						this.chaseCameraInput,
+						dt,
+						{ aimMode }
+					);
+					this.syncGunToHand();
 				}
 			}
 
@@ -2194,7 +3340,7 @@ export class FluffyGrass {
 				}
 			}
 
-			// Leave the map → wait 2s → respawn
+			// Leave the map → wait 2s → respawn on terrain
 			if (playAllowed) {
 				// Car respawn
 				if (this.car && this.carController) {
@@ -2217,19 +3363,15 @@ export class FluffyGrass {
 					}
 				}
 
-				// Human respawn
-				if (this.human) {
+				// Human respawn (skip while dead — combat respawn handles that)
+				if (this.human && !this.localDead) {
 					const ht = this.human.body.translation();
-					const isOutside = ht.y < -120 || ht.y > 90;
+					const isOutside = isOutsideTerrain(ht.x, ht.y, ht.z);
 
 					if (isOutside) {
 						this.humanOutOfWorldTimer += dt;
 						if (this.humanOutOfWorldTimer >= 2) {
-							// Respawn human safely next to the car, or at center
-							const spawnPos = this.car ? this.car.mesh.position.clone() : new THREE.Vector3(0, 0, 0);
-							spawnPos.y += 3.0; // Drop from slightly above to avoid clipping
-							this.human.body.setTranslation(spawnPos, true);
-							this.human.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+							this.respawnHumanOnTerrain();
 							this.humanOutOfWorldTimer = 0;
 						}
 					} else {
@@ -2259,9 +3401,7 @@ export class FluffyGrass {
 					halfAngle: 0.72,
 				};
 			}
-			if (this.worldGroup.visible) {
-				this.fireflies.update(dt, this.frameFireflyIntensity, threat);
-			}
+			this.fireflies.update(dt, this.frameFireflyIntensity, threat);
 		}
 
 		if (this.smokeSystem) {
@@ -2300,6 +3440,11 @@ export class FluffyGrass {
 					state.carQuaternion = { x: cq.x, y: cq.y, z: cq.z, w: cq.w };
 				}
 
+				state.hp = this.localHp;
+				state.dead = this.localDead;
+				state.aiming = Boolean(this.humanInput?.isAimingGun());
+				state.firing = Boolean(this.humanInput?.isFiringGun());
+
 				this.socket.emit("player-state", { roomCode: this.roomCode, state });
 			}
 		}
@@ -2317,20 +3462,20 @@ export class FluffyGrass {
 					// We are carrying this player! Snap them to our hands locally!
 					const forward = new THREE.Vector3(0, 0, 1).applyQuaternion(this.human.mesh.quaternion).normalize();
 					const right = new THREE.Vector3(-1, 0, 0).applyQuaternion(this.human.mesh.quaternion).normalize();
-					
+
 					const worldPos = new THREE.Vector3();
 					this.human.mesh.getWorldPosition(worldPos);
 					worldPos.addScaledVector(forward, 0.65); // Move forward into hands
 					worldPos.addScaledVector(right, 0.7); // Move to the right side
 					worldPos.y += 1.4; // Hands height
-					
+
 					rp.humanGroup.position.copy(worldPos);
 					rp.humanGroup.quaternion.copy(this.human.mesh.quaternion);
 				} else {
 					rp.humanGroup.position.lerp(rp.targetHumanPosition, lerpFactor);
 					rp.humanGroup.quaternion.slerp(rp.targetHumanQuaternion, lerpFactor);
 				}
-				
+
 				if (rp.humanBody) {
 					if (isCarriedByMe || rp.isBeingCarried) {
 						// Move their physics body far away so it doesn't push us into the sky!
@@ -2361,7 +3506,28 @@ export class FluffyGrass {
 			}
 		}
 
-		this.renderer.render(
+		// Bullets after remotes so hit bones match the posed frame
+		if (this.bulletSystem && this.humanInput) {
+			const targets = this.humanInput.getPunchTargets?.() ?? [];
+			const bombTargets = this.bombs
+				.filter((b) => !this.detonatingBombIds.has(b.id))
+				.map((b) => {
+					b.mesh.getWorldPosition(this._bombWorldPos);
+					return { id: b.id, position: this._bombWorldPos.clone() };
+				});
+			const vehicleTargets = [];
+			if (this.car && this.car.mesh) {
+				vehicleTargets.push({ 
+					id: "car-local", 
+					position: this.car.mesh.position.clone().add(new THREE.Vector3(0, 1.0, 0)), 
+					radius: 2.5 
+				});
+			}
+			this.bulletSystem.update(dt, targets, bombTargets, vehicleTargets);
+		}
+
+		this.volumetricFogPass?.render(
+			this.renderer,
 			this.scene,
 			this.editMode?.isEnabled ? this.editMode.activeCamera : this.camera
 		);
@@ -2450,8 +3616,94 @@ export class FluffyGrass {
 		this.editorWaterFrameCounter = 0;
 		this.editorWaterDeltaAccumulator = 0;
 		this.resizePondTargets();
+		const pr = this.renderer.getPixelRatio();
+		this.volumetricFogPass?.setSize(
+			window.innerWidth * pr,
+			window.innerHeight * pr
+		);
+		this.syncVolumetricFogQuality();
+	}
+
+	/** Screen-space fog on Medium/High; billboard fallback only on Low. */
+	private syncVolumetricFogQuality() {
+		const quality = this.graphicsQuality;
+		const pass = this.volumetricFogPass;
+		const billboards = this.volumetricFog;
+		const inEdit = this.sceneProps.mapMode;
+
+		if (pass) {
+			pass.setQuality(quality);
+			pass.enabled = !inEdit && quality !== "Low";
+		}
+		if (billboards) {
+			billboards.group.visible = !inEdit && quality === "Low";
+		}
+		if (pass?.enabled && this.scene.fog instanceof THREE.FogExp2) {
+			this.scene.fog.density = this.residualFogDensity;
+		} else if (!inEdit && this.scene.fog instanceof THREE.FogExp2) {
+			this.scene.fog.density = this.atmosphereFogDensity;
+		}
+	}
+
+	/**
+	 * Feed day/night (or world-override) atmosphere into the raymarch pass and
+	 * keep FogExp2 as a light residual so materials don't double-fog.
+	 */
+	private syncVolumetricFogFrame(timeSec: number) {
+		const pass = this.volumetricFogPass;
+		if (!pass?.enabled || !this.dayNight) return;
+
+		// Always center the fog ring on the player.
+		if (this.activePlayer === "human" && this.human?.mesh) {
+			this._fogCenter.copy(this.human.mesh.position);
+		} else if (this.car?.mesh) {
+			this._fogCenter.copy(this.car.mesh.position);
+		} else {
+			this._fogCenter.copy(this.camera.position);
+		}
+
+		const override = this.dayNight.overrideColors;
+		const fogColor = override
+			? this.scene.fog instanceof THREE.FogExp2
+				? this.scene.fog.color
+				: this._fogColorTmp.set(this.sceneProps.fogColor)
+			: this.dayNight.getFogColor();
+
+		const timeScale = fogDensityScaleForHour(this.dayNight.hour);
+		// Lower base than before; morning ≈ this amount, noon clearer, night a bit more.
+		const baseDensity = override
+			? this.volumetricFogDensity
+			: Math.max(
+				this.volumetricFogDensity * 0.55,
+				this.dayNight.getFogDensity() * 0.65
+			);
+		const tableDensity = baseDensity * timeScale;
+
+		const key = this.dayNight.lights.keyLight;
+		const sunDir = this.dayNight.getSunDirection();
+
+		pass.setParams({
+			fogColor,
+			fogDensity: tableDensity,
+			fogCenter: this._fogCenter,
+			fogRadius: PLAYER_FOG_RADIUS,
+			fogRadiusSoft: PLAYER_FOG_BAND,
+			fogHeight: 0,
+			// ln(2)/15 ≈ half density on ~15m hills
+			heightFalloff: Math.LN2 / 15,
+			sunDirection: sunDir,
+			sunColor: key.color,
+			sunIntensity: Math.min(0.85, key.intensity * 0.16),
+			time: timeSec,
+		});
+
+		// Almost no global FogExp2 — volume is local to the player ring.
+		if (this.scene.fog instanceof THREE.FogExp2) {
+			this.scene.fog.color.copy(fogColor);
+			this.scene.fog.density = this.residualFogDensity * 0.35 * timeScale;
+		}
 		if (this.volumetricFog) {
-			this.volumetricFog.group.visible = quality !== "Low";
+			this.volumetricFog.setColor(fogColor);
 		}
 	}
 
@@ -2552,8 +3804,6 @@ export class FluffyGrass {
 			return;
 		}
 		if (now < this.nextAmbientRippleAt) return;
-		// Next event in ~1.5–5.5 s (occasional, not constant chop).
-		this.nextAmbientRippleAt = now + 1500 + Math.random() * 4000;
 
 		const candidates: Pond[] = [];
 		if (
@@ -2567,7 +3817,16 @@ export class FluffyGrass {
 		for (const pond of this.editorPonds) {
 			if (pond.mesh.visible) candidates.push(pond);
 		}
-		if (candidates.length === 0) return;
+		if (candidates.length === 0) {
+			// Retry soon rather than idling a full interval before water exists.
+			this.nextAmbientRippleAt = now + 800;
+			return;
+		}
+
+		// One pond gets a drip per event, so more water needs more events — a
+		// single pond keeps the tuned ~1.5–5.5 s cadence.
+		const spread = Math.min(3, candidates.length);
+		this.nextAmbientRippleAt = now + (1500 + Math.random() * 4000) / spread;
 
 		const pond = candidates[Math.floor(Math.random() * candidates.length)]!;
 		this.spawnNaturalRipples(pond);
@@ -2588,7 +3847,22 @@ export class FluffyGrass {
 		// Island pond is circular 20×20 with no userData — treat as circle of r≈9.
 		const useCircle = circular || (halfW === halfD && !pond.mesh.userData.waterHalfW);
 
-		const drops = Math.random() < 0.4 ? 2 + Math.floor(Math.random() * 2) : 1;
+		// Scale activity with surface area — a fixed 1–3 drips is a lively pond at
+		// 20 m and an almost still sheet on a 100 m lake. Reference pond keeps 1–3.
+		const surface = useCircle
+			? Math.PI * halfW * halfW
+			: halfW * 2 * (halfD * 2);
+		const areaDrops = THREE.MathUtils.clamp(Math.round(surface / 400), 1, 6);
+		const drops =
+			areaDrops +
+			(Math.random() < 0.4 ? 1 + Math.floor(Math.random() * 2) : 0);
+		// Stamp size follows the pond too: a 0.85 m dimple on a big lake covers
+		// only a couple of simulation texels and dies before it is visible.
+		const stampScale = THREE.MathUtils.clamp(
+			Math.max(halfW, halfD) / 10,
+			1,
+			4
+		);
 		const baseX = useCircle
 			? cx + (Math.random() * 2 - 1) * halfW * 0.55
 			: cx + (Math.random() * 2 - 1) * halfW * 0.7;
@@ -2597,7 +3871,8 @@ export class FluffyGrass {
 			: cz + (Math.random() * 2 - 1) * halfD * 0.7;
 
 		for (let i = 0; i < drops; i++) {
-			const jitter = i === 0 ? 0 : 0.4 + Math.random() * 1.2;
+			// Spread the cluster wider on big water so drips are not all in one spot.
+			const jitter = i === 0 ? 0 : (0.4 + Math.random() * 1.2) * stampScale;
 			const ang = Math.random() * Math.PI * 2;
 			let x = baseX + Math.cos(ang) * jitter;
 			let z = baseZ + Math.sin(ang) * jitter;
@@ -2614,8 +3889,8 @@ export class FluffyGrass {
 			}
 			pond.createRipple({
 				position: { x, z },
-				strength: 0.05 + Math.random() * 0.09,
-				radius: 0.55 + Math.random() * 1.0,
+				strength: (0.05 + Math.random() * 0.09) * stampScale,
+				radius: (0.55 + Math.random() * 1.0) * stampScale,
 			});
 		}
 	}
@@ -2862,14 +4137,12 @@ export class FluffyGrass {
 				if (worldId === "valley") return VALLEY_WORLD;
 				return this.customWorldDefs.find((w) => w.id === worldId) ?? null;
 			},
-			ensureWorldDefinition: (definition, options) => {
+			ensureWorldDefinition: (definition) => {
 				if (definition.kind !== "custom") return;
-				if (this.customWorldDefs.some((w) => w.id === definition.id)) return;
-				this.customWorldDefs.push(definition);
-				if (options?.persist !== false) {
-					this.persistCustomWorldDefs();
-					this.settings.setWorldOptions(this.getWorldSelectOptions());
-				}
+				const index = this.customWorldDefs.findIndex((w) => w.id === definition.id);
+				if (index >= 0) this.customWorldDefs[index] = definition;
+				else this.customWorldDefs.push(definition);
+				this.refreshWorldSelectOptions();
 			},
 			enableTerrainVertexColors: () => {
 				const mesh = this.activeWorldDef.kind === "custom"
@@ -2883,7 +4156,7 @@ export class FluffyGrass {
 				mat.color.setHex(0xffffff);
 				mat.needsUpdate = true;
 			},
-	setMapMode: (enabled) => {
+			setMapMode: (enabled) => {
 				this.sceneProps.mapMode = enabled;
 				if (this.carInput) {
 					this.carInput.isEnabled =
@@ -2918,6 +4191,8 @@ export class FluffyGrass {
 				this.editorPonds = this.editorPonds.filter((p) => p !== pond);
 			},
 			getScenePropsTerrainColor: () => this.sceneProps.terrainColor,
+			getTreeManager: () => this.treeManager,
+			syncFireflies: () => this.syncFireflies(),
 			isGameActive: () => this.isGameActive,
 			getRoomCode: () => this.roomCode,
 			createNewLargeWorld: async (sizeKm) => {
@@ -2930,58 +4205,70 @@ export class FluffyGrass {
 			rebuildEditGrass: () => {
 				this.rebuildActiveEditGrass();
 			},
+			liftPlayersAboveTerrain: () => {
+				this.liftPlayersAboveTerrain();
+			},
+			onWorldsChanged: () => {
+				void this.refreshSavedWorldList();
+			},
 			getAuthToken: () => this.authService.getToken(),
 			getAuthUser: () => this.userData,
 			getServerUrl: () => SERVER_URL,
 		});
 	}
 
-	private loadCustomWorldDefs() {
-		try {
-			const raw = localStorage.getItem(CUSTOM_WORLDS_KEY);
-			if (!raw) return;
-			const parsed = JSON.parse(raw) as WorldDefinition[];
-			if (!Array.isArray(parsed)) return;
-			let dirty = false;
-			this.customWorldDefs = parsed.map((def) => {
-				if (def.kind !== "custom") return def;
-				let next = def;
-				const expectedSegs = Math.min(
-					900,
-					Math.max(64, Math.round(def.size / ISLAND_TERRAIN_CELL))
-				);
-				if (Math.abs((def.segments ?? 0) - expectedSegs) > 8) {
-					next = { ...next, segments: expectedSegs };
-					dirty = true;
-				}
-				const minGrass = grassCountForSize(def.size);
-				if ((def.grassCount ?? 0) < minGrass) {
-					next = { ...next, grassCount: minGrass };
-					dirty = true;
-				}
-				return next;
-			});
-			if (dirty) this.persistCustomWorldDefs();
-		} catch {
-			this.customWorldDefs = [];
+	/**
+	 * Refresh the saved-world list from the DB (GET /api/worlds?mine=1).
+	 * Logged-out players only ever see the built-in hubs.
+	 */
+	private async refreshSavedWorldList() {
+		const loggedIn = Boolean(this.authService.getToken() && this.userData?.id);
+		if (!loggedIn) {
+			// A logged-out tab keeps nothing: no list, no other account's worlds.
+			this.savedWorldList = [];
+			this.customWorldDefs = this.customWorldDefs.filter(
+				(def) => def.id === this.activeWorldDef.id
+			);
+			this.editMode?.forgetCachedWorlds(this.activeWorldDef.id);
+			this.refreshWorldSelectOptions();
+			return;
 		}
+		if (!this.editMode) return;
+		try {
+			this.savedWorldList = await this.editMode.listMyWorlds();
+		} catch (error) {
+			console.warn("[world] Failed to list saved worlds", error);
+			this.savedWorldList = [];
+		}
+		this.refreshWorldSelectOptions();
 	}
 
-	private persistCustomWorldDefs() {
-		try {
-			localStorage.setItem(CUSTOM_WORLDS_KEY, JSON.stringify(this.customWorldDefs));
-		} catch {
-			/* ignore */
-		}
+	private refreshWorldSelectOptions() {
+		if (!this.settings) return;
+		this.settings.setWorldOptions(this.getWorldSelectOptions());
+		this.settings.setWorld(this.currentWorld);
 	}
 
+	/**
+	 * Built-in hubs + every world the DB knows about, plus any world created
+	 * this session that has not been saved yet.
+	 */
 	private getWorldSelectOptions(): Record<string, string> {
+		const names = new Map<string, string>();
+		for (const def of this.customWorldDefs) names.set(def.id, def.name);
+		// DB names win — another device may have renamed the world.
+		for (const item of this.savedWorldList) {
+			names.set(item.worldId, item.worldName || item.worldId);
+		}
+
 		const options: Record<string, string> = {
 			Island: "island",
 			Valley: "valley",
 		};
-		for (const def of this.customWorldDefs) {
-			options[def.name] = def.id;
+		for (const [worldId, name] of names) {
+			// dat.GUI keys on the label, so keep duplicate names distinguishable.
+			const label = name in options ? `${name} (${worldId.slice(-4)})` : name;
+			options[label] = worldId;
 		}
 		return options;
 	}
@@ -2989,13 +4276,11 @@ export class FluffyGrass {
 	private async createAndEnterCustomWorld(sizeKm = 1) {
 		const kmLabel =
 			sizeKm >= 1 ? `${sizeKm.toFixed(sizeKm % 1 === 0 ? 0 : 1)}km` : `${Math.round(sizeKm * 1000)}m`;
-		const def = createLargeBlankWorld(
-			`World ${this.customWorldDefs.length + 1} (${kmLabel})`,
-			sizeKm
-		);
+		const worldNumber =
+			Math.max(this.customWorldDefs.length, this.savedWorldList.length) + 1;
+		const def = createLargeBlankWorld(`World ${worldNumber} (${kmLabel})`, sizeKm);
 		this.customWorldDefs.push(def);
-		this.persistCustomWorldDefs();
-		this.settings.setWorldOptions(this.getWorldSelectOptions());
+		this.refreshWorldSelectOptions();
 		await this.switchWorld(def.id);
 	}
 
@@ -3115,11 +4400,7 @@ export class FluffyGrass {
 	}
 
 	private disposeCustomWorld() {
-		for (const pond of this.editorPonds) {
-			pond.mesh.removeFromParent();
-			pond.dispose();
-		}
-		this.editorPonds = [];
+		this.disposeEditorPondsIn(this.customWorldGroup);
 		for (const stone of this.editorStones) stone.dispose();
 		this.editorStones = [];
 		this.customGrassField?.dispose();
@@ -3139,8 +4420,26 @@ export class FluffyGrass {
 			console.log(this.renderer.info.render);
 		});
 
+		// A form taking focus (login, etc.) drops whatever the player was holding,
+		// so the car does not keep driving while they type.
+		window.addEventListener("focusin", (e) => {
+			if (!isTextEntryTarget(e.target)) return;
+			this.carInput?.releaseControls();
+			this.humanInput?.releaseControls();
+		});
+
+		// Clicking the world hands the keyboard back to the game — settings number
+		// fields keep focus otherwise and would keep swallowing WASD.
+		this.canvas.addEventListener("pointerdown", () => {
+			if (isTextEntryFocused()) {
+				(document.activeElement as HTMLElement | null)?.blur();
+			}
+		});
+
 		window.addEventListener("keydown", (e) => {
 			if (!this.isGameActive) return;
+			// "u" / "e" are common letters — never hijack them while typing.
+			if (isGameKeyBlocked(e)) return;
 			const key = (e.key ?? "").toLowerCase();
 			if (key === "u") {
 				this.tryTogglePlayer();
@@ -3288,6 +4587,7 @@ export class FluffyGrass {
 		if (this.activePlayer === "car") {
 			// Switch to human (can exit car anytime)
 			this.activePlayer = "human";
+			this.vehicleGrapple?.release();
 			if (this.carInput) {
 				this.carInput.isEnabled = false;
 				this.carInput.releaseControls();
@@ -3320,21 +4620,50 @@ export class FluffyGrass {
 		}
 	}
 
-	private resolveWorldDefinition(id: GameWorldId): WorldDefinition {
+	/** Def already in memory this session; falls back to Island. */
+	private knownWorldDefinition(id: GameWorldId): WorldDefinition {
+		if (id === "valley") return VALLEY_WORLD;
+		if (id === "island") return ISLAND_WORLD;
+		return this.customWorldDefs.find((w) => w.id === id) ?? ISLAND_WORLD;
+	}
+
+	/**
+	 * Resolve a world def, fetching it from the DB when this session has not
+	 * seen it yet (e.g. picked from the list after a reload).
+	 */
+	private async resolveWorldDefinition(
+		id: GameWorldId
+	): Promise<WorldDefinition | null> {
 		if (id === "island") return ISLAND_WORLD;
 		if (id === "valley") return VALLEY_WORLD;
-		const custom = this.customWorldDefs.find((w) => w.id === id);
-		if (custom) return custom;
-		return ISLAND_WORLD;
+		const known = this.customWorldDefs.find((w) => w.id === id);
+		if (known) return known;
+		const fetched = (await this.editMode?.loadWorldFromDb(id)) ?? null;
+		if (!fetched) return null;
+		this.customWorldDefs.push(fetched);
+		return fetched;
 	}
 
 	private async switchWorld(target: GameWorldId) {
 		if (target === this.currentWorld || this.isWorldSwitching) return;
 
+		// Drop any hook anchored in the world we are leaving.
+		this.vehicleGrapple?.release();
+
 		const previous = this.currentWorld;
 		const previousDef = this.activeWorldDef;
-		const targetDef = this.resolveWorldDefinition(target);
+		// Claim the switch before awaiting the DB fetch so no second switch races in.
 		this.isWorldSwitching = true;
+		const targetDef = await this.resolveWorldDefinition(target).catch(() => null);
+		if (!targetDef) {
+			this.isWorldSwitching = false;
+			this.settings.setWorld(previous);
+			this.worldLoading.show(String(target));
+			this.worldLoading.showError(
+				"That world could not be loaded from your account."
+			);
+			throw new Error(`World "${target}" not found.`);
+		}
 		this.worldLoading.show(targetDef.name);
 
 		try {
@@ -3358,23 +4687,40 @@ export class FluffyGrass {
 			this.worldGroup.visible = target === "island";
 			this.newWorldGroup.visible = target === "valley";
 			this.customWorldGroup.visible = targetDef.kind === "custom";
+
+			const activeGroup = targetDef.kind === "custom" ? this.customWorldGroup : this.worldGroup;
+			activeGroup.add(this.treeManager.group);
+
 			this.applyWorldEnvironment(target);
+			this.syncFireflies();
 
-			this.worldLoading.setProgress(82, "Placing player safely...");
-			this.teleportPlayerToCurrentTerrain(target);
-
-			this.worldLoading.setProgress(92, "Unloading previous world...");
+			// Unload BEFORE replaying edits: the dispose paths clear editor ponds,
+			// so ponds spawned by the replay would be destroyed right after birth.
+			this.worldLoading.setProgress(74, "Unloading previous world...");
 			await this.nextFrame();
 			if (previous === "island") this.disposeIslandWorld();
 			else if (previous === "valley") this.disposeValleyWorld();
 			else if (previousDef.kind === "custom" && targetDef.kind !== "custom") {
 				this.disposeCustomWorld();
 			}
-
 			this.renderer.renderLists.dispose();
-			this.settings.setWorld(target);
+
+			this.worldLoading.setProgress(82, "Restoring world edits...");
 			this.editMode?.onGameActiveChanged(this.isGameActive);
-			this.editMode?.onActiveWorldChanged();
+			// Saved sculpt edits MUST land before the spawn height is sampled —
+			// otherwise the player is placed on the pristine procedural surface and
+			// the replayed hill closes over them.
+			try {
+				await this.editMode?.onActiveWorldChanged();
+			} catch (error) {
+				// A failed replay must not roll back an otherwise loaded world.
+				console.warn("[world] Failed to restore saved edits", error);
+			}
+
+			this.worldLoading.setProgress(92, "Placing player safely...");
+			this.teleportPlayerToCurrentTerrain(target);
+
+			this.settings.setWorld(target);
 
 			this.worldLoading.setProgress(100, "Ready");
 			await this.nextFrame();
@@ -3398,6 +4744,28 @@ export class FluffyGrass {
 		}
 	}
 
+	/**
+	 * Terrain changed under the players — sculpting a hill, or replaying a saved
+	 * world's edits, can close the surface over a body. Only bodies whose origin
+	 * is below the surface are moved, so normal driving / walking is untouched.
+	 */
+	private liftPlayersAboveTerrain() {
+		const lift = (body: RAPIER.RigidBody, clearance: number) => {
+			const at = body.translation();
+			const groundY = getWorldTerrainY(at.x, at.z);
+			if (at.y >= groundY) return;
+			body.setTranslation({ x: at.x, y: groundY + clearance, z: at.z }, true);
+			body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+			body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+		};
+
+		if (this.car) lift(this.car.body, CAR_CONFIG.spawn.clearance);
+		// Human sits deep underground while riding — never yank it out then.
+		if (this.human && this.activePlayer === "human" && this.sitState === "none") {
+			lift(this.human.body, 2);
+		}
+	}
+
 	private teleportPlayerToCurrentTerrain(target: GameWorldId) {
 		const x = 0;
 		const z = target === "valley" ? this.valleySpawn.z : 0;
@@ -3415,14 +4783,80 @@ export class FluffyGrass {
 		}
 
 		if (this.human) {
-			this.human.body.setTranslation({ x: x + 3, y: groundY + 3, z }, true);
+			// Sample at the human's own spot — 3 m away the hill may be metres higher.
+			const humanX = x + 3;
+			const humanGroundY = getWorldTerrainY(humanX, z);
+			this.human.body.setTranslation(
+				{ x: humanX, y: humanGroundY + 3, z },
+				true
+			);
 			this.human.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+		}
+	}
+
+	public syncFireflies() {
+		if (this.fireflies) {
+			this.fireflies.points.removeFromParent();
+			this.fireflies.dispose();
+			this.fireflies = null;
+		}
+
+		let anchors: import("./environment/fireflies").FireflyAnchor[] = [];
+
+		if (this.currentWorld === "island") {
+			const { x: hx, z: hz } = TERRAIN_CONFIG.mainHill;
+			if (this.trees[0]) {
+				const tree = this.trees[0];
+				tree.group.updateMatrixWorld(true);
+				const canopyBox = new THREE.Box3().setFromObject(tree.group);
+				const trunkCut = canopyBox.min.y + (canopyBox.max.y - canopyBox.min.y) * 0.32;
+				canopyBox.min.y = trunkCut;
+				anchors.push({ kind: "volume", box: canopyBox, pad: 1.2, weight: 3.2 });
+			}
+			anchors.push({ kind: "grass", x: hx, z: hz, spread: 10, heightMin: 0.4, heightMax: 3.2, weight: 1.2 });
+			anchors.push({ kind: "grass", x: hx + 5, z: hz - 4, spread: 7, heightMin: 0.35, heightMax: 2.4, weight: 0.8 });
+			anchors.push({ kind: "grass", x: 0, z: 0, spread: 14, heightMin: 0.3, heightMax: 2.5, weight: 1 });
+			anchors.push({ kind: "grass", x: 6, z: 5, spread: 10, heightMin: 0.3, heightMax: 2.2, weight: 0.7 });
+		} else if (this.activeWorldDef.kind === "custom") {
+			let numEntities = 0;
+			if (this.editMode) {
+				const entities = this.editMode.applier.getEntities();
+				numEntities = entities.size;
+				for (const entry of entities.values()) {
+					if (entry.kind === "tree") {
+						const pos = entry.tree.group.position;
+						anchors.push({ kind: "grass", x: pos.x, z: pos.z, spread: 8, heightMin: 0.5, heightMax: 3, weight: 1.5 });
+					} else if (entry.kind === "stone") {
+						const pos = entry.stone.group.position;
+						anchors.push({ kind: "grass", x: pos.x, z: pos.z, spread: 4, heightMin: 0.2, heightMax: 1.5, weight: 0.5 });
+					}
+				}
+			}
+			// Add some random global ones if the world is empty
+			if (anchors.length === 0) {
+				anchors.push({ kind: "grass", x: 0, z: 0, spread: 20, heightMin: 0.5, heightMax: 2.5, weight: 1 });
+			}
+			console.log(`[FluffyGrass] syncFireflies generated ${anchors.length} anchors from ${numEntities} entities`);
+		}
+
+		if (anchors.length > 0) {
+			console.log(`[FluffyGrass] spawning fireflies with ${anchors.length} anchors`);
+			this.fireflies = createFireflies({
+				count: 280,
+				anchors,
+			});
+			const activeGroup = this.activeWorldDef.kind === "custom" ? this.customWorldGroup : this.worldGroup;
+			activeGroup.add(this.fireflies.points);
 		}
 	}
 
 	private applyWorldEnvironment(world: GameWorldId) {
 		const sky = this.scene.getObjectByName("sky-dome");
-		const def = this.resolveWorldDefinition(world);
+		const def = this.knownWorldDefinition(world);
+		this.currentFogRadius = fogRadiusForWorld(def);
+		this.volumetricFogDensity = fogDensityForWorld(def);
+		this.fogFollowPlayer = fogFollowsPlayer(def);
+
 		if (world === "island" || def.kind === "custom") {
 			this.grassMaterial.setTerrainSize(def.size);
 			if (this.dayNight) {
@@ -3430,16 +4864,23 @@ export class FluffyGrass {
 				this.dayNight.setHour(this.dayNightGui.hour);
 			}
 			if (sky) sky.visible = true;
-			this.currentFogRadius = def.kind === "custom" ? 90 : 65;
-			this.grassMaterial.uniforms.baseColor.value.set("#313f1b");
-			this.grassMaterial.uniforms.tipColor1.value.set("#5e875e");
-			this.grassMaterial.uniforms.tipColor2.value.set("#1f352a");
+			this.grassMaterial.uniforms.baseColor.value.set("#1d360c");
+			this.grassMaterial.uniforms.tipColor1.value.set("#3f6d21");
+			this.grassMaterial.uniforms.tipColor2.value.set("#4c8129");
+			this.sceneProps.terrainColor = "#1d360c";
+			if (this.terrainMat) {
+				this.terrainMat.color.set("#1d360c");
+			}
 			this.scene.background = new THREE.Color(
 				def.kind === "custom" ? "#87a4c0" : this.sceneProps.fogColor
 			);
+			this.atmosphereFogDensity =
+				def.kind === "custom" ? 0.0035 : this.sceneProps.fogDensity;
 			if (this.scene.fog instanceof THREE.FogExp2) {
 				this.scene.fog.color.copy(this.scene.background as THREE.Color);
-				this.scene.fog.density = def.kind === "custom" ? 0.0035 : this.sceneProps.fogDensity;
+				this.scene.fog.density = this.volumetricFogPass?.enabled
+					? this.residualFogDensity
+					: this.atmosphereFogDensity;
 			}
 		} else {
 			this.grassMaterial.setTerrainSize(200);
@@ -3447,16 +4888,23 @@ export class FluffyGrass {
 			if (sky) sky.visible = false;
 			const color = new THREE.Color(0x1e2b2f);
 			this.scene.background = color.clone();
+			this.atmosphereFogDensity = 0.005;
 			if (this.scene.fog instanceof THREE.FogExp2) {
 				this.scene.fog.color.copy(color);
-				this.scene.fog.density = 0.005;
+				this.scene.fog.density = this.volumetricFogPass?.enabled
+					? this.residualFogDensity
+					: this.atmosphereFogDensity;
 			}
-			this.currentFogRadius = 250;
 			this.grassMaterial.uniforms.baseColor.value.set(0x3e524e);
 			this.grassMaterial.uniforms.tipColor1.value.set(0x799894);
 			this.grassMaterial.uniforms.tipColor2.value.set(0x56726e);
+			this.sceneProps.terrainColor = "#3e524e";
+			if (this.terrainMat) {
+				this.terrainMat.color.set("#3e524e");
+			}
 		}
 		if (this.sceneProps.mapMode) this.suppressFogForEditMode();
+		else this.syncVolumetricFogQuality();
 	}
 
 	/** Ortho top cam sits hundreds of units up — FogExp2 turns the map pure white. */
@@ -3469,6 +4917,7 @@ export class FluffyGrass {
 			this.scene.background.setHex(0x3d3d3d);
 		}
 		if (this.volumetricFog) this.volumetricFog.group.visible = false;
+		if (this.volumetricFogPass) this.volumetricFogPass.enabled = false;
 	}
 
 	private applyEditMapAtmosphere(enabled: boolean) {
@@ -3479,12 +4928,13 @@ export class FluffyGrass {
 					: new THREE.Color(this.sceneProps.fogColor);
 			const density =
 				this.scene.fog instanceof THREE.FogExp2
-					? this.scene.fog.density
+					? this.atmosphereFogDensity
 					: this.sceneProps.fogDensity;
 			this.editFogBackup = {
 				density,
 				bg,
 				volVisible: this.volumetricFog?.group.visible ?? false,
+				passEnabled: this.volumetricFogPass?.enabled ?? false,
 			};
 			// Local editor only: lock noon lighting. Other clients keep their own day/night.
 			if (this.dayNight && !this.editDayNightBackup) {
@@ -3525,10 +4975,8 @@ export class FluffyGrass {
 			this.scene.fog.color.copy(backup.bg);
 			this.scene.fog.density = backup.density;
 		}
-		if (this.volumetricFog) {
-			this.volumetricFog.group.visible =
-				backup.volVisible && this.graphicsQuality !== "Low";
-		}
+		this.atmosphereFogDensity = backup.density;
+		this.syncVolumetricFogQuality();
 	}
 
 	private disposeIslandWorld() {
@@ -3536,11 +4984,7 @@ export class FluffyGrass {
 		this.pond?.dispose();
 		this.pond = undefined;
 
-		for (const pond of this.editorPonds) {
-			pond.mesh.removeFromParent();
-			pond.dispose();
-		}
-		this.editorPonds = [];
+		this.disposeEditorPondsIn(this.worldGroup);
 
 		for (const stone of this.editorStones) stone.dispose();
 		this.editorStones = [];
@@ -3575,7 +5019,37 @@ export class FluffyGrass {
 		this.disposeWorldGroup(this.worldGroup);
 	}
 
+	/**
+	 * Dispose only the editor ponds living under `group`.
+	 *
+	 * editorPonds is one flat list across every world, so disposing it wholesale
+	 * destroys the incoming world's water when unloading the outgoing one.
+	 */
+	private disposeEditorPondsIn(group: THREE.Object3D) {
+		const kept: Pond[] = [];
+		for (const pond of this.editorPonds) {
+			let node: THREE.Object3D | null = pond.mesh;
+			let owned = false;
+			while (node) {
+				if (node === group) {
+					owned = true;
+					break;
+				}
+				node = node.parent;
+			}
+			if (!owned) {
+				kept.push(pond);
+				continue;
+			}
+			pond.mesh.removeFromParent();
+			pond.dispose();
+		}
+		this.editorPonds = kept;
+		this.resizePondTargets();
+	}
+
 	private disposeValleyWorld() {
+		this.disposeEditorPondsIn(this.newWorldGroup);
 		this.valleyGrassField?.dispose();
 		this.valleyGrassField = null;
 		if (this.valleyTerrainBody) {
@@ -3797,6 +5271,11 @@ export class FluffyGrass {
 		this.camera.updateProjectionMatrix();
 		this.renderer.setSize(window.innerWidth, window.innerHeight);
 		this.resizePondTargets();
+		const pr = this.renderer.getPixelRatio();
+		this.volumetricFogPass?.setSize(
+			window.innerWidth * pr,
+			window.innerHeight * pr
+		);
 	}
 }
 

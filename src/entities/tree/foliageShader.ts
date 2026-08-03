@@ -1,5 +1,6 @@
 /**
  * Exact vertex shader from the douges.dev tree demo (CSM csm_PositionRaw output).
+ * Updated to support InstancedMesh.
  */
 export const FOLIAGE_VERTEX_SHADER = /* glsl */ `
 uniform float u_effectBlend;
@@ -31,7 +32,14 @@ mat4 rotateZ(float radians) {
 
 vec4 applyWind(vec4 v) {
   float boundedYNormal = remap(normal.y, -1.0, 1.0, 0.0, 1.0);
-  float posXZ = position.x + position.z;
+  
+#ifdef USE_INSTANCING
+  vec4 instanceWorldPos = modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+#else
+  vec4 instanceWorldPos = modelMatrix * vec4(0.0, 0.0, 0.0, 1.0);
+#endif
+
+  float posXZ = instanceWorldPos.x + instanceWorldPos.z;
   float power = u_windSpeed / 5.0 * -0.5;
 
   float topFacing = remap(sin(u_windTime + posXZ), -1.0, 1.0, 0.0, power);
@@ -63,7 +71,13 @@ void main() {
 
   vec3 inflatedVertexOffset = inflateOffset(vec3(vertexOffset, 0.0));
 
-  vec4 worldViewPosition = modelViewMatrix * vec4(position, 1.0);
+#ifdef USE_INSTANCING
+  mat4 mVM = viewMatrix * modelMatrix * instanceMatrix;
+#else
+  mat4 mVM = modelViewMatrix;
+#endif
+
+  vec4 worldViewPosition = mVM * vec4(position, 1.0);
 
   worldViewPosition += vec4(mix(vec3(0.0), inflatedVertexOffset, u_effectBlend), 0.0);
 
@@ -72,3 +86,4 @@ void main() {
   csm_PositionRaw = projectionMatrix * worldViewPosition;
 }
 `;
+

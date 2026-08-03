@@ -37,6 +37,8 @@ export class Pond {
       opacity: this.options.opacity,
       reflectivity: this.options.reflectivity,
       resolution: this.options.resolution,
+      width: this.options.width,
+      height: this.options.height,
       circular: this.options.circular,
       clarity: this.options.clarity,
       shoreSoftness: this.options.shoreSoftness,

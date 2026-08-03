@@ -2117,3 +2117,258 @@ body.edit-mode-active .edit-mode-toggle {
 	}
 }
 
+/* —— Weapon wheel (hold Q) —— */
+.weapon-wheel {
+	position: fixed;
+	inset: 0;
+	z-index: 1200;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	pointer-events: none;
+	opacity: 0;
+	visibility: hidden;
+	transition: opacity 0.12s ease, visibility 0.12s ease;
+}
+
+.weapon-wheel.is-open {
+	opacity: 1;
+	visibility: visible;
+	pointer-events: auto;
+}
+
+.weapon-wheel .ww-backdrop {
+	position: absolute;
+	inset: 0;
+	background: radial-gradient(
+		circle at center,
+		rgba(8, 14, 10, 0.55) 0%,
+		rgba(8, 14, 10, 0.25) 45%,
+		transparent 70%
+	);
+}
+
+.weapon-wheel .ww-ring {
+	position: relative;
+	width: 280px;
+	height: 280px;
+	border-radius: 50%;
+	border: 2px solid rgba(220, 230, 210, 0.35);
+	background: rgba(12, 20, 14, 0.55);
+	box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35), 0 12px 40px rgba(0, 0, 0, 0.45);
+	backdrop-filter: blur(6px);
+}
+
+.weapon-wheel .ww-center {
+	position: absolute;
+	left: 50%;
+	top: 50%;
+	transform: translate(-50%, -50%);
+	width: 88px;
+	height: 88px;
+	border-radius: 50%;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background: rgba(18, 28, 20, 0.9);
+	border: 1px solid rgba(200, 220, 190, 0.4);
+	text-align: center;
+}
+
+.weapon-wheel .ww-center-label {
+	color: #e8f0e0;
+	font-size: 0.85rem;
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+}
+
+.weapon-wheel .ww-slot {
+	position: absolute;
+	left: 50%;
+	top: 50%;
+	width: 72px;
+	height: 72px;
+	border-radius: 50%;
+	border: 1px solid rgba(200, 220, 190, 0.28);
+	background: rgba(22, 32, 24, 0.88);
+	color: #dce8d4;
+	cursor: pointer;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: 2px;
+	padding: 0;
+	font-family: inherit;
+	transform: translate(-50%, -50%) translate(var(--ww-x, 0px), var(--ww-y, 0px));
+	transition: border-color 0.1s ease, background 0.1s ease, transform 0.1s ease;
+}
+
+.weapon-wheel .ww-slot .ww-icon {
+	font-size: 1.45rem;
+	line-height: 1;
+}
+
+.weapon-wheel .ww-slot .ww-label {
+	font-size: 0.62rem;
+	font-weight: 600;
+	letter-spacing: 0.03em;
+	text-transform: uppercase;
+	opacity: 0.85;
+}
+
+.weapon-wheel .ww-slot.is-highlighted {
+	border-color: rgba(170, 220, 120, 0.95);
+	background: rgba(40, 70, 40, 0.95);
+	transform: translate(-50%, -50%) translate(var(--ww-x, 0px), var(--ww-y, 0px))
+		scale(1.08);
+}
+
+.weapon-wheel .ww-slot.is-equipped:not(.is-highlighted) {
+	border-color: rgba(140, 180, 120, 0.65);
+}
+
+body.ui-cursor-capture,
+body.ui-cursor-capture * {
+	cursor: default !important;
+}
+
+body.ui-cursor-capture .weapon-wheel .ww-slot {
+	cursor: pointer !important;
+}
+
+/* CSGO-style screen-center crosshair while gun is equipped */
+.gun-crosshair {
+	position: fixed;
+	left: 50%;
+	top: 50%;
+	width: 22px;
+	height: 22px;
+	transform: translate(-50%, -50%);
+	z-index: 900;
+	pointer-events: none;
+	opacity: 0;
+	visibility: hidden;
+	transition: opacity 0.1s ease;
+}
+
+.gun-crosshair.is-visible {
+	opacity: 1;
+	visibility: visible;
+}
+
+.gun-crosshair .gc-h,
+.gun-crosshair .gc-v {
+	position: absolute;
+	background: rgba(235, 245, 230, 0.9);
+	box-shadow: 0 0 2px rgba(0, 0, 0, 0.7);
+}
+
+.gun-crosshair .gc-h {
+	left: 0;
+	top: 50%;
+	width: 100%;
+	height: 2px;
+	transform: translateY(-50%);
+}
+
+.gun-crosshair .gc-v {
+	top: 0;
+	left: 50%;
+	width: 2px;
+	height: 100%;
+	transform: translateX(-50%);
+}
+
+.gun-crosshair .gc-dot {
+	position: absolute;
+	left: 50%;
+	top: 50%;
+	width: 3px;
+	height: 3px;
+	border-radius: 50%;
+	transform: translate(-50%, -50%);
+	background: rgba(235, 245, 230, 0.95);
+}
+
+.gun-crosshair.is-hit .gc-h,
+.gun-crosshair.is-hit .gc-v,
+.gun-crosshair.is-hit .gc-dot {
+	background: #ff6060;
+}
+
+/* GTA V–style health bar (bottom-right) */
+.health-hud {
+	position: fixed;
+	right: max(18px, env(safe-area-inset-right));
+	bottom: max(22px, env(safe-area-inset-bottom));
+	z-index: 40;
+	display: none;
+	flex-direction: column;
+	align-items: flex-end;
+	gap: 5px;
+	pointer-events: none;
+	user-select: none;
+}
+
+.health-hud.is-visible {
+	display: flex;
+}
+
+.health-hud-bar {
+	width: min(220px, 42vw);
+	height: 10px;
+	padding: 2px;
+	border: 1px solid rgba(255, 255, 255, 0.55);
+	background: rgba(0, 0, 0, 0.55);
+	box-shadow: 0 1px 0 rgba(0, 0, 0, 0.45);
+}
+
+.health-hud-fill {
+	height: 100%;
+	width: 100%;
+	background: linear-gradient(180deg, #7dff7a 0%, #2fd24a 45%, #1a9e32 100%);
+	box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35);
+	transition: width 0.15s ease-out, background 0.2s ease;
+}
+
+.health-hud.is-mid .health-hud-fill {
+	background: linear-gradient(180deg, #ffe66a 0%, #e6b800 50%, #b88700 100%);
+}
+
+.health-hud.is-low .health-hud-fill,
+.health-hud.is-empty .health-hud-fill {
+	background: linear-gradient(180deg, #ff7a6a 0%, #e23120 50%, #a01810 100%);
+}
+
+.health-hud-label {
+	font-family: "Sora", system-ui, sans-serif;
+	font-size: 0.72rem;
+	font-weight: 600;
+	letter-spacing: 0.04em;
+	color: rgba(235, 255, 235, 0.92);
+	text-shadow: 0 1px 3px rgba(0, 0, 0, 0.75);
+}
+
+.health-hud.is-mid .health-hud-label {
+	color: rgba(255, 240, 180, 0.95);
+}
+
+.health-hud.is-low .health-hud-label,
+.health-hud.is-empty .health-hud-label {
+	color: rgba(255, 190, 180, 0.95);
+}
+
+@media (max-width: 700px) {
+	.health-hud {
+		bottom: max(88px, env(safe-area-inset-bottom));
+	}
+
+	.health-hud-bar {
+		width: min(160px, 48vw);
+		height: 8px;
+	}
+}
+
+

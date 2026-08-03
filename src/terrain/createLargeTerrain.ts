@@ -142,6 +142,7 @@ export function createLargeTerrain(material: THREE.Material): {
 	geometry.computeVertexNormals();
 	geometry.computeBoundingBox();
 	geometry.computeBoundingSphere();
+	geometry.computeBoundsTree();
 
 	const mesh = new THREE.Mesh(geometry, material);
 	mesh.name = "large-terrain";

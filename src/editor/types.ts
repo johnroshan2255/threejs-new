@@ -198,7 +198,4 @@ export type RoomWorldBinding = {
 	worldDefinition?: import("../worlds/worldTypes").WorldDefinition;
 };
 
-export const WORLD_EDIT_STORAGE_KEY = "the-car-game:world-edit-draft:v1";
-export const WORLD_EDIT_DOCS_KEY = "the-car-game:world-edit-docs:v1";
 export const WORLD_EDIT_CHANNEL = "the-car-game:world-edit";
-export const CUSTOM_WORLDS_KEY = "the-car-game:custom-worlds:v1";

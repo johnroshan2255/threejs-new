@@ -1,7 +1,11 @@
 import * as THREE from "three";
 import { getWorld } from "../../physics/world";
-import { getWorldTerrainY } from "../../terrain/islandHeight";
-import { TERRAIN_CONFIG } from "../../terrain/createLargeTerrain";
+import {
+	findSafeTerrainSpawn,
+	getWorldTerrainY,
+	hasTerrainAt,
+	isOutsideTerrain,
+} from "../../terrain/islandHeight";
 import type { CarController } from "./carController";
 import { CAR_CONFIG } from "./carConfig";
 import type { CarEntity } from "./createCar";
@@ -12,10 +16,7 @@ const _euler = new THREE.Euler(0, 0, 0, "YXZ");
 /** True when the car has left the driveable terrain (or fallen off the map). */
 export function isCarOutsideWorld(car: CarEntity): boolean {
 	const t = car.body.translation();
-	return (
-		t.y < -120 ||
-		t.y > 90
-	);
+	return isOutsideTerrain(t.x, t.y, t.z);
 }
 
 /** Upright the car at its current XZ, on terrain, facing the same compass heading. */
@@ -28,9 +29,15 @@ export function resetCarUpright(car: CarEntity, controller: CarController) {
 	const yaw = _euler.y;
 	const halfYaw = yaw * 0.5;
 
-	const y = getWorldTerrainY(t.x, t.z) + CAR_CONFIG.spawn.clearance;
+	const spawn = hasTerrainAt(t.x, t.z)
+		? new THREE.Vector3(
+				t.x,
+				getWorldTerrainY(t.x, t.z) + CAR_CONFIG.spawn.clearance,
+				t.z
+			)
+		: findSafeTerrainSpawn(t.x, t.z, CAR_CONFIG.spawn.clearance);
 
-	car.body.setTranslation({ x: t.x, y, z: t.z }, true);
+	car.body.setTranslation({ x: spawn.x, y: spawn.y, z: spawn.z }, true);
 	car.body.setRotation(
 		{ x: 0, y: Math.sin(halfYaw), z: 0, w: Math.cos(halfYaw) },
 		true
@@ -42,18 +49,34 @@ export function resetCarUpright(car: CarEntity, controller: CarController) {
 	settleVehicle(car);
 }
 
-export function respawnCarAtStart(car: CarEntity, controller: CarController, customSpawnPoint?: THREE.Vector3) {
-	let x = CAR_CONFIG.spawn.x;
-	let z = CAR_CONFIG.spawn.z;
-	let y = getWorldTerrainY(x, z) + CAR_CONFIG.spawn.clearance;
-
-	if (customSpawnPoint) {
-		x = customSpawnPoint.x;
-		z = customSpawnPoint.z;
-		y = customSpawnPoint.y + CAR_CONFIG.spawn.clearance;
+export function respawnCarAtStart(
+	car: CarEntity,
+	controller: CarController,
+	customSpawnPoint?: THREE.Vector3
+) {
+	let spawn: THREE.Vector3;
+	if (customSpawnPoint && hasTerrainAt(customSpawnPoint.x, customSpawnPoint.z)) {
+		spawn = new THREE.Vector3(
+			customSpawnPoint.x,
+			getWorldTerrainY(customSpawnPoint.x, customSpawnPoint.z) +
+				CAR_CONFIG.spawn.clearance,
+			customSpawnPoint.z
+		);
+	} else if (customSpawnPoint) {
+		spawn = findSafeTerrainSpawn(
+			customSpawnPoint.x,
+			customSpawnPoint.z,
+			CAR_CONFIG.spawn.clearance
+		);
+	} else {
+		spawn = findSafeTerrainSpawn(
+			CAR_CONFIG.spawn.x,
+			CAR_CONFIG.spawn.z,
+			CAR_CONFIG.spawn.clearance
+		);
 	}
 
-	car.body.setTranslation({ x, y, z }, true);
+	car.body.setTranslation({ x: spawn.x, y: spawn.y, z: spawn.z }, true);
 	car.body.setRotation({ x: 0, y: 0, z: 0, w: 1 }, true);
 	car.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
 	car.body.setAngvel({ x: 0, y: 0, z: 0 }, true);

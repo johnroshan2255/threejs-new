@@ -1,11 +1,32 @@
-const MIN_PITCH = -0.35;
-const MAX_PITCH = 1.05;
+const MIN_PITCH = -0.85;
+const MAX_PITCH = 1.15;
 const MIN_DISTANCE = 5;
 const MAX_DISTANCE = 16;
+/** Mouse-look sensitivity (radians per pixel of movement). */
+const LOOK_SENSITIVITY = 0.0025;
+/**
+ * How long after the last mouse-look movement the camera still counts as
+ * user-steered, so auto-recenter does not fight the mouse mid-look.
+ */
+const LOOK_HOLD_MS = 450;
+/** Ignore absurd jumps (window re-entry, alt-tab) in unlocked mouse look. */
+const MAX_UNLOCKED_STEP_PX = 180;
+
+export type ChaseCameraInputOptions = {
+	/**
+	 * True while the player is driving / walking and free mouse-look should
+	 * steer the camera (false in the lobby, in edit mode, on touch devices).
+	 */
+	isFreeLookAllowed?: () => boolean;
+};
 
 /**
  * Chase-cam orbit / zoom.
- * Desktop: drag + scroll.
+ * Desktop: free mouse-look — moving the mouse turns the camera, no button held.
+ *   Clicking the canvas grabs pointer lock so the look never stops at a screen
+ *   edge; Esc releases it and plain mouse movement takes over again.
+ *   Hold Alt to park the camera and get the cursor back for UI; release Alt and
+ *   the camera follows the mouse again.
  * Mobile: one-finger drag on empty canvas to orbit; pinch to zoom.
  * Drive pads stay separate (touches there never start orbit).
  */
@@ -13,8 +34,7 @@ export class ChaseCameraInput {
 	yaw = 0;
 	pitch = 0.22;
 	distance = 8;
-	
-	public isDragging = false;
+
 	private dragging = false;
 	private lastX = 0;
 	private lastY = 0;
@@ -25,12 +45,41 @@ export class ChaseCameraInput {
 	private pinchPoints = new Map<number, { x: number; y: number }>();
 	private lastPinchDist = 0;
 
-	constructor(private domElement: HTMLElement) {
+	/** Pointer lock is held by the canvas — deltas come from movementX/Y. */
+	private locked = false;
+	private lookActiveUntil = 0;
+	private hasFreeSample = false;
+	private freeX = 0;
+	private freeY = 0;
+	/** Alt held → cursor mode: the camera ignores the mouse until Alt is up. */
+	private altHeld = false;
+	/** Was the pointer locked when Alt went down? Restore it on release. */
+	private relockAfterAlt = false;
+	/** Weapon wheel / modal UI that needs a real mouse cursor. */
+	private uiCapture = false;
+	private relockAfterUi = false;
+
+	/** True while the player is steering the camera (drag, or recent mouse-look). */
+	get isDragging(): boolean {
+		return this.dragging || performance.now() < this.lookActiveUntil;
+	}
+
+	constructor(
+		private domElement: HTMLElement,
+		private options: ChaseCameraInputOptions = {}
+	) {
 		// Pointer path (desktop + most mobile browsers)
 		domElement.addEventListener("pointerdown", this.onPointerDown);
 		window.addEventListener("pointermove", this.onPointerMove);
 		window.addEventListener("pointerup", this.onPointerUp);
 		window.addEventListener("pointercancel", this.onPointerUp);
+		window.addEventListener("pointerout", this.onPointerOut);
+		window.addEventListener("blur", this.onWindowBlur);
+		window.addEventListener("keydown", this.onKeyDown);
+		window.addEventListener("keyup", this.onKeyUp);
+		document.addEventListener("visibilitychange", this.onWindowBlur);
+		document.addEventListener("pointerlockchange", this.onPointerLockChange);
+		document.addEventListener("pointerlockerror", this.onPointerLockChange);
 
 		// Touch path — more reliable on some Android / iOS builds
 		domElement.addEventListener("touchstart", this.onTouchStart, { passive: false });
@@ -46,7 +95,7 @@ export class ChaseCameraInput {
 	private isUiTarget(target: EventTarget | null): boolean {
 		const el = target as HTMLElement | null;
 		return !!el?.closest?.(
-			".mobile-controls, .settings-toggle, .dg, .orientation-gate"
+			".mobile-controls, .settings-toggle, .dg, .orientation-gate, .logout-modal, #room-list-panel, #game-top-nav, .loading-screen, .weapon-wheel"
 		);
 	}
 
@@ -59,7 +108,6 @@ export class ChaseCameraInput {
 
 	private beginDrag(id: number, x: number, y: number, touch: boolean) {
 		this.dragging = true;
-		this.isDragging = true;
 		this.activeId = id;
 		this.lastX = x;
 		this.lastY = y;
@@ -82,9 +130,8 @@ export class ChaseCameraInput {
 	private endDrag(id: number) {
 		if (this.activeId !== null && id !== this.activeId) return;
 		this.dragging = false;
-		this.isDragging = false;
 		this.activeId = null;
-		this.domElement.style.cursor = "grab";
+		this.domElement.style.cursor = this.locked ? "none" : "grab";
 	}
 
 	private updatePinch() {
@@ -101,6 +148,213 @@ export class ChaseCameraInput {
 		this.lastPinchDist = dist;
 	}
 
+	/**
+	 * Pause mouse-look and show the system cursor (weapon wheel, etc.).
+	 * Mirrors Alt-held cursor mode but is driven by game UI, not the Alt key.
+	 */
+	setUiCapture(active: boolean) {
+		if (this.uiCapture === active) return;
+		this.uiCapture = active;
+		this.hasFreeSample = false;
+		if (active) {
+			this.lookActiveUntil = 0;
+			this.relockAfterUi = this.locked;
+			this.exitPointerLock();
+			this.domElement.style.cursor = "default";
+			document.body.classList.add("ui-cursor-capture");
+			return;
+		}
+		document.body.classList.remove("ui-cursor-capture");
+		this.domElement.style.cursor = this.dragging ? "grabbing" : "grab";
+		if (this.relockAfterUi && this.options.isFreeLookAllowed?.()) {
+			this.requestPointerLock();
+		}
+		this.relockAfterUi = false;
+	}
+
+	/** True while weapon wheel / similar UI owns the mouse. */
+	get isUiCapture(): boolean {
+		return this.uiCapture;
+	}
+
+	// --- Alt = temporary cursor mode ---
+
+	private setAltHeld(held: boolean) {
+		if (this.altHeld === held) return;
+		this.altHeld = held;
+		// Re-baseline so resuming look does not jump by however far the cursor
+		// travelled while it was free.
+		this.hasFreeSample = false;
+		if (held) {
+			this.lookActiveUntil = 0;
+			this.relockAfterAlt = this.locked;
+			this.exitPointerLock();
+			this.domElement.style.cursor = "default";
+			return;
+		}
+
+		this.domElement.style.cursor = this.dragging ? "grabbing" : "grab";
+		// Hand the mouse back to the camera exactly as it was. The key release
+		// usually counts as user activation; if the browser refuses, cursor-based
+		// look takes over until the next canvas click.
+		if (
+			this.relockAfterAlt &&
+			!this.uiCapture &&
+			this.options.isFreeLookAllowed?.()
+		) {
+			this.requestPointerLock();
+		}
+		this.relockAfterAlt = false;
+	}
+
+	/**
+	 * Alt+Tab / Alt+click away swallows the keyup, which would leave the camera
+	 * stuck in cursor mode — any later event without altKey clears it.
+	 */
+	private syncAltFromEvent(e: KeyboardEvent | PointerEvent) {
+		if (this.altHeld && !e.altKey) this.setAltHeld(false);
+	}
+
+	private isAltKey(e: KeyboardEvent) {
+		return e.key === "Alt" || e.code === "AltLeft" || e.code === "AltRight";
+	}
+
+	private onKeyDown = (e: KeyboardEvent) => {
+		if (!this.isAltKey(e)) {
+			this.syncAltFromEvent(e);
+			return;
+		}
+		this.setAltHeld(true);
+		// Keep Alt from handing focus to the browser menu bar mid-game.
+		if (this.options.isFreeLookAllowed?.()) e.preventDefault();
+	};
+
+	private onKeyUp = (e: KeyboardEvent) => {
+		if (this.isAltKey(e)) {
+			this.setAltHeld(false);
+			return;
+		}
+		this.syncAltFromEvent(e);
+	};
+
+	// --- Mouse look (no button held) ---
+
+	/** Apply a raw mouse delta to yaw / pitch. */
+	private applyLook(dx: number, dy: number) {
+		if (dx === 0 && dy === 0) return;
+		this.yaw -= dx * LOOK_SENSITIVITY;
+		this.pitch += dy * LOOK_SENSITIVITY * 0.75;
+		this.pitch = Math.max(MIN_PITCH, Math.min(MAX_PITCH, this.pitch));
+		this.lookActiveUntil = performance.now() + LOOK_HOLD_MS;
+	}
+
+	/**
+	 * Cursor-position based look, used until the canvas takes pointer lock.
+	 * Works with zero clicks; stalls at the screen edge, which the lock fixes.
+	 */
+	private freeLookFromPosition(e: PointerEvent) {
+		if (this.isUiTarget(e.target)) {
+			this.hasFreeSample = false;
+			return;
+		}
+		const el = e.target as Node | null;
+		const overCanvas = el === this.domElement || this.domElement.contains(el);
+		if (!overCanvas) {
+			this.hasFreeSample = false;
+			return;
+		}
+		if (!this.hasFreeSample) {
+			this.freeX = e.clientX;
+			this.freeY = e.clientY;
+			this.hasFreeSample = true;
+			return;
+		}
+		const dx = e.clientX - this.freeX;
+		const dy = e.clientY - this.freeY;
+		this.freeX = e.clientX;
+		this.freeY = e.clientY;
+		if (
+			Math.abs(dx) > MAX_UNLOCKED_STEP_PX ||
+			Math.abs(dy) > MAX_UNLOCKED_STEP_PX
+		) {
+			return;
+		}
+		this.applyLook(dx, dy);
+	}
+
+	/** Pointer lock removes the screen-edge limit; needs a user gesture. */
+	private requestPointerLock() {
+		const el = this.domElement as HTMLElement & {
+			requestPointerLock?: (options?: {
+				unadjustedMovement?: boolean;
+			}) => Promise<void> | void;
+		};
+		if (!el.requestPointerLock) return;
+		try {
+			const result = el.requestPointerLock({ unadjustedMovement: true });
+			// Chrome rejects unadjustedMovement on some platforms — retry plain.
+			void Promise.resolve(result).catch(() => {
+				try {
+					el.requestPointerLock?.();
+				} catch {
+					/* lock unavailable — cursor-position look still works */
+				}
+			});
+		} catch {
+			try {
+				el.requestPointerLock();
+			} catch {
+				/* lock unavailable */
+			}
+		}
+	}
+
+	/** Per-frame: give the cursor back as soon as free look stops being allowed. */
+	syncFreeLook() {
+		if (!this.locked) return;
+		if (this.altHeld || this.uiCapture || !this.options.isFreeLookAllowed?.()) {
+			this.exitFreeLook();
+		}
+	}
+
+	/** Release mouse-look (edit mode, lobby, UI that needs the cursor). */
+	exitFreeLook() {
+		this.hasFreeSample = false;
+		this.lookActiveUntil = 0;
+		this.exitPointerLock();
+	}
+
+	private exitPointerLock() {
+		if (document.pointerLockElement === this.domElement) {
+			document.exitPointerLock();
+		}
+	}
+
+	private onPointerLockChange = () => {
+		this.locked = document.pointerLockElement === this.domElement;
+		this.hasFreeSample = false;
+		this.domElement.style.cursor = this.locked
+			? "none"
+			: this.altHeld || this.uiCapture
+				? "default"
+				: this.dragging
+					? "grabbing"
+					: "grab";
+	};
+
+	private onPointerOut = (e: PointerEvent) => {
+		if (e.pointerType === "touch") return;
+		this.hasFreeSample = false;
+	};
+
+	private onWindowBlur = () => {
+		this.hasFreeSample = false;
+		// Alt+Tab leaves no keyup behind — do not come back stuck in cursor mode.
+		// No re-lock here: the window is losing focus, so the request would fail.
+		this.relockAfterAlt = false;
+		this.setAltHeld(false);
+	};
+
 	// --- Pointer ---
 
 	private onPointerDown = (e: PointerEvent) => {
@@ -113,6 +367,15 @@ export class ChaseCameraInput {
 			return;
 		}
 
+		// Alt / UI capture: the click belongs to the UI — no lock, no orbit drag.
+		if (this.altHeld || this.uiCapture) return;
+		// Clicking the world upgrades cursor look to pointer lock (edge-free).
+		if (!this.locked && this.options.isFreeLookAllowed?.()) {
+			this.requestPointerLock();
+			return;
+		}
+		if (this.locked) return;
+
 		this.beginDrag(e.pointerId, e.clientX, e.clientY, false);
 		try {
 			this.domElement.setPointerCapture(e.pointerId);
@@ -123,7 +386,19 @@ export class ChaseCameraInput {
 
 	private onPointerMove = (e: PointerEvent) => {
 		if (e.pointerType === "touch") return;
-		this.moveDrag(e.pointerId, e.clientX, e.clientY);
+		this.syncAltFromEvent(e);
+		// Alt held: the mouse belongs to the cursor, not the camera. Checked
+		// before the locked branch — the lock exit is a frame behind the keydown.
+		if (this.altHeld || this.uiCapture) return;
+		if (this.locked) {
+			this.applyLook(e.movementX, e.movementY);
+			return;
+		}
+		if (this.dragging) {
+			this.moveDrag(e.pointerId, e.clientX, e.clientY);
+			return;
+		}
+		if (this.options.isFreeLookAllowed?.()) this.freeLookFromPosition(e);
 	};
 
 	private onPointerUp = (e: PointerEvent) => {

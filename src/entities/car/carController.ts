@@ -13,6 +13,12 @@ export class CarController {
 	private targetSteer = 0;
 	private throttle = 0;
 	private braking = false;
+	private steerInput = 0;
+
+	/** 0 = gripped, 1 = full W+Space rear-spin drift. */
+	private driftFactor = 0;
+	private drifting = false;
+	private smokeAccum = 0;
 
 	constructor(
 		private body: RAPIER.RigidBody,
@@ -26,6 +32,14 @@ export class CarController {
 		return this.braking;
 	}
 
+	isDrifting(): boolean {
+		return this.drifting;
+	}
+
+	getDriftFactor(): number {
+		return this.driftFactor;
+	}
+
 	getThrottle(): number {
 		return this.throttle;
 	}
@@ -35,10 +49,51 @@ export class CarController {
 		return Math.hypot(v.x, v.z);
 	}
 
+	/** Driven rear axle (non-steering) — engine tires. */
+	getDriveWheelIndices(): number[] {
+		return this.rearWheelIndices();
+	}
+
+	/** True when both rear tires should puff smoke this frame. */
+	consumeTireSmokeBurst(dt: number): boolean {
+		if (this.driftFactor < 0.2 || this.throttle < 0.1) {
+			this.smokeAccum = 0;
+			return false;
+		}
+		this.smokeAccum +=
+			dt *
+			CAR_CONFIG.drift.smokeRate *
+			this.driftFactor *
+			Math.min(1, this.throttle);
+		if (this.smokeAccum < 1) return false;
+		this.smokeAccum -= 1;
+		return true;
+	}
+
+	/** Non-steering wheels = rear / drive axle. */
+	private rearWheelIndices(): number[] {
+		const steer = new Set(this.steeringWheelIndices);
+		const rear: number[] = [];
+		for (let i = 0; i < this.vehicle.numWheels(); i++) {
+			if (!steer.has(i)) rear.push(i);
+		}
+		return rear.length ? rear : this.driveFrontAxleIndices;
+	}
+
 	applyInput(dt: number, input: DriveInput) {
 		this.braking = input.braking;
+		this.steerInput = input.steer;
 
-		const { drive } = CAR_CONFIG;
+		const { drive, drift } = CAR_CONFIG;
+
+		// W + Space = front brake + rear spin drift.
+		const wantDrift = input.braking && input.throttle > 0.12;
+		const driftTarget = wantDrift ? 1 : 0;
+		const driftBlend = 1 - Math.exp(-drift.blendSpeed * dt);
+		this.driftFactor += (driftTarget - this.driftFactor) * driftBlend;
+		if (this.driftFactor < 0.02) this.driftFactor = 0;
+		this.drifting = this.driftFactor > 0.2;
+
 		const steerSmooth = 1 - Math.exp(-drive.steerSmoothing * dt);
 		const throttleTarget = input.throttle;
 		const rampingUp =
@@ -50,7 +105,10 @@ export class CarController {
 		const throttleSmooth = 1 - Math.exp(-throttleRate * dt);
 		this.throttle += (throttleTarget - this.throttle) * throttleSmooth;
 
-		this.targetSteer = input.steer * drive.maxSteerAngle;
+		const steerLimit =
+			drive.maxSteerAngle *
+			(1 + (drift.steerBoost - 1) * this.driftFactor);
+		this.targetSteer = input.steer * steerLimit;
 		this.steerAngle += (this.targetSteer - this.steerAngle) * steerSmooth;
 
 		for (let i = 0; i < this.vehicle.numWheels(); i++) {
@@ -60,26 +118,100 @@ export class CarController {
 			this.vehicle.setWheelSteering(i, this.steerAngle);
 		}
 
+		this.applyDriftGrip();
+
 		const engine = this.computeEngineForce();
+		const rear = this.rearWheelIndices();
+		const rearSet = new Set(rear);
 
-		for (const i of this.driveRearAxleIndices) {
-			this.vehicle.setWheelEngineForce(i, engine);
+		// RWD: engine only on back tires.
+		let rearForce = engine;
+		if (this.drifting && this.throttle > 0.1) {
+			rearForce =
+				-Math.sign(this.throttle || 1) *
+				drive.engineForce *
+				drift.spinDriveScale *
+				Math.abs(this.throttle) *
+				this.driftFactor;
+			rearForce = rearForce * 0.65 + engine * drift.spinDriveScale * 0.35;
 		}
 
-		for (const i of this.driveFrontAxleIndices) {
-			this.vehicle.setWheelEngineForce(i, engine * drive.frontDriveRatio);
-		}
-
-		const brake = this.braking ? drive.brakeForce : 0;
 		for (let i = 0; i < this.vehicle.numWheels(); i++) {
-			this.vehicle.setWheelBrake(i, brake);
+			if (rearSet.has(i)) {
+				this.vehicle.setWheelEngineForce(i, rearForce);
+			} else {
+				this.vehicle.setWheelEngineForce(i, 0);
+			}
 		}
+
+		this.applyFrontBrakesOnly();
+		this.applyDriftYaw(dt);
+	}
+
+	private applyDriftGrip() {
+		const { drift } = CAR_CONFIG;
+		const f = this.driftFactor;
+		const rear = new Set(this.rearWheelIndices());
+
+		for (let i = 0; i < this.vehicle.numWheels(); i++) {
+			if (rear.has(i)) {
+				const friction =
+					drift.normalFriction +
+					(drift.driftFriction - drift.normalFriction) * f;
+				const side =
+					drift.normalSideStiffness +
+					(drift.driftSideStiffness - drift.normalSideStiffness) * f;
+				this.vehicle.setWheelFrictionSlip(i, friction);
+				this.vehicle.setWheelSideFrictionStiffness(i, side);
+			} else {
+				const friction =
+					drift.normalFriction +
+					(drift.frontDriftFriction - drift.normalFriction) * f;
+				const side =
+					drift.normalSideStiffness +
+					(drift.frontDriftSideStiffness - drift.normalSideStiffness) * f;
+				this.vehicle.setWheelFrictionSlip(i, friction);
+				this.vehicle.setWheelSideFrictionStiffness(i, side);
+			}
+		}
+	}
+
+	/** Space = front brakes only. Rear never brakes (free to spin). */
+	private applyFrontBrakesOnly() {
+		const { drive, drift } = CAR_CONFIG;
+		const rear = new Set(this.rearWheelIndices());
+
+		for (let i = 0; i < this.vehicle.numWheels(); i++) {
+			if (rear.has(i)) {
+				this.vehicle.setWheelBrake(i, 0);
+				continue;
+			}
+			if (!this.braking) {
+				this.vehicle.setWheelBrake(i, 0);
+				continue;
+			}
+			const force = this.drifting ? drift.frontBrakeForce : drive.brakeForce;
+			this.vehicle.setWheelBrake(i, force);
+		}
+	}
+
+	private applyDriftYaw(dt: number) {
+		if (this.driftFactor < 0.15 || Math.abs(this.steerInput) < 0.12) return;
+
+		const { drift } = CAR_CONFIG;
+		const yaw =
+			this.steerInput * drift.yawTorque * this.driftFactor * dt;
+		this.body.applyTorqueImpulse({ x: 0, y: yaw, z: 0 }, true);
 	}
 
 	afterPhysics(dt: number) {
 		this.vehicle.updateVehicle(dt);
 		this.applyAntiRollStabilization();
-		this.clampSpeed(CAR_CONFIG.drive.maxSpeed);
+		if (this.drifting) {
+			this.clampSpeed(CAR_CONFIG.drift.maxDriftSpeed);
+		} else {
+			this.clampSpeed(CAR_CONFIG.drive.maxSpeed);
+		}
 	}
 
 	private applyAntiRollStabilization() {
@@ -103,11 +235,18 @@ export class CarController {
 		this.targetSteer = 0;
 		this.throttle = 0;
 		this.braking = false;
+		this.steerInput = 0;
+		this.driftFactor = 0;
+		this.drifting = false;
+		this.smokeAccum = 0;
 
+		const { drift } = CAR_CONFIG;
 		for (let i = 0; i < this.vehicle.numWheels(); i++) {
 			this.vehicle.setWheelSteering(i, 0);
 			this.vehicle.setWheelEngineForce(i, 0);
 			this.vehicle.setWheelBrake(i, 0);
+			this.vehicle.setWheelFrictionSlip(i, drift.normalFriction);
+			this.vehicle.setWheelSideFrictionStiffness(i, drift.normalSideStiffness);
 		}
 	}
 
@@ -117,7 +256,6 @@ export class CarController {
 		const { engineForce, reverseForce } = CAR_CONFIG.drive;
 		const t = this.throttle;
 		const mag = t > 0 ? engineForce * t : reverseForce * Math.abs(t);
-
 		return -Math.sign(t) * mag;
 	}
 

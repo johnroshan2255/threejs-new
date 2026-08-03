@@ -38,15 +38,15 @@ export const DAY_PERIODS: Record<DayPeriod, PeriodKey> = {
 		horizon: "#e8d4b8",
 		fog: "#d0dde8",
 		fogDensity: 0.009,
-		ambientColor: "#d8e4f0",
-		ambientIntensity: 0.28,
-		hemiSky: "#88b8e0",
-		hemiGround: "#6a7a4a",
-		hemiIntensity: 0.32,
-		sunColor: "#ffe2a8",
-		sunIntensity: 1.55,
+		ambientColor: "#e0e0e0",
+		ambientIntensity: 0.6, // boosted
+		hemiSky: "#ffffff",
+		hemiGround: "#888888",
+		hemiIntensity: 0.6, // boosted
+		sunColor: "#ffffff",
+		sunIntensity: 1.0, // lowered
 		sunGlow: 1.1,
-		moonColor: "#c8d4ff",
+		moonColor: "#ffffff",
 		moonIntensity: 0,
 		fireflies: 0,
 		grassLight: 1.0,
@@ -57,55 +57,53 @@ export const DAY_PERIODS: Record<DayPeriod, PeriodKey> = {
 		horizon: "#c8e4f5",
 		fog: "#d8eef5",
 		fogDensity: 0.007,
-		ambientColor: "#e8f0f8",
-		ambientIntensity: 0.35,
-		hemiSky: "#90c8ff",
-		hemiGround: "#7a8a55",
-		hemiIntensity: 0.38,
-		sunColor: "#fff6e0",
-		sunIntensity: 2.35,
+		ambientColor: "#ffffff",
+		ambientIntensity: 0.7, // boosted
+		hemiSky: "#ffffff",
+		hemiGround: "#aaaaaa",
+		hemiIntensity: 0.7, // boosted
+		sunColor: "#ffffff",
+		sunIntensity: 1.5, // lowered
 		sunGlow: 0.55,
-		moonColor: "#c8d4ff",
+		moonColor: "#ffffff",
 		moonIntensity: 0,
 		fireflies: 0,
 		grassLight: 1.15,
 	},
 	evening: {
-		// Soft late day — light, cool, barely warm
 		hour: 16.2,
 		zenith: "#a8d0ea",
 		horizon: "#e8f2f6",
 		fog: "#e0eaf0",
 		fogDensity: 0.007,
-		ambientColor: "#eef4f8",
-		ambientIntensity: 0.4,
-		hemiSky: "#b0d4ec",
-		hemiGround: "#7a8a58",
-		hemiIntensity: 0.4,
-		sunColor: "#fff8e0",
-		sunIntensity: 1.95,
+		ambientColor: "#e0e0e0",
+		ambientIntensity: 0.65, // boosted
+		hemiSky: "#ffffff",
+		hemiGround: "#888888",
+		hemiIntensity: 0.65, // boosted
+		sunColor: "#ffffff",
+		sunIntensity: 1.2, // lowered
 		sunGlow: 0.25,
-		moonColor: "#c8d4ff",
+		moonColor: "#ffffff",
 		moonIntensity: 0,
 		fireflies: 0,
 		grassLight: 1.12,
 	},
 	sunset: {
-		// Brighter golden hour (former evening look) — not night-dark
 		hour: 17.85,
 		zenith: "#7aa8c8",
 		horizon: "#e8dcc8",
 		fog: "#d8d0c0",
 		fogDensity: 0.008,
-		ambientColor: "#e8e4d8",
-		ambientIntensity: 0.32,
-		hemiSky: "#9cbcda",
-		hemiGround: "#6a7a48",
-		hemiIntensity: 0.34,
-		sunColor: "#ffd090",
-		sunIntensity: 1.7,
+		ambientColor: "#cccccc",
+		ambientIntensity: 0.55, // boosted
+		hemiSky: "#dddddd",
+		hemiGround: "#666666",
+		hemiIntensity: 0.55, // boosted
+		sunColor: "#ffffff",
+		sunIntensity: 0.8, // lowered
 		sunGlow: 0.85,
-		moonColor: "#c8d4ff",
+		moonColor: "#ffffff",
 		moonIntensity: 0,
 		fireflies: 0.12,
 		grassLight: 0.98,
@@ -116,18 +114,18 @@ export const DAY_PERIODS: Record<DayPeriod, PeriodKey> = {
 		horizon: "#0a1020",
 		fog: "#070b16",
 		fogDensity: 0.015,
-		ambientColor: "#1a2438",
-		ambientIntensity: 0.28,
-		hemiSky: "#243556",
-		hemiGround: "#0a1018",
-		hemiIntensity: 0.26,
-		sunColor: "#ffb060",
+		ambientColor: "#444444",
+		ambientIntensity: 0.45, // boosted
+		hemiSky: "#555555",
+		hemiGround: "#222222",
+		hemiIntensity: 0.45, // boosted
+		sunColor: "#ffffff",
 		sunIntensity: 0,
 		sunGlow: 0,
-		moonColor: "#c4d4ff",
-		moonIntensity: 1.35,
+		moonColor: "#ffffff",
+		moonIntensity: 1.2, // adjusted
 		fireflies: 1,
-		grassLight: 0.55,
+		grassLight: 0.7,
 	},
 };
 
@@ -348,6 +346,12 @@ export type DayNightCycle = {
 	update: (dt: number) => number;
 	getFireflyIntensity: () => number;
 	getGrassLight: () => number;
+	/** Current lerped fog color from the day/night table. */
+	getFogColor: () => THREE.Color;
+	/** Current lerped FogExp2-style density from the day/night table. */
+	getFogDensity: () => number;
+	/** Unit sun direction (points toward the sun). */
+	getSunDirection: () => THREE.Vector3;
 	dispose: () => void;
 	overrideColors: boolean;
 };
@@ -417,7 +421,7 @@ export function createDayNightCycle(
 
 	let hour = DAY_PERIODS.morning.hour;
 	let auto = true;
-	let speed = 0.08;
+	let speed = 0.00833; // 48 real-life minutes for 1 in-game day (like GTA 5)
 	let period: DayPeriod = "morning";
 	let fireflyIntensity = 0;
 	let grassLight = 1;
@@ -549,6 +553,9 @@ export function createDayNightCycle(
 		},
 		getFireflyIntensity: () => fireflyIntensity,
 		getGrassLight: () => grassLight,
+		getFogColor: () => sample.fog,
+		getFogDensity: () => sample.fogDensity,
+		getSunDirection: () => sunDir,
 		dispose() {
 			group.removeFromParent();
 			sky.geometry.dispose();

@@ -1,7 +1,12 @@
 import * as THREE from "three";
 import { createTree, type TreeHandle } from "../entities/tree";
 import { placeStone, type PlacedStoneHandle } from "../entities/stone/placeStone";
-import { Pond, REFERENCE_WATER_LOOK } from "../entities/water";
+import {
+	Pond,
+	REFERENCE_TEXELS_PER_METER,
+	REFERENCE_WATER_LOOK,
+} from "../entities/water";
+import { debugLine } from "../ui/debugOverlay";
 import { getWorldTerrainY, setIslandTerrain } from "../terrain/islandHeight";
 import {
 	paintTerrainMud,
@@ -55,6 +60,7 @@ export type EditApplierHost = {
 	removeEditorStone: (stone: PlacedStoneHandle) => void;
 	removeEditorPond: (pond: Pond) => void;
 	getScenePropsTerrainColor: () => THREE.ColorRepresentation;
+	getTreeManager: () => import("../entities/tree/TreeInstancedMesh").TreeInstancedMesh | null;
 };
 
 /**
@@ -100,15 +106,30 @@ export class EditApplier {
 		}
 	}
 
-	/** Selectable roots tagged with userData.editEntityId. */
 	getSelectableObjects(): THREE.Object3D[] {
 		const list: THREE.Object3D[] = [];
+		const tm = this.host.getTreeManager();
+		if (tm) list.push(tm.group);
 		for (const entry of this.entities.values()) {
-			if (entry.kind === "tree") list.push(entry.tree.group);
-			else if (entry.kind === "stone") list.push(entry.stone.group);
-			else list.push(entry.pond.mesh);
+			if (entry.kind === "stone") list.push(entry.stone.group);
+			else if (entry.kind === "pond") list.push(entry.pond.mesh);
 		}
 		return list;
+	}
+
+	getEntities(): Map<string, TrackedEntity> {
+		return this.entities;
+	}
+
+
+	getEntityIdAtIntersection(intersect: THREE.Intersection): string | null {
+		const tm = this.host.getTreeManager();
+		if (tm && intersect.object.userData?.isTreeInstancedMesh) {
+			if (intersect.instanceId !== undefined) {
+				return tm.getIdFromInstanceId(intersect.instanceId, intersect.object);
+			}
+		}
+		return this.getEntityIdAtObject(intersect.object);
 	}
 
 	getEntityIdAtObject(obj: THREE.Object3D | null): string | null {
@@ -124,7 +145,18 @@ export class EditApplier {
 	getEntityObject(entityId: string): THREE.Object3D | null {
 		const entry = this.entities.get(entityId);
 		if (!entry) return null;
-		if (entry.kind === "tree") return entry.tree.group;
+		if (entry.kind === "tree") {
+			const tm = this.host.getTreeManager();
+			if (tm) {
+				tm.getMatrixAt(entityId, entry.tree.group.matrix);
+				entry.tree.group.matrix.decompose(
+					entry.tree.group.position,
+					entry.tree.group.quaternion,
+					entry.tree.group.scale
+				);
+			}
+			return entry.tree.group;
+		}
 		if (entry.kind === "stone") return entry.stone.group;
 		return entry.pond.mesh;
 	}
@@ -171,6 +203,11 @@ export class EditApplier {
 				this.host.worldGroup.add(tree.group);
 				this.host.addEditorTree(tree);
 				this.entities.set(op.id, { kind: "tree", tree });
+				
+				const tm = this.host.getTreeManager();
+				if (tm) {
+					tm.addTree(op.id, tree.group.position, op.rotationY ?? 0, op.scale ?? 1, "#3f6d21");
+				}
 				return true;
 			}
 			case "place-mesh": {
@@ -203,6 +240,11 @@ export class EditApplier {
 				this.host.worldGroup.add(tree.group);
 				this.host.addEditorTree(tree);
 				this.entities.set(op.id, { kind: "tree", tree });
+				
+				const tm = this.host.getTreeManager();
+				if (tm) {
+					tm.addTree(op.id, tree.group.position, op.rotationY ?? 0, op.scale ?? 1, "#3f6d21");
+				}
 				return true;
 			}
 			case "place-stone": {
@@ -269,6 +311,7 @@ export class EditApplier {
 			}
 			case "paint-forest": {
 				for (const treeSpec of op.trees) {
+					const id = "forest_" + Math.random().toString(36).substring(2, 9);
 					const tree = await createTree({
 						position: [treeSpec.x, 0, treeSpec.z],
 						placeOnTerrain: true,
@@ -276,25 +319,56 @@ export class EditApplier {
 						rotationY: treeSpec.rotationY,
 						leafColor: "#3f6d21",
 					});
+					this.tagEntity(tree.group, id);
 					this.host.worldGroup.add(tree.group);
 					this.host.addEditorTree(tree);
+					this.entities.set(id, { kind: "tree", tree });
+					
+					const tm = this.host.getTreeManager();
+					if (tm) {
+						tm.addTree(id, tree.group.position, treeSpec.rotationY ?? 0, treeSpec.scale ?? 1, "#3f6d21");
+					}
 				}
 				return true;
 			}
 			case "delete-entity": {
-				this.removeEntity(op.entityId);
+				const handle = this.entities.get(op.entityId);
+				if (handle) {
+					if (handle.kind === "tree") {
+						this.host.removeEditorTree(handle.tree);
+						handle.tree.dispose();
+						const tm = this.host.getTreeManager();
+						if (tm) tm.removeTree(op.entityId);
+					} else if (handle.kind === "stone") {
+						this.host.removeEditorStone(handle.stone);
+						handle.stone.dispose();
+					} else if (handle.kind === "pond") {
+						this.host.removeEditorPond(handle.pond);
+						handle.pond.dispose();
+					}
+					this.entities.delete(op.entityId);
+				}
 				return true;
 			}
 			case "transform-entity": {
 				const obj = this.getEntityObject(op.entityId);
-				if (!obj || !this.canTransformEntity(op.entityId)) return false;
-				obj.position.set(op.x, op.y, op.z);
-				obj.rotation.x = op.rotationX ?? 0;
-				obj.rotation.y = op.rotationY;
-				obj.rotation.z = op.rotationZ ?? 0;
-				const s = Math.max(0.05, op.scale);
-				obj.scale.setScalar(s);
-				obj.updateMatrixWorld(true);
+				if (obj) {
+					obj.position.set(op.x, op.y, op.z);
+					if (op.rotationX != null && op.rotationZ != null) {
+						obj.rotation.set(op.rotationX, op.rotationY, op.rotationZ);
+					} else {
+						obj.rotation.set(0, op.rotationY, 0);
+					}
+					obj.scale.setScalar(op.scale);
+					const handle = this.entities.get(op.entityId);
+					if (handle?.kind === "tree") {
+						handle.tree.snapToTerrain();
+						const tm = this.host.getTreeManager();
+						if (tm) {
+							tm.updateTreeTransform(op.entityId, obj.position, op.rotationY, op.scale);
+						}
+					}
+				}
 				return true;
 			}
 			case "rebuild-collider": {
@@ -307,29 +381,32 @@ export class EditApplier {
 		}
 	}
 
-	removeEntity(entityId: string): boolean {
-		const entry = this.entities.get(entityId);
-		if (!entry) return false;
-		this.entities.delete(entityId);
-		if (entry.kind === "tree") {
-			this.host.removeEditorTree(entry.tree);
-			entry.tree.dispose();
-		} else if (entry.kind === "stone") {
-			this.host.removeEditorStone(entry.stone);
-			entry.stone.dispose();
-		} else {
-			this.host.removeEditorPond(entry.pond);
-			entry.pond.mesh.removeFromParent();
-			entry.pond.dispose();
+	private removeEntity(entityId: string) {
+		const handle = this.entities.get(entityId);
+		if (!handle) return;
+		if (handle.kind === "tree") {
+			this.host.removeEditorTree(handle.tree);
+			handle.tree.dispose();
+			const tm = this.host.getTreeManager();
+			if (tm) tm.removeTree(entityId);
+		} else if (handle.kind === "stone") {
+			this.host.removeEditorStone(handle.stone);
+			handle.stone.dispose();
+		} else if (handle.kind === "pond") {
+			this.host.removeEditorPond(handle.pond);
+			handle.pond.mesh.removeFromParent();
+			handle.pond.dispose();
 		}
-		return true;
+		this.entities.delete(entityId);
 	}
 
 	/** Drop all tracked props (before full reapply). */
 	clearEntities() {
-		for (const id of [...this.entities.keys()]) {
-			this.removeEntity(id);
+		for (const entityId of [...this.entities.keys()]) {
+			this.removeEntity(entityId);
 		}
+		const tm = this.host.getTreeManager();
+		if (tm) tm.clear();
 	}
 
 	private tagEntity(obj: THREE.Object3D, entityId: string) {
@@ -446,7 +523,12 @@ export class EditApplier {
 			this.colliderDirty = true;
 		}
 
-		if (!basin?.cells?.length) return;
+		if (!basin?.cells?.length) {
+			debugLine(
+				`[water] NO CELLS at ${options.x.toFixed(0)},${options.z.toFixed(0)} r=${options.radius ?? "-"}`
+			);
+			return;
+		}
 		// Hard safety: never build a world-scale water sheet.
 		const maxCells = 4500;
 		if (basin.cells.length > maxCells) {
@@ -479,7 +561,28 @@ export class EditApplier {
 				refillBasinToRim(target, basin, pondRadius) ??
 				footprintFromBasinSpec(basin, cellSize);
 		}
-		if (!footprint || footprint.cells.length < 3) return;
+		if (!footprint || footprint.cells.length < 3) {
+			debugLine(
+				`[water] NO FOOTPRINT cells=${basin?.cells?.length ?? 0} exact=${exactShape}`
+			);
+			return;
+		}
+
+		// TEMPORARY diagnostic: a sheet is invisible when its single flat waterY
+		// sits under the ground, which happens on very large painted basins.
+		const groundAtCenter = getWorldTerrainY(
+			footprint.centerX,
+			footprint.centerZ
+		);
+		const buried = groundAtCenter - footprint.waterY;
+		debugLine(
+			`[water] pond ${footprint.width.toFixed(0)}x${footprint.depth.toFixed(0)}m` +
+				` cell=${cellSize.toFixed(2)} cells=${footprint.cells.length}` +
+				`${(options.basin?.cells?.length ?? 0) > maxCells ? " TRUNCATED" : ""}\n` +
+				`         waterY=${footprint.waterY.toFixed(2)} ground=${groundAtCenter.toFixed(2)}` +
+				` buried=${buried > 0 ? "+" : ""}${buried.toFixed(2)}m` +
+				`${buried > 0.3 ? "  <-- SHEET IS UNDER THE GROUND" : ""}`
+		);
 
 		// Clear grass over the basin footprint (circle around AABB is fine for mask).
 		const grassR = Math.max(footprint.width, footprint.depth) * 0.55 + 1;
@@ -518,11 +621,21 @@ export class EditApplier {
 			}
 		}
 
+		// Hold the reference pond's texel density instead of stretching a fixed
+		// 256² over the whole basin. Capped at 512 — every pond also owns
+		// screen-sized reflection / refraction targets.
+		const waterExtent = Math.max(footprint.width, footprint.depth, 4);
+		const simResolution = THREE.MathUtils.clamp(
+			2 ** Math.round(Math.log2(waterExtent * REFERENCE_TEXELS_PER_METER)),
+			256,
+			512
+		);
+
 		const pond = new Pond({
 			width: Math.max(footprint.width, 4),
 			height: Math.max(footprint.depth, 4),
 			segments: 96,
-			resolution: 256,
+			resolution: simResolution,
 			circular: false,
 			geometry: footprint.geometry,
 			...REFERENCE_WATER_LOOK,

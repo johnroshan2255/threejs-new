@@ -93,6 +93,7 @@ export function applyTerrainBrush(
 	geometry.computeVertexNormals();
 	geometry.computeBoundingBox();
 	geometry.computeBoundingSphere();
+	if (geometry.boundsTree) geometry.boundsTree.refit();
 	mesh.updateMatrixWorld(true);
 }
 
@@ -145,6 +146,7 @@ export function digWaterBrush(
 	geometry.computeVertexNormals();
 	geometry.computeBoundingBox();
 	geometry.computeBoundingSphere();
+	if (geometry.boundsTree) geometry.boundsTree.refit();
 	mesh.updateMatrixWorld(true);
 }
 
@@ -202,6 +204,7 @@ export function digPondBasin(
 	geometry.computeVertexNormals();
 	geometry.computeBoundingBox();
 	geometry.computeBoundingSphere();
+	if (geometry.boundsTree) geometry.boundsTree.refit();
 	mesh.updateMatrixWorld(true);
 }
 

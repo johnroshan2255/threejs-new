@@ -38,6 +38,8 @@ export type EditModeUIOptions = {
 	onSculptChange: (sculpt: SculptType) => void;
 	onBrushChange: (radius: number, strength: number) => void;
 	onViewModeChange: (mode: EditViewMode) => void;
+	onToggleWireframe: (enabled: boolean) => void;
+	onToggleBVH: (enabled: boolean) => void;
 	onMeshChange: (meshId: EditMeshId) => void;
 	onRoadStyleChange: (style: RoadStyle) => void;
 	onTransformModeChange: (mode: EditTransformMode) => void;
@@ -49,6 +51,7 @@ export type EditModeUIOptions = {
 	onDeleteSelected: () => void;
 	onUndo: () => void;
 	onRedo: () => void;
+	onRequestThumbnail?: (meshId: EditMeshId) => Promise<string>;
 };
 
 export type EditWorldPickerItem = {
@@ -155,6 +158,8 @@ export class EditModeUI {
 						<div class="edit-bar-label">View</div>
 						<button type="button" data-view="top" class="edit-asset is-active"><span>Top</span></button>
 						<button type="button" data-view="orbit" class="edit-asset"><span>Orbit</span></button>
+						<button type="button" data-view="wireframe" class="edit-asset"><span>Wireframe</span></button>
+						<button type="button" data-view="bvh" class="edit-asset"><span>BVH</span></button>
 					</div>
 					<div class="edit-sub-panel" id="edit-road-panel" hidden>
 						<div class="edit-bar-label">Road</div>
@@ -284,7 +289,16 @@ export class EditModeUI {
 
 		this.leftBar.querySelectorAll<HTMLButtonElement>("[data-view]").forEach((btn) => {
 			btn.addEventListener("click", () => {
-				this.setViewMode(btn.dataset.view as EditViewMode);
+				const view = btn.dataset.view;
+				if (view === "wireframe") {
+					btn.classList.toggle("is-active");
+					this.options.onToggleWireframe(btn.classList.contains("is-active"));
+				} else if (view === "bvh") {
+					btn.classList.toggle("is-active");
+					this.options.onToggleBVH(btn.classList.contains("is-active"));
+				} else {
+					this.setViewMode(view as EditViewMode);
+				}
 			});
 		});
 
@@ -406,7 +420,11 @@ export class EditModeUI {
 						? `${(world.terrainSize / 1000).toFixed(1)} km`
 						: `${Math.round(world.terrainSize)} m`
 					: "";
-			const date = new Date(world.updatedAt).toLocaleDateString();
+			// Worlds created this session live in RAM only until the first save.
+			const date =
+				world.updatedAt > 0
+					? new Date(world.updatedAt).toLocaleDateString()
+					: "Not saved yet";
 			btn.innerHTML = `<strong>${escapeHtml(world.worldName)}</strong><span>${escapeHtml(
 				[sizeLabel, date].filter(Boolean).join(" · ")
 			)}</span>`;
@@ -571,7 +589,7 @@ export class EditModeUI {
 			<button type="button" data-mesh="${entry.id}" class="edit-mesh-thumb${
 					entry.id === this.meshId ? " is-active" : ""
 				}" title="${entry.name}">
-				<img src="${entry.preview}" alt="${entry.name}" loading="lazy" draggable="false" />
+				<img id="edit-mesh-img-${entry.id}" src="${entry.preview}" alt="${entry.name}" loading="lazy" draggable="false" />
 				<span>${entry.label}</span>
 			</button>`
 			)
@@ -582,6 +600,18 @@ export class EditModeUI {
 				this.setMesh(btn.dataset.mesh as EditMeshId);
 			});
 		});
+
+		if (this.options.onRequestThumbnail) {
+			for (const entry of items) {
+				this.options.onRequestThumbnail(entry.id)
+					.then((url) => {
+						if (!url) return;
+						const img = this.root.querySelector<HTMLImageElement>(`#edit-mesh-img-${entry.id}`);
+						if (img) img.src = url;
+					})
+					.catch(console.error);
+			}
+		}
 	}
 
 	private setMesh(meshId: EditMeshId) {

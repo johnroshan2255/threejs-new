@@ -17,6 +17,10 @@ import {
   DEFAULT_SHORE_FOAM,
   DEFAULT_SHORE_SOFTNESS,
   DEFAULT_WATER_COLOR,
+  MAX_SLOPE_GAIN,
+  REFERENCE_SLOPE_GAIN,
+  REFERENCE_TEXELS_PER_METER,
+  WAVE_PERIOD_METERS,
 } from '../core/Constants';
 import commonGlsl from '../shaders/common.glsl?raw';
 import waterFrag from '../shaders/water.frag?raw';
@@ -27,6 +31,9 @@ export interface WaterMaterialOptions {
   opacity?: number;
   reflectivity?: number;
   resolution?: number;
+  /** Pond size in world units — wave tiling and slope gain scale with it. */
+  width?: number;
+  height?: number;
   circular?: boolean;
   clarity?: number;
   shoreSoftness?: number;
@@ -66,6 +73,31 @@ export class WaterMaterial {
     this.uniforms.set('uTextureMatrix', new Matrix4());
     this.uniforms.set('uSunDirection', new Vector3(0.3, 1.0, 0.2).normalize());
     this.uniforms.set('uTexelSize', new Vector2(1 / this.simResolution, 1 / this.simResolution));
+
+    // Waves per pond, derived from world size: a 20 m pond keeps the tuned 2.5
+    // cycles; a 60 m lake gets 7.5 rather than the same 2.5 stretched out.
+    const worldWidth = Math.max(0.001, options.width ?? 20);
+    const worldHeight = Math.max(0.001, options.height ?? 20);
+    this.uniforms.set(
+      'uWaveTiles',
+      new Vector2(worldWidth / WAVE_PERIOD_METERS, worldHeight / WAVE_PERIOD_METERS),
+    );
+
+    // Height derivatives are measured in texels. Once a texel covers more than
+    // the reference ~8 cm, a ripple spans fewer texels and its normals flatten —
+    // lift the gain by that shortfall so the surface keeps its sparkle.
+    const texelsPerMeter = this.simResolution / Math.max(worldWidth, worldHeight);
+    this.uniforms.set(
+      'uSlopeGain',
+      Math.min(
+        MAX_SLOPE_GAIN,
+        Math.max(
+          REFERENCE_SLOPE_GAIN,
+          REFERENCE_SLOPE_GAIN * (REFERENCE_TEXELS_PER_METER / texelsPerMeter),
+        ),
+      ),
+    );
+
     this.uniforms.set('uResolution', new Vector2(1, 1));
     this.uniforms.set('uCameraNear', 0.1);
     this.uniforms.set('uCameraFar', 200);

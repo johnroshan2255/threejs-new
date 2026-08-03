@@ -5,6 +5,8 @@ import { getWorldTerrainY } from "../../terrain/islandHeight";
 import { getWorld } from "../../physics/world";
 import { CAR_CONFIG } from "./carConfig";
 import { loadKenneySuvVisual } from "./kenneyCarVisual";
+import { computeGrappleMountLocal } from "./vehicleGrapple";
+import { createFpvInterior } from "./createFpvInterior";
 
 export type CarEntity = {
 	body: RAPIER.RigidBody;
@@ -15,6 +17,14 @@ export type CarEntity = {
 	driveFrontAxleIndices: number[];
 	driveRearAxleIndices: number[];
 	steeringWheelIndices: number[];
+	/** Front bumper mount in chassis local space (any future car mesh). */
+	grappleMountLocal: THREE.Vector3;
+	fpvInterior?: THREE.Group;
+	health: number;
+	maxHealth: number;
+	isDestroyed: boolean;
+	timeSinceDestroyed: number;
+	hasExploded: boolean;
 };
 
 export async function createCar(
@@ -38,6 +48,10 @@ export async function createCar(
 
 	const layout = await loadKenneySuvVisual(colliderYOffset, manager);
 	const { chassisSize, physicsWheelPositions, wheelRadius } = layout;
+
+	const fpvInterior = createFpvInterior();
+	fpvInterior.visible = false;
+	layout.body.add(fpvInterior);
 
 	const spawnY = getWorldTerrainY(spawn.x, spawn.z) + spawn.clearance;
 
@@ -137,5 +151,12 @@ export async function createCar(
 		driveFrontAxleIndices,
 		driveRearAxleIndices,
 		steeringWheelIndices,
+		grappleMountLocal: computeGrappleMountLocal(chassisSize, layout.body),
+		fpvInterior,
+		health: 100,
+		maxHealth: 100,
+		isDestroyed: false,
+		timeSinceDestroyed: 0,
+		hasExploded: false,
 	};
 }
