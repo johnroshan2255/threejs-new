@@ -50,6 +50,7 @@ import {
 	updateFoliageWind,
 	type TreeHandle,
 } from "./entities/tree";
+import { TreeInstancedMesh } from "./entities/tree/TreeInstancedMesh";
 import {
 	createPondStones,
 	type PondStoneHandle,
@@ -159,7 +160,7 @@ export class FluffyGrass {
 	private stats: Stats;
 	private sceneProps = {
 		fogColor: "#eeeeee",
-		terrainColor: "#5e875e",
+		terrainColor: "#1d360c",
 		fogDensity: 0.012,
 		humanScale: 0.03,
 		mapMode: false,
@@ -225,6 +226,7 @@ export class FluffyGrass {
 	private audioListener: THREE.AudioListener | null = null;
 
 	private activePlayer: "car" | "human" = "car";
+	private carFpvMode = false;
 	private human: HumanEntity | null = null;
 	private humanInput: HumanInput | null = null;
 	/** Held firearm mesh — lives in the scene, snapped to the right hand each frame. */
@@ -248,6 +250,8 @@ export class FluffyGrass {
 	private readonly _shotDir = new THREE.Vector3();
 	private readonly _shotAim = new THREE.Vector3();
 	private readonly _shotClosest = new THREE.Vector3();
+	private treeManager!: TreeInstancedMesh;
+
 	private readonly _shotTo = new THREE.Vector3();
 	/** Dedupe networked hit tracers (attacker->victim). */
 	private readonly recentGunFxAt = new Map<string, number>();
@@ -445,7 +449,12 @@ export class FluffyGrass {
 		this.scene.add(this.bulletSystem.group);
 		this.bulletSystem.getGroundY = (x, z) => getWorldTerrainY(x, z);
 
+		this.treeManager = new TreeInstancedMesh(this.loadingManager);
+
 		this.initializationPromise = (async () => {
+			await this.treeManager.initialize();
+			this.worldGroup.add(this.treeManager.group);
+
 			await initPhysics();
 			await this.buildIslandWorld();
 			await this.setupCar();
@@ -1620,7 +1629,7 @@ export class FluffyGrass {
 			let foundGrass = false;
 			grassScene.traverse((child) => {
 				if (child instanceof THREE.Mesh && child.name.includes("LOD00")) {
-					child.geometry.scale(5, 5, 5);
+					child.geometry.scale(10, 10, 10);
 					this.grassGeometry = child.geometry;
 					foundGrass = true;
 				}
@@ -1760,6 +1769,7 @@ export class FluffyGrass {
 			inflate: 0.12,
 			leafLayers: 5,
 			manager: this.loadingManager,
+			useInstancing: false,
 		});
 		this.trees = [tree];
 		this.worldGroup.add(tree.group);
@@ -2225,6 +2235,20 @@ export class FluffyGrass {
 			rp.currentAction = action;
 		};
 
+		const _raycaster = new THREE.Raycaster();
+		const _lastCarHitPoint = new THREE.Vector3();
+		this.humanInput.customShootRaycast = (origin, dir) => {
+			if (!this.car || !this.car.mesh) return null;
+			_raycaster.set(origin, dir);
+			_raycaster.far = 80;
+			const hits = _raycaster.intersectObject(this.car.mesh, true);
+			if (hits.length > 0) {
+				_lastCarHitPoint.copy(hits[0].point);
+				return { id: "car-local", dist: hits[0].distance };
+			}
+			return null;
+		};
+
 		this.humanInput.onGunHit = (targetId, part) => {
 			const dmg = damageForPart(part);
 			if (this.socket && this.roomCode) {
@@ -2275,7 +2299,16 @@ export class FluffyGrass {
 		};
 
 		if (this.bulletSystem) {
-			this.bulletSystem.onHit = (targetId, _point, part) => {
+			this.bulletSystem.onHit = (targetId, point, part) => {
+				if (targetId === "car-local") {
+					if (this.smokeSystem) {
+						this.smokeSystem.emit(point); // bullet impact puff
+					}
+					if (this.car && !this.car.isDestroyed) {
+						this.car.health -= 15; // 7 shots to kill (100 / 15)
+					}
+					return;
+				}
 				this.humanInput?.onGunHit?.(targetId, part);
 			};
 			this.bulletSystem.onBombHit = (bombId) => {
@@ -3007,6 +3040,13 @@ export class FluffyGrass {
 			const grassLight = this.dayNight.getGrassLight();
 			this.grassMaterial.uniforms.uGrassLightIntensity.value = grassLight;
 
+			if (this.terrainMat) {
+				const sunY = this.dayNight.getSunDirection().y;
+				// Fade emissive in as sun drops below horizon (sunY from 0.1 to -0.1)
+				const nightFactor = THREE.MathUtils.clamp((0.1 - sunY) / 0.2, 0, 1);
+				this.terrainMat.emissive.set(this.sceneProps.terrainColor).multiplyScalar(0.7 * nightFactor);
+			}
+
 			// Headlights on through evening → night
 			const hour = this.dayNight.hour;
 			let headAmount = 0;
@@ -3032,6 +3072,14 @@ export class FluffyGrass {
 			if (playAllowed) {
 				if (this.activePlayer === "car") {
 					this.carInput.applyInput(dt);
+					
+					if (this.carInput.consumeFpvToggle()) {
+						this.carFpvMode = !this.carFpvMode;
+						if (this.car.fpvInterior) {
+							this.car.fpvInterior.visible = this.carFpvMode;
+						}
+					}
+					
 					if (this.vehicleGrapple) {
 						const justPressed = this.carInput.consumeGrapplePress();
 						const detachPressed = this.carInput.consumeGrappleDetach();
@@ -3091,6 +3139,70 @@ export class FluffyGrass {
 				this.human.update(dt);
 			}
 			syncCar(this.car);
+
+			if (this.car) {
+				if (this.car.health <= 0 && !this.car.isDestroyed) {
+					this.car.isDestroyed = true;
+					this.car.timeSinceDestroyed = 0;
+					if (this.carInput) {
+						this.carInput.releaseControls();
+						this.carInput.isEnabled = false;
+					}
+				}
+
+				if (this.car.isDestroyed) {
+					this.car.timeSinceDestroyed += dt;
+					const hoodPos = this.car.mesh.position.clone().add(
+						new THREE.Vector3(0, 0.8, -1.5).applyQuaternion(this.car.mesh.quaternion)
+					);
+					if (this.smokeSystem) {
+						if (Math.random() > 0.4) this.smokeSystem.emitDarkSmoke(hoodPos);
+						if (Math.random() > 0.3) this.smokeSystem.emitFire(hoodPos);
+					}
+
+					if (!this.car.hasExploded && this.car.timeSinceDestroyed > 3.0) {
+						this.car.hasExploded = true;
+						if (this.explosionSystem) {
+							this.explosionSystem.emit(this.car.mesh.position);
+							BombSound.playBlastSound(this.car.mesh.position);
+						}
+						const impulse = new THREE.Vector3(
+							(Math.random() - 0.5) * 600,
+							4500,
+							(Math.random() - 0.5) * 600
+						);
+						this.car.body.applyImpulse(impulse, true);
+						this.car.body.applyTorqueImpulse(
+							new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).multiplyScalar(2000),
+							true
+						);
+					}
+
+					// Respawn trigger
+					if (this.car.timeSinceDestroyed > 8.0) {
+						this.car.isDestroyed = false;
+						this.car.hasExploded = false;
+						this.car.health = this.car.maxHealth;
+						this.car.timeSinceDestroyed = 0;
+						if (this.carInput && this.activePlayer === "car") {
+							this.carInput.isEnabled = true;
+						}
+						
+						const spawnY = getWorldTerrainY(0, 0) + 1.4;
+						this.car.body.setTranslation({ x: 0, y: spawnY, z: 0 }, true);
+						this.car.body.setRotation({ x: 0, y: 0, z: 0, w: 1 }, true);
+						this.car.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
+						this.car.body.setAngvel({ x: 0, y: 0, z: 0 }, true);
+					}
+				} else if (this.car.health <= 50) {
+					if (this.smokeSystem && Math.random() > 0.6) {
+						const hoodPos = this.car.mesh.position.clone().add(
+							new THREE.Vector3(0, 0.8, -1.5).applyQuaternion(this.car.mesh.quaternion)
+						);
+						this.smokeSystem.emitDarkSmoke(hoodPos);
+					}
+				}
+			}
 
 			if (
 				this.smokeSystem &&
@@ -3153,7 +3265,7 @@ export class FluffyGrass {
 
 			if (!this.sceneProps.mapMode) {
 				if (this.activePlayer === "car") {
-					updateChaseCamera(this.camera, this.car, this.chaseCameraInput, dt);
+					updateChaseCamera(this.camera, this.car, this.chaseCameraInput, dt, this.carFpvMode);
 				} else {
 					const aimMode = Boolean(this.humanInput?.isAimingGun());
 					updateHumanCamera(
@@ -3289,9 +3401,7 @@ export class FluffyGrass {
 					halfAngle: 0.72,
 				};
 			}
-			if (this.worldGroup.visible) {
-				this.fireflies.update(dt, this.frameFireflyIntensity, threat);
-			}
+			this.fireflies.update(dt, this.frameFireflyIntensity, threat);
 		}
 
 		if (this.smokeSystem) {
@@ -3405,7 +3515,15 @@ export class FluffyGrass {
 					b.mesh.getWorldPosition(this._bombWorldPos);
 					return { id: b.id, position: this._bombWorldPos.clone() };
 				});
-			this.bulletSystem.update(dt, targets, bombTargets);
+			const vehicleTargets = [];
+			if (this.car && this.car.mesh) {
+				vehicleTargets.push({ 
+					id: "car-local", 
+					position: this.car.mesh.position.clone().add(new THREE.Vector3(0, 1.0, 0)), 
+					radius: 2.5 
+				});
+			}
+			this.bulletSystem.update(dt, targets, bombTargets, vehicleTargets);
 		}
 
 		this.volumetricFogPass?.render(
@@ -4073,6 +4191,8 @@ export class FluffyGrass {
 				this.editorPonds = this.editorPonds.filter((p) => p !== pond);
 			},
 			getScenePropsTerrainColor: () => this.sceneProps.terrainColor,
+			getTreeManager: () => this.treeManager,
+			syncFireflies: () => this.syncFireflies(),
 			isGameActive: () => this.isGameActive,
 			getRoomCode: () => this.roomCode,
 			createNewLargeWorld: async (sizeKm) => {
@@ -4567,7 +4687,12 @@ export class FluffyGrass {
 			this.worldGroup.visible = target === "island";
 			this.newWorldGroup.visible = target === "valley";
 			this.customWorldGroup.visible = targetDef.kind === "custom";
+
+			const activeGroup = targetDef.kind === "custom" ? this.customWorldGroup : this.worldGroup;
+			activeGroup.add(this.treeManager.group);
+
 			this.applyWorldEnvironment(target);
+			this.syncFireflies();
 
 			// Unload BEFORE replaying edits: the dispose paths clear editor ponds,
 			// so ponds spawned by the replay would be destroyed right after birth.
@@ -4669,6 +4794,62 @@ export class FluffyGrass {
 		}
 	}
 
+	public syncFireflies() {
+		if (this.fireflies) {
+			this.fireflies.points.removeFromParent();
+			this.fireflies.dispose();
+			this.fireflies = null;
+		}
+
+		let anchors: import("./environment/fireflies").FireflyAnchor[] = [];
+
+		if (this.currentWorld === "island") {
+			const { x: hx, z: hz } = TERRAIN_CONFIG.mainHill;
+			if (this.trees[0]) {
+				const tree = this.trees[0];
+				tree.group.updateMatrixWorld(true);
+				const canopyBox = new THREE.Box3().setFromObject(tree.group);
+				const trunkCut = canopyBox.min.y + (canopyBox.max.y - canopyBox.min.y) * 0.32;
+				canopyBox.min.y = trunkCut;
+				anchors.push({ kind: "volume", box: canopyBox, pad: 1.2, weight: 3.2 });
+			}
+			anchors.push({ kind: "grass", x: hx, z: hz, spread: 10, heightMin: 0.4, heightMax: 3.2, weight: 1.2 });
+			anchors.push({ kind: "grass", x: hx + 5, z: hz - 4, spread: 7, heightMin: 0.35, heightMax: 2.4, weight: 0.8 });
+			anchors.push({ kind: "grass", x: 0, z: 0, spread: 14, heightMin: 0.3, heightMax: 2.5, weight: 1 });
+			anchors.push({ kind: "grass", x: 6, z: 5, spread: 10, heightMin: 0.3, heightMax: 2.2, weight: 0.7 });
+		} else if (this.activeWorldDef.kind === "custom") {
+			let numEntities = 0;
+			if (this.editMode) {
+				const entities = this.editMode.applier.getEntities();
+				numEntities = entities.size;
+				for (const entry of entities.values()) {
+					if (entry.kind === "tree") {
+						const pos = entry.tree.group.position;
+						anchors.push({ kind: "grass", x: pos.x, z: pos.z, spread: 8, heightMin: 0.5, heightMax: 3, weight: 1.5 });
+					} else if (entry.kind === "stone") {
+						const pos = entry.stone.group.position;
+						anchors.push({ kind: "grass", x: pos.x, z: pos.z, spread: 4, heightMin: 0.2, heightMax: 1.5, weight: 0.5 });
+					}
+				}
+			}
+			// Add some random global ones if the world is empty
+			if (anchors.length === 0) {
+				anchors.push({ kind: "grass", x: 0, z: 0, spread: 20, heightMin: 0.5, heightMax: 2.5, weight: 1 });
+			}
+			console.log(`[FluffyGrass] syncFireflies generated ${anchors.length} anchors from ${numEntities} entities`);
+		}
+
+		if (anchors.length > 0) {
+			console.log(`[FluffyGrass] spawning fireflies with ${anchors.length} anchors`);
+			this.fireflies = createFireflies({
+				count: 280,
+				anchors,
+			});
+			const activeGroup = this.activeWorldDef.kind === "custom" ? this.customWorldGroup : this.worldGroup;
+			activeGroup.add(this.fireflies.points);
+		}
+	}
+
 	private applyWorldEnvironment(world: GameWorldId) {
 		const sky = this.scene.getObjectByName("sky-dome");
 		const def = this.knownWorldDefinition(world);
@@ -4683,9 +4864,13 @@ export class FluffyGrass {
 				this.dayNight.setHour(this.dayNightGui.hour);
 			}
 			if (sky) sky.visible = true;
-			this.grassMaterial.uniforms.baseColor.value.set("#313f1b");
-			this.grassMaterial.uniforms.tipColor1.value.set("#5e875e");
-			this.grassMaterial.uniforms.tipColor2.value.set("#1f352a");
+			this.grassMaterial.uniforms.baseColor.value.set("#1d360c");
+			this.grassMaterial.uniforms.tipColor1.value.set("#3f6d21");
+			this.grassMaterial.uniforms.tipColor2.value.set("#4c8129");
+			this.sceneProps.terrainColor = "#1d360c";
+			if (this.terrainMat) {
+				this.terrainMat.color.set("#1d360c");
+			}
 			this.scene.background = new THREE.Color(
 				def.kind === "custom" ? "#87a4c0" : this.sceneProps.fogColor
 			);
@@ -4713,6 +4898,10 @@ export class FluffyGrass {
 			this.grassMaterial.uniforms.baseColor.value.set(0x3e524e);
 			this.grassMaterial.uniforms.tipColor1.value.set(0x799894);
 			this.grassMaterial.uniforms.tipColor2.value.set(0x56726e);
+			this.sceneProps.terrainColor = "#3e524e";
+			if (this.terrainMat) {
+				this.terrainMat.color.set("#3e524e");
+			}
 		}
 		if (this.sceneProps.mapMode) this.suppressFogForEditMode();
 		else this.syncVolumetricFogQuality();

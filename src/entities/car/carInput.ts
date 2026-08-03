@@ -14,6 +14,7 @@ const GAME_KEYS = new Set([
 	"KeyE",
 	"KeyT",
 	"KeyH",
+	"KeyF",
 ]);
 
 export class CarInput {
@@ -26,6 +27,8 @@ export class CarInput {
 	private grappleJustPressed = false;
 	/** Latched true for one applyInput frame after H goes down (detach). */
 	private grappleDetachPressed = false;
+	/** Latched true for one applyInput frame after F goes down (FPV toggle). */
+	private fpvJustPressed = false;
 
 	constructor(
 		private controller: CarController,
@@ -52,10 +55,16 @@ export class CarInput {
 		return pressed;
 	}
 
-	/** Consumes H-detach press for this frame. */
 	public consumeGrappleDetach(): boolean {
 		const pressed = this.grappleDetachPressed;
 		this.grappleDetachPressed = false;
+		return pressed;
+	}
+
+	/** Consumes F-toggle press for this frame. */
+	public consumeFpvToggle(): boolean {
+		const pressed = this.fpvJustPressed;
+		this.fpvJustPressed = false;
 		return pressed;
 	}
 
@@ -111,6 +120,11 @@ export class CarInput {
 			return;
 		}
 
+		if (e.code === "KeyF") {
+			this.fpvJustPressed = true;
+			return;
+		}
+
 		this.set(e, true);
 	};
 
@@ -132,6 +146,10 @@ export class CarInput {
 		}
 
 		if (e.code === "KeyH") {
+			return;
+		}
+
+		if (e.code === "KeyF") {
 			return;
 		}
 

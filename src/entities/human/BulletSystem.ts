@@ -134,7 +134,14 @@ export class BulletSystem {
 		});
 	}
 
-	update(dt: number, targets: BulletTarget[], bombs: BombTarget[] = []) {
+	private _raycaster = new THREE.Raycaster();
+
+	update(
+		dt: number,
+		targets: BulletTarget[],
+		bombs: BombTarget[] = [],
+		vehicleTargets: { id: string; position: THREE.Vector3; radius: number }[] = []
+	) {
 		this.updateFlashes(dt);
 		this.updateImpacts(dt);
 
@@ -216,6 +223,22 @@ export class BulletSystem {
 					hitBombId = bomb.id;
 					hitId = null;
 					this._hitPoint.copy(b.prev).lerp(b.mesh.position, dBomb / segLen);
+				}
+			}
+
+			for (const v of vehicleTargets) {
+				const d = this.segmentSphereHit(
+					b.prev,
+					b.mesh.position,
+					v.position,
+					v.radius
+				);
+				if (d !== null && d < hitDist) {
+					hitDist = d;
+					hitId = v.id;
+					hitPart = "body";
+					hitBombId = null;
+					this._hitPoint.copy(b.prev).lerp(b.mesh.position, d / segLen);
 				}
 			}
 

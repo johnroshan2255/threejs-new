@@ -18,8 +18,32 @@ export function updateChaseCamera(
 	camera: PerspectiveCamera,
 	car: CarEntity,
 	input: ChaseCameraInput,
-	dt: number
+	dt: number,
+	isFpv: boolean = false
 ): void {
+	if (isFpv) {
+		// Driver seat is typically slightly behind the center of the car (-Z) and to the left (-X)
+		const headOffset = new THREE.Vector3(-0.35, 0.85, -0.4);
+		_targetCam.copy(headOffset).applyMatrix4(car.mesh.matrixWorld);
+		
+		// Snap fast to FPV
+		const blendFpv = 1 - Math.exp(-20 * dt);
+		camera.position.lerp(_targetCam, blendFpv);
+
+		const lookDir = new THREE.Vector3(
+			Math.sin(input.yaw) * Math.cos(input.pitch),
+			-Math.sin(input.pitch),
+			Math.cos(input.yaw) * Math.cos(input.pitch)
+		);
+		lookDir.applyQuaternion(car.mesh.quaternion);
+		_lookAt.copy(_targetCam).add(lookDir.multiplyScalar(5));
+
+		// In FPV, we don't aggressively auto-center. The player has full control of their head!
+		
+		camera.lookAt(_lookAt);
+		return;
+	}
+
 	_carPos.copy(car.mesh.position);
 	_forward.copy(getCarGroundForward(car.body));
 

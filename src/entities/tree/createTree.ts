@@ -36,6 +36,11 @@ export type CreateTreeOptions = {
 	 */
 	leafLayers?: number;
 	manager?: THREE.LoadingManager;
+	/**
+	 * If true, returns an empty proxy group (for TreeInstancedMesh).
+	 * If false, returns a full tree with meshes. Default is true.
+	 */
+	useInstancing?: boolean;
 };
 
 type TreeTemplate = {
@@ -76,8 +81,17 @@ function loadTreeTemplate(manager?: THREE.LoadingManager): Promise<TreeTemplate>
 			let trunk: THREE.Mesh | null = null;
 			let foliage: THREE.Mesh | null = null;
 
+			gltf.scene.updateMatrixWorld(true);
 			gltf.scene.traverse((child) => {
 				if (!(child instanceof THREE.Mesh)) return;
+				
+				// Bake node transform into geometry
+				child.geometry.applyMatrix4(child.matrixWorld);
+				child.position.set(0, 0, 0);
+				child.quaternion.identity();
+				child.scale.set(1, 1, 1);
+				child.updateMatrixWorld(true);
+
 				if (child.name === "trunk") trunk = child;
 				if (child.name === "foliage") foliage = child;
 			});
@@ -125,46 +139,14 @@ export async function createTree(
 		foliageScale = 1,
 		leafLayers = 1,
 		manager,
+		useInstancing = true,
 	} = options;
 
 	const [x0, y0, z0] = toTuple(options.position);
 	const template = await loadTreeTemplate(manager);
 
-	const trunk = template.trunk.clone(true);
-	trunk.castShadow = true;
-	trunk.receiveShadow = true;
-	trunk.material = new THREE.MeshStandardMaterial({
-		color: new THREE.Color(trunkColor),
-		roughness: 0.92,
-		metalness: 0,
-	});
-
-	const foliageMaterial = createFoliageMaterial({
-		leafColor,
-		alphaMap: template.alphaMap,
-		effectBlend,
-		inflate,
-		foliageScale,
-		windSpeed,
-	});
-
 	const group = new THREE.Group();
 	group.name = "tree";
-	group.add(trunk);
-
-	const layers = Math.max(1, Math.floor(leafLayers));
-	for (let i = 0; i < layers; i++) {
-		const foliage = template.foliage.clone(true);
-		foliage.castShadow = true;
-		foliage.receiveShadow = true;
-		foliage.material = foliageMaterial;
-		// Fan extra layers around Y so leaf cards fill gaps.
-		foliage.rotation.y = (i / layers) * Math.PI * 2;
-		if (i > 0) {
-			foliage.position.y += (i % 2 === 0 ? 0.08 : -0.05) * i;
-		}
-		group.add(foliage);
-	}
 
 	group.rotation.y = rotationY;
 	group.scale.setScalar(scale);
@@ -175,11 +157,49 @@ export async function createTree(
 	}
 	group.position.set(x0, y, z0);
 
+	let dummyFoliageMaterial: FoliageMaterial = {} as FoliageMaterial;
+	let trunk: THREE.Mesh | null = null;
+
+	if (!useInstancing) {
+		trunk = template.trunk.clone(true);
+		trunk.castShadow = true;
+		trunk.receiveShadow = true;
+		trunk.material = new THREE.MeshStandardMaterial({
+			color: new THREE.Color(trunkColor),
+			roughness: 0.92,
+			metalness: 0,
+		});
+
+		dummyFoliageMaterial = createFoliageMaterial({
+			leafColor,
+			alphaMap: template.alphaMap,
+			effectBlend,
+			inflate,
+			foliageScale,
+			windSpeed,
+		});
+
+		group.add(trunk);
+
+		const layers = Math.max(1, Math.floor(leafLayers));
+		for (let i = 0; i < layers; i++) {
+			const foliage = template.foliage.clone(true);
+			foliage.castShadow = true;
+			foliage.receiveShadow = true;
+			foliage.material = dummyFoliageMaterial;
+			foliage.rotation.y = (i / layers) * Math.PI * 2;
+			if (i > 0) {
+				foliage.position.y += (i % 2 === 0 ? 0.08 : -0.05) * i;
+			}
+			group.add(foliage);
+		}
+	}
+
 	return {
 		group,
-		foliageMaterial,
+		foliageMaterial: dummyFoliageMaterial,
 		setLeafColor(color) {
-			setFoliageLeafColor(foliageMaterial, color);
+			if (!useInstancing) setFoliageLeafColor(dummyFoliageMaterial, color);
 		},
 		setPosition(x, nextY, z) {
 			group.position.set(x, nextY, z);
@@ -190,8 +210,10 @@ export async function createTree(
 		},
 		dispose() {
 			group.removeFromParent();
-			(trunk.material as THREE.Material).dispose();
-			foliageMaterial.dispose();
+			if (!useInstancing && trunk) {
+				(trunk.material as THREE.Material).dispose();
+				dummyFoliageMaterial.dispose();
+			}
 		},
 	};
 }

@@ -15,7 +15,15 @@ import {
 } from "../../ui/gameInputFocus";
 
 export class HumanInput {
-    public isEnabled = false;
+    private _isEnabled = false;
+    public get isEnabled() { return this._isEnabled; }
+    public set isEnabled(v: boolean) {
+        if (this._isEnabled === v) return;
+        this._isEnabled = v;
+        if (!v) {
+            this.releaseControls();
+        }
+    }
     private human: HumanEntity;
     private keys: { [key: string]: boolean } = {};
     private walkSpeed = 2.0;
@@ -84,16 +92,16 @@ export class HumanInput {
     public carriedPlayerId: string | null = null;
 
     /** Returns remote targets with approx head/spine world positions for punch tests. */
-    public getPunchTargets:
-        | (() => Array<{
-              id: string;
-              head: THREE.Vector3;
-              spine: THREE.Vector3;
-              feetY: number;
-              position: THREE.Vector3;
-              quaternion: THREE.Quaternion;
-          }>)
-        | null = null;
+    public getPunchTargets?: () => Array<{
+        id: string;
+        head: THREE.Vector3;
+        spine: THREE.Vector3;
+        feetY: number;
+        position: THREE.Vector3;
+        quaternion: THREE.Quaternion;
+    }>;
+    public customShootRaycast?: (origin: THREE.Vector3, dir: THREE.Vector3) => { id: string, dist: number } | null;
+
     public onPunchHit: ((targetId: string, reaction: HitReaction) => void) | null = null;
     /** Fired after root-motion is baked so multiplayer can snap-sync position. */
     public onHitRepositioned:
@@ -731,6 +739,14 @@ export class HumanInput {
                 }
                 bestDist = along;
                 bestId = target.id;
+            }
+        }
+
+        if (this.customShootRaycast) {
+            const customHit = this.customShootRaycast(this.shootOrigin, this.shootDir);
+            if (customHit && customHit.dist < bestDist) {
+                bestDist = customHit.dist;
+                bestId = customHit.id;
             }
         }
 

@@ -51,6 +51,7 @@ export type EditModeUIOptions = {
 	onDeleteSelected: () => void;
 	onUndo: () => void;
 	onRedo: () => void;
+	onRequestThumbnail?: (meshId: EditMeshId) => Promise<string>;
 };
 
 export type EditWorldPickerItem = {
@@ -588,7 +589,7 @@ export class EditModeUI {
 			<button type="button" data-mesh="${entry.id}" class="edit-mesh-thumb${
 					entry.id === this.meshId ? " is-active" : ""
 				}" title="${entry.name}">
-				<img src="${entry.preview}" alt="${entry.name}" loading="lazy" draggable="false" />
+				<img id="edit-mesh-img-${entry.id}" src="${entry.preview}" alt="${entry.name}" loading="lazy" draggable="false" />
 				<span>${entry.label}</span>
 			</button>`
 			)
@@ -599,6 +600,18 @@ export class EditModeUI {
 				this.setMesh(btn.dataset.mesh as EditMeshId);
 			});
 		});
+
+		if (this.options.onRequestThumbnail) {
+			for (const entry of items) {
+				this.options.onRequestThumbnail(entry.id)
+					.then((url) => {
+						if (!url) return;
+						const img = this.root.querySelector<HTMLImageElement>(`#edit-mesh-img-${entry.id}`);
+						if (img) img.src = url;
+					})
+					.catch(console.error);
+			}
+		}
 	}
 
 	private setMesh(meshId: EditMeshId) {

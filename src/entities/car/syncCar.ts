@@ -28,10 +28,19 @@ export function syncCar(car: CarEntity) {
 		);
 
 		const steering = car.steeringWheelIndices.includes(i) ? frontSteer : 0;
-		const spin = vehicle.wheelRotation(i) ?? 0;
+		const rotation = vehicle.wheelRotation(i) ?? 0;
 
 		_wheelSteerQuat.setFromAxisAngle(_steerAxis, steering);
-		_wheelSpinQuat.setFromAxisAngle(_spinAxis, spin);
+		_wheelSpinQuat.setFromAxisAngle(_spinAxis, rotation);
+
 		wheel.quaternion.copy(_wheelSteerQuat).multiply(_wheelSpinQuat);
 	});
+
+	if (car.fpvInterior) {
+		const sw = car.fpvInterior.getObjectByName("steering-wheel");
+		if (sw) {
+			// Steering wheel is tilted, so we rotate around its local Z axis
+			sw.rotation.z = -frontSteer * 2.0; // Multiplier to exaggerate steering wheel turn
+		}
+	}
 }

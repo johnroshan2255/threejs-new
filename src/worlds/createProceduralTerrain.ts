@@ -139,7 +139,7 @@ export function paintTerrainWater(
 ) {
 	const geometry = mesh.geometry as THREE.BufferGeometry;
 	const positions = geometry.attributes.position as THREE.BufferAttribute;
-	const grass = new THREE.Color("#5e875e");
+	const grass = new THREE.Color("#3f6d21");
 	const water = new THREE.Color("#7eb8e8");
 
 	if (!geometry.attributes.color) {
@@ -184,7 +184,7 @@ export function paintTerrainMud(
 ) {
 	const geometry = mesh.geometry as THREE.BufferGeometry;
 	const positions = geometry.attributes.position as THREE.BufferAttribute;
-	const grass = new THREE.Color("#5e875e");
+	const grass = new THREE.Color("#3f6d21");
 	/** Light mud road — readable on green terrain, no grass (masked separately). */
 	const mud = new THREE.Color("#a8906e");
 
@@ -235,7 +235,7 @@ export function paintTerrainMudShore(
 ) {
 	const geometry = mesh.geometry as THREE.BufferGeometry;
 	const positions = geometry.attributes.position as THREE.BufferAttribute;
-	const grass = new THREE.Color("#5e875e");
+	const grass = new THREE.Color("#3f6d21");
 	const mud = new THREE.Color("#9a8060");
 	const wetMud = new THREE.Color("#7a6848");
 

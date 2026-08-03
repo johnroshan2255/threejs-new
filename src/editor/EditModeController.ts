@@ -54,6 +54,8 @@ export type EditModeHost = {
 	removeEditorStone: (stone: PlacedStoneHandle) => void;
 	removeEditorPond: (pond: Pond) => void;
 	getScenePropsTerrainColor: () => THREE.ColorRepresentation;
+	getTreeManager: () => import("../entities/tree/TreeInstancedMesh").TreeInstancedMesh | null;
+	syncFireflies: () => void;
 	isGameActive: () => boolean;
 	getRoomCode: () => string;
 	createNewLargeWorld: (sizeKm: number) => Promise<void>;
@@ -89,7 +91,7 @@ export class EditModeController {
 	private readonly pointer = new THREE.Vector2();
 	private readonly hitPoint = new THREE.Vector3();
 	private readonly brushHelper: THREE.Mesh;
-	private readonly applier: EditApplier;
+	public readonly applier: EditApplier;
 	private readonly sync: EditSyncTransport;
 	private readonly keys = new Set<string>();
 
@@ -187,6 +189,7 @@ export class EditModeController {
 			removeEditorStone: (stone) => host.removeEditorStone(stone),
 			removeEditorPond: (pond) => host.removeEditorPond(pond),
 			getScenePropsTerrainColor: () => host.getScenePropsTerrainColor(),
+			getTreeManager: () => host.getTreeManager(),
 		});
 
 		this.sync = new EditSyncTransport({
@@ -293,9 +296,9 @@ export class EditModeController {
 				const mesh = this.host.getTerrainMesh();
 				if (mesh) {
 					if (Array.isArray(mesh.material)) {
-						mesh.material.forEach(m => m.wireframe = enabled);
+						mesh.material.forEach(m => (m as THREE.MeshStandardMaterial).wireframe = enabled);
 					} else {
-						mesh.material.wireframe = enabled;
+						(mesh.material as THREE.MeshStandardMaterial).wireframe = enabled;
 					}
 				}
 			},
@@ -869,6 +872,7 @@ export class EditModeController {
 		// world was built — resample it onto the sculpted terrain.
 		this.onTerrainSettled();
 		this.refreshStatus();
+		this.host.syncFireflies();
 	}
 
 	/**
@@ -995,6 +999,7 @@ export class EditModeController {
 		if (ops.length) {
 			this.applyingRemote = true;
 			try {
+				await this.host.getTreeManager()?.initialize();
 				await this.applier.applyMany(ops);
 			} finally {
 				this.applyingRemote = false;
@@ -1004,6 +1009,7 @@ export class EditModeController {
 		this.rebuildCollider();
 		this.onTerrainSettled();
 		this.refreshStatus();
+		this.host.syncFireflies();
 	}
 
 	async undo() {
@@ -1040,6 +1046,7 @@ export class EditModeController {
 		await this.applier.apply(op);
 		if (!this.applyingRemote) this.sync.broadcastOp(op);
 		this.refreshStatus();
+		this.host.syncFireflies();
 	}
 
 	/** True when remote edits may mutate the active terrain. */
@@ -1065,6 +1072,7 @@ export class EditModeController {
 			this.applyingRemote = false;
 		}
 		this.refreshStatus();
+		this.host.syncFireflies();
 	}
 
 	private scheduleRemoteColliderFlush() {
@@ -1161,6 +1169,7 @@ export class EditModeController {
 			this.applyingPublished = false;
 		}
 		this.refreshStatus();
+		this.host.syncFireflies();
 		if (!options?.silent) {
 			this.ui.setSaveState("saved", "World updated.");
 		}
