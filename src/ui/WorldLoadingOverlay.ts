@@ -32,6 +32,14 @@ export class WorldLoadingOverlay {
 		this.root.classList.add("is-visible");
 	}
 
+	/** Generic task, for anything that stalls a frame but isn't a world load. */
+	showTask(title: string, message: string): void {
+		this.title.textContent = title;
+		this.status.textContent = message;
+		this.bar.style.width = "10%";
+		this.root.classList.add("is-visible");
+	}
+
 	setProgress(percent: number, message: string): void {
 		this.bar.style.width = `${Math.max(0, Math.min(100, percent))}%`;
 		this.status.textContent = message;

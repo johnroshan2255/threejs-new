@@ -117,7 +117,7 @@ export class VolumetricFogPass {
 	private steps = 24;
 
 	private readonly bloom = new BloomChain();
-	bloomEnabled = true;
+	private bloomEnabled = true;
 	private bloomThreshold = 0.75;
 	/** Grade-authored strength, kept separate so a null bloom can't clobber it. */
 	private bloomStrength = 0.4;
@@ -417,6 +417,31 @@ export class VolumetricFogPass {
 		this.fsMesh = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.material);
 		this.fsMesh.frustumCulled = false;
 		this.fsScene.add(this.fsMesh);
+	}
+
+	/**
+	 * The other half of the user-facing effects toggle. Turning it off frees the
+	 * mip chain rather than merely skipping the draws, and zeroes the composite's
+	 * bloom inputs so a stale texture can't leak into the grade.
+	 */
+	setBloomEnabled(enabled: boolean) {
+		if (this.bloomEnabled === enabled) return;
+		this.bloomEnabled = enabled;
+		if (!enabled) {
+			this.bloom.release();
+			this.material.uniforms.tBloom.value = null;
+			this.material.uniforms.uBloomStrength.value = 0;
+		}
+	}
+
+	/**
+	 * Allocates targets and links every program the pass needs, off the render
+	 * loop. `compileAsync` polls KHR_parallel_shader_compile rather than blocking
+	 * on link, so a spinner can keep animating while this resolves.
+	 */
+	async warmup(renderer: THREE.WebGLRenderer) {
+		await renderer.compileAsync(this.fsScene, this.fsCamera);
+		if (this.bloomEnabled) await this.bloom.warmup(renderer);
 	}
 
 	setQuality(quality: GraphicsQuality) {

@@ -199,6 +199,32 @@ export class BloomChain {
 		this.rebuild();
 	}
 
+	/**
+	 * Frees the mip chain but keeps the materials, so the programs stay linked
+	 * and `render` can rebuild the targets on demand. This is what makes the
+	 * user-facing bloom toggle actually give back VRAM — the chain is ~22 MB at
+	 * a 1080p canvas with pixel ratio 2.
+	 */
+	release() {
+		for (const rt of this.mips) rt.dispose();
+		this.mips = [];
+	}
+
+	/**
+	 * Allocates the targets and links all three programs up front. The quad's
+	 * material is swapped per stage, so each one has to be compiled separately —
+	 * `compileAsync` only sees what is currently assigned.
+	 */
+	async warmup(renderer: THREE.WebGLRenderer) {
+		if (this.mips.length === 0) this.rebuild();
+		const previous = this.quad.material;
+		for (const mat of [this.prefilterMat, this.downMat, this.upMat]) {
+			this.quad.material = mat;
+			await renderer.compileAsync(this.fsScene, this.fsCamera);
+		}
+		this.quad.material = previous;
+	}
+
 	private rebuild() {
 		for (const rt of this.mips) rt.dispose();
 		this.mips = [];

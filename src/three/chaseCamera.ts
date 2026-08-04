@@ -9,6 +9,23 @@ import { getWorldTerrainY } from "../terrain/islandHeight";
 const CAM_HEIGHT = 2.8;
 const CAM_LOOK_AHEAD = 5;
 const CAM_SMOOTH = 9;
+/** Minimum gap kept between the camera and the terrain surface. */
+const CAM_GROUND_CLEARANCE = 0.6;
+
+/**
+ * Keeps the camera above terrain *after* smoothing.
+ *
+ * Clamping only the lerp target is not enough: the camera reaches the target
+ * asymptotically, so cresting a hill or reversing into a slope leaves the
+ * smoothed position inside the hillside for several frames. The target's height
+ * is also sampled at the target's x/z, which is not where the camera actually
+ * ends up mid-lerp — so the sample has to be retaken at the final position.
+ */
+function liftAboveTerrain(camera: PerspectiveCamera): void {
+	const groundY = getWorldTerrainY(camera.position.x, camera.position.z);
+	const minY = groundY + CAM_GROUND_CLEARANCE;
+	if (camera.position.y < minY) camera.position.y = minY;
+}
 
 const _carPos = new THREE.Vector3();
 const _forward = new THREE.Vector3();
@@ -77,6 +94,7 @@ export function updateChaseCamera(
 
 	const blend = 1 - Math.exp(-CAM_SMOOTH * dt);
 	camera.position.lerp(_targetCam, blend);
+	liftAboveTerrain(camera);
 
 	const lookAheadDist = CAM_LOOK_AHEAD * Math.max(0, Math.cos(input.yaw));
 	_lookAt.copy(_carPos).addScaledVector(_forward, lookAheadDist);
@@ -181,6 +199,7 @@ export function updateHumanCamera(
 
 	const blend = 1 - Math.exp(-CAM_SMOOTH * dt * 1.5);
 	camera.position.lerp(_humanTargetCam, blend);
+	liftAboveTerrain(camera);
 
 	_lookAt.copy(_humanPos);
 	_lookAt.y += 1.2;

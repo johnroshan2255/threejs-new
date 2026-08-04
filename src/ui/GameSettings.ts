@@ -8,6 +8,8 @@ type DayPeriod = "morning" | "noon" | "evening" | "sunset" | "night";
 
 type GameSettingsOptions = {
 	quality: GraphicsQuality;
+	/** Volumetric fog raymarch + HDR bloom. The composite grade always runs. */
+	postFx: boolean;
 	period: DayPeriod;
 	autoDayNight: boolean;
 	hour: number;
@@ -18,6 +20,7 @@ type GameSettingsOptions = {
 	world: GameWorldId;
 	worldOptions?: Record<string, string>;
 	onQualityChange: (quality: GraphicsQuality) => void;
+	onPostFxChange: (enabled: boolean) => void;
 	onPeriodChange: (period: DayPeriod) => void;
 	onAutoDayNightChange: (enabled: boolean) => void;
 	onHourChange: (hour: number) => void;
@@ -36,6 +39,7 @@ export class GameSettings {
 	constructor(private readonly options: GameSettingsOptions) {
 		this.state = {
 			graphics: options.quality,
+			postFx: options.postFx,
 			period: options.period,
 			autoDayNight: options.autoDayNight,
 			hour: options.hour,
@@ -56,6 +60,10 @@ export class GameSettings {
 			.add(this.state, "graphics", ["Low", "Medium", "High"])
 			.name("Quality")
 			.onChange(options.onQualityChange);
+		graphics
+			.add(this.state, "postFx")
+			.name("Atmospheric FX")
+			.onChange(options.onPostFxChange);
 
 		const dayNight = this.gui.addFolder("Day / Night");
 		dayNight

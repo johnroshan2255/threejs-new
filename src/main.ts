@@ -183,6 +183,9 @@ const NEUTRAL_GRADE = {
 	bloomThreshold: 1.5,
 };
 
+const nextFrame = () =>
+	new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
 export class FluffyGrass {
 	private loadingManager: THREE.LoadingManager;
 	private textureLoader: THREE.TextureLoader;
@@ -402,6 +405,10 @@ export class FluffyGrass {
 	private fogFollowPlayer = false;
 	private volumetricFog: VolumetricFogSystem | null = null;
 	private volumetricFogPass: VolumetricFogPass | null = null;
+	/** User-facing master switch for the fog raymarch + bloom. */
+	private postFxEnabled = true;
+	/** Parks the composite while targets are reallocated mid-toggle. */
+	private postFxTransitioning = false;
 	/** Residual FogExp2 while the screen-space pass does the heavy lifting. */
 	private residualFogDensity = 0.0008;
 	/** Full FogExp2 density to restore when the volumetric pass is off. */
@@ -3749,11 +3756,15 @@ export class FluffyGrass {
 			this.bulletSystem.update(dt, targets, bombTargets, vehicleTargets);
 		}
 
-		this.volumetricFogPass?.render(
-			this.renderer,
-			this.scene,
-			this.editMode?.isEnabled ? this.editMode.activeCamera : this.camera
-		);
+		// Skipped only while the toggle swaps targets — the overlay covers the
+		// held frame, and rendering against a half-built chain would flash.
+		if (!this.postFxTransitioning) {
+			this.volumetricFogPass?.render(
+				this.renderer,
+				this.scene,
+				this.editMode?.isEnabled ? this.editMode.activeCamera : this.camera
+			);
+		}
 		this.stats.update();
 
 		if (this.editMode?.isEnabled) {
@@ -3786,6 +3797,7 @@ export class FluffyGrass {
 	private setupSettings() {
 		this.settings = new GameSettings({
 			quality: "High",
+			postFx: this.postFxEnabled,
 			period: this.dayNightGui.period,
 			autoDayNight: this.dayNightGui.auto,
 			hour: this.dayNightGui.hour,
@@ -3795,6 +3807,7 @@ export class FluffyGrass {
 			world: this.currentWorld,
 			worldOptions: this.getWorldSelectOptions(),
 			onQualityChange: (quality) => this.applyGraphicsQuality(quality),
+			onPostFxChange: (enabled) => void this.setPostFxEnabled(enabled),
 			onPeriodChange: (period) => {
 				this.dayNight?.setPeriod(period);
 				this.dayNightGui.period = period;
@@ -3851,19 +3864,77 @@ export class FluffyGrass {
 		this.syncVolumetricFogQuality();
 	}
 
-	/** Screen-space fog on Medium/High; billboard fallback only on Low. */
+	/**
+	 * Turning the effects on allocates the bloom mip chain and links the pass's
+	 * programs. That is a one-off hitch, so it runs behind the loading overlay
+	 * with the composite parked, rather than as a dropped frame mid-play.
+	 * Turning them off is immediate — nothing has to be built to stop drawing.
+	 */
+	private async setPostFxEnabled(enabled: boolean) {
+		if (this.postFxEnabled === enabled) return;
+		this.postFxEnabled = enabled;
+
+		const pass = this.volumetricFogPass;
+		if (!enabled || !pass) {
+			this.syncVolumetricFogQuality();
+			return;
+		}
+
+		this.postFxTransitioning = true;
+		this.worldLoading.showTask("Enabling effects", "Compiling shaders...");
+		// Two frames: one for the class to land, one for the browser to paint it.
+		// compileAsync still takes the main thread in bursts, so without this the
+		// overlay would never actually show up.
+		await nextFrame();
+		await nextFrame();
+
+		try {
+			this.syncVolumetricFogQuality();
+			this.worldLoading.setProgress(55, "Allocating render targets...");
+			await pass.warmup(this.renderer);
+			// compileAsync links the programs, but some drivers defer real pipeline
+			// creation until the first draw — so pay for it here, not on frame one.
+			this.worldLoading.setProgress(85, "Warming up...");
+			pass.render(
+				this.renderer,
+				this.scene,
+				this.editMode?.isEnabled ? this.editMode.activeCamera : this.camera
+			);
+			this.worldLoading.setProgress(100, "Ready");
+		} finally {
+			this.postFxTransitioning = false;
+			this.worldLoading.hide();
+		}
+	}
+
+	/**
+	 * Screen-space fog on Medium/High; billboard fallback on Low or when the
+	 * user has turned the effects off.
+	 *
+	 * The user's toggle is the master switch and quality only decides how much
+	 * the effects cost. Edit mode suppresses the raymarch without touching
+	 * `postFxEnabled`, so leaving edit mode restores whatever the user chose —
+	 * this method is also called from world switches and edit-mode exit, so it
+	 * must never be the thing that decides the toggle's value.
+	 */
 	private syncVolumetricFogQuality() {
 		const quality = this.graphicsQuality;
 		const pass = this.volumetricFogPass;
 		const billboards = this.volumetricFog;
 		const inEdit = this.sceneProps.mapMode;
+		const wantsFog = this.postFxEnabled && !inEdit;
 
 		if (pass) {
 			pass.setQuality(quality);
-			pass.enabled = !inEdit && quality !== "Low";
+			pass.enabled = wantsFog && quality !== "Low";
+			// Bloom is gated on the user's flag alone: it is cheap relative to the
+			// raymarch, and edit mode already zeroes its strength via NEUTRAL_GRADE,
+			// so tying it to `inEdit` would only churn targets on every entry/exit.
+			pass.setBloomEnabled(this.postFxEnabled);
 		}
 		if (billboards) {
-			billboards.group.visible = !inEdit && quality === "Low";
+			billboards.group.visible =
+				!inEdit && (!this.postFxEnabled || quality === "Low");
 		}
 		if (pass?.enabled && this.scene.fog instanceof THREE.FogExp2) {
 			this.scene.fog.density = this.residualFogDensity;
