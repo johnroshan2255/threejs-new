@@ -183,7 +183,7 @@ export function getWorldTerrainY(x: number, z: number, fromY?: number): number {
 		return hits[0].point.y;
 	}
 
-	return fallbackY;
+	return fromY == null ? fallbackY : -1000;
 }
 
 /**

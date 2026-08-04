@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import type { CaveNode } from "../terrain/caveShape";
 
 export type SculptBrush = "raise" | "lower" | "smooth" | "flatten";
 
@@ -266,4 +267,83 @@ export function smoothBasinRim(
 		);
 		positions.setY(i, heights[idx(row, col)]);
 	}
+}
+
+/** Sculpt terrain down at cave entrances and exits to create smooth ramps. */
+export function sculptCaveMouths(target: TerrainSculptTarget, nodes: CaveNode[]) {
+	if (nodes.length === 0) return;
+	const { mesh, heights, nrows, ncols, size } = target;
+	const geometry = mesh.geometry as THREE.BufferGeometry;
+	const positions = geometry.attributes.position as THREE.BufferAttribute;
+	const half = size * 0.5;
+
+	const processMouth = (node: CaveNode) => {
+		// Find the original surface height directly above the node
+		const fc = THREE.MathUtils.clamp(((node.x + half) / size) * ncols, 0, ncols);
+		const fr = THREE.MathUtils.clamp(((node.z + half) / size) * nrows, 0, nrows);
+		const index = Math.floor(fr) + Math.floor(fc) * (nrows + 1);
+		const surfaceY = heights[index] ?? 0;
+
+		// If the node is completely buried underground, do not carve a sinkhole!
+		if (node.y + node.r + 1.5 < surfaceY) return;
+
+		const radius = node.r * 2.0;
+		const radiusSq = radius * radius;
+		const invRadius = 1 / Math.max(radius, 0.0001);
+		// Target height is slightly above the very bottom of the cave sphere
+		// to create a nice driving surface entering the tunnel
+		const targetHeight = node.y - node.r + 0.3;
+
+		for (let i = 0; i < positions.count; i++) {
+			const x = positions.getX(i);
+			const z = positions.getZ(i);
+			const dx = x - node.x;
+			const dz = z - node.z;
+			const d2 = dx * dx + dz * dz;
+			if (d2 > radiusSq) continue;
+
+			const t = 1 - Math.sqrt(d2) * invRadius;
+			const falloff = t * t * (3 - 2 * t);
+			const y = positions.getY(i);
+
+			// Only lower the terrain; if the terrain is already lower than the cave floor, leave it.
+			if (y > targetHeight) {
+				const next = THREE.MathUtils.lerp(y, targetHeight, falloff * 0.95);
+				positions.setY(i, next);
+			}
+		}
+
+		for (let col = 0; col <= ncols; col++) {
+			for (let row = 0; row <= nrows; row++) {
+				const x = -half + (col / ncols) * size;
+				const z = -half + (row / nrows) * size;
+				const dx = x - node.x;
+				const dz = z - node.z;
+				const d2 = dx * dx + dz * dz;
+				if (d2 > radiusSq) continue;
+
+				const t = 1 - Math.sqrt(d2) * invRadius;
+				const falloff = t * t * (3 - 2 * t);
+				const idx = row + col * (nrows + 1);
+				const y = heights[idx];
+
+				if (y > targetHeight) {
+					const next = THREE.MathUtils.lerp(y, targetHeight, falloff * 0.95);
+					heights[idx] = next;
+				}
+			}
+		}
+	};
+
+	processMouth(nodes[0]);
+	if (nodes.length > 1) {
+		processMouth(nodes[nodes.length - 1]);
+	}
+
+	positions.needsUpdate = true;
+	geometry.computeVertexNormals();
+	geometry.computeBoundingBox();
+	geometry.computeBoundingSphere();
+	if (geometry.boundsTree) geometry.boundsTree.refit();
+	mesh.updateMatrixWorld(true);
 }

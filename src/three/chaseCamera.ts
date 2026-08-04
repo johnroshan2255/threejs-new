@@ -30,15 +30,20 @@ const CAM_GROUND_CLEARANCE = 0.6;
  * the camera up through the mountain — so probe downward from the point itself
  * and clamp against the tunnel floor instead.
  */
-function cameraGroundY(x: number, y: number, z: number): number {
+function cameraGroundY(x: number, y: number, z: number, subjectPos?: THREE.Vector3): number {
+	// If the subject we are following is in a cave, use its height to probe the cave floor,
+	// even if the camera itself has clipped slightly into the rock wall.
+	if (subjectPos && isInsideCave(subjectPos.x, subjectPos.y, subjectPos.z, 2.0)) {
+		return getWorldTerrainY(x, z, subjectPos.y);
+	}
 	if (isInsideCave(x, y, z, 1.2)) return getWorldTerrainY(x, z, y);
 	return getWorldTerrainY(x, z);
 }
 
-function liftAboveTerrain(camera: PerspectiveCamera): void {
+function liftAboveTerrain(camera: PerspectiveCamera, subjectPos?: THREE.Vector3): void {
 	const p = camera.position;
-	const inCave = isInsideCave(p.x, p.y, p.z, 1.2);
-	const minY = cameraGroundY(p.x, p.y, p.z) + CAM_GROUND_CLEARANCE;
+	const inCave = isInsideCave(p.x, p.y, p.z, 1.2) || (subjectPos && isInsideCave(subjectPos.x, subjectPos.y, subjectPos.z, 2.0));
+	const minY = cameraGroundY(p.x, p.y, p.z, subjectPos) + CAM_GROUND_CLEARANCE;
 	if (p.y >= minY) return;
 	// In a tunnel shorter than the clearance, lifting would bury the camera in the
 	// ceiling. Only take the lift while it keeps the camera inside the void.
@@ -108,12 +113,12 @@ export function updateChaseCamera(
 		_carPos.z - Math.cos(camYaw) * horizDist
 	);
 
-	const terrainY = cameraGroundY(_targetCam.x, _targetCam.y, _targetCam.z);
+	const terrainY = cameraGroundY(_targetCam.x, _targetCam.y, _targetCam.z, _carPos);
 	_targetCam.y = Math.max(_targetCam.y, terrainY + 0.5);
 
 	const blend = 1 - Math.exp(-CAM_SMOOTH * dt);
 	camera.position.lerp(_targetCam, blend);
-	liftAboveTerrain(camera);
+	liftAboveTerrain(camera, _carPos);
 
 	const lookAheadDist = CAM_LOOK_AHEAD * Math.max(0, Math.cos(input.yaw));
 	_lookAt.copy(_carPos).addScaledVector(_forward, lookAheadDist);
@@ -216,13 +221,14 @@ export function updateHumanCamera(
 	const terrainY = cameraGroundY(
 		_humanTargetCam.x,
 		_humanTargetCam.y,
-		_humanTargetCam.z
+		_humanTargetCam.z,
+		_humanPos
 	);
 	_humanTargetCam.y = Math.max(_humanTargetCam.y, terrainY + 0.5);
 
 	const blend = 1 - Math.exp(-CAM_SMOOTH * dt * 1.5);
 	camera.position.lerp(_humanTargetCam, blend);
-	liftAboveTerrain(camera);
+	liftAboveTerrain(camera, _humanPos);
 
 	_lookAt.copy(_humanPos);
 	_lookAt.y += 1.2;

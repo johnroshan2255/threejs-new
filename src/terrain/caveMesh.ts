@@ -99,22 +99,35 @@ export function punchTerrainHoles(
 		// this hole and the seam cannot open a gap.
 		let punch = false;
 		for (const region of regions) {
-			let allInside = true;
+			let anyInside = false;
 			for (const vi of [i0, i1, i2]) {
 				const vx = position.getX(vi);
 				const vz = position.getZ(vi);
 				if (
-					vx < region.minX ||
-					vx > region.maxX ||
-					vz < region.minZ ||
-					vz > region.maxZ ||
-					!isMouthColumn(region.nodes, sampleHeight, vx, vz, MOUTH_DILATE)
+					vx >= region.minX &&
+					vx <= region.maxX &&
+					vz >= region.minZ &&
+					vz <= region.maxZ &&
+					isMouthColumn(region.nodes, sampleHeight, vx, vz, 3.0)
 				) {
-					allInside = false;
+					anyInside = true;
 					break;
 				}
 			}
-			if (allInside) {
+			if (!anyInside) {
+				const cx = (position.getX(i0) + position.getX(i1) + position.getX(i2)) / 3;
+				const cz = (position.getZ(i0) + position.getZ(i1) + position.getZ(i2)) / 3;
+				if (
+					cx >= region.minX &&
+					cx <= region.maxX &&
+					cz >= region.minZ &&
+					cz <= region.maxZ &&
+					isMouthColumn(region.nodes, sampleHeight, cx, cz, 3.0)
+				) {
+					anyInside = true;
+				}
+			}
+			if (anyInside) {
 				punch = true;
 				break;
 			}

@@ -3848,6 +3848,24 @@ export class FluffyGrass {
 				this.scene,
 				this.editMode?.isEnabled ? this.editMode.activeCamera : this.camera
 			);
+
+			if (this.editMode?.isEnabled && this.editMode.isDigging) {
+				const pr = this.renderer.getPixelRatio();
+				const size = Math.floor(300 * pr);
+				const margin = Math.floor(20 * pr);
+				const w = this.renderer.domElement.width;
+				const h = this.renderer.domElement.height;
+				
+				this.renderer.setViewport(w - size - margin, h - size - margin, size, size);
+				this.renderer.setScissor(w - size - margin, h - size - margin, size, size);
+				this.renderer.setScissorTest(true);
+				this.renderer.clearDepth();
+				
+				this.renderer.render(this.scene, this.editMode.pipCamera);
+				
+				this.renderer.setViewport(0, 0, w, h);
+				this.renderer.setScissorTest(false);
+			}
 		}
 		this.stats.update();
 

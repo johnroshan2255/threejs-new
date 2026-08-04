@@ -33,7 +33,9 @@ export const MOUTH_DILATE = 0.6;
  * guarantees no crack — and this 2mm sink stops the resulting overlap ring from
  * z-fighting against the coplanar terrain.
  */
-const SURFACE_SINK = 0.002;
+const SURFACE_SINK = -0.05;
+/** How far past the void the high-res rock apron extends to cover the terrain hole. */
+const APRON_DILATE = 6.0;
 
 /**
  * Everything the mesher needs, all structured-cloneable so it can be posted to a
@@ -228,7 +230,7 @@ export function buildCaveMeshData(req: CaveMeshRequest): CaveMeshData | null {
 				normals.push(gx, gy, gz);
 				onSurface.push(isSurface ? 1 : 0);
 				inMouth.push(
-					isMouthColumn(nodes, sampleHeight, wx, wz, MOUTH_DILATE) ? 1 : 0
+					isMouthColumn(nodes, sampleHeight, wx, wz, APRON_DILATE) ? 1 : 0
 				);
 			}
 		}

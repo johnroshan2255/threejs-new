@@ -19,6 +19,7 @@ import {
 	digPondBasin,
 	digWaterBrush,
 	smoothBasinRim,
+	sculptCaveMouths,
 	type TerrainSculptTarget,
 } from "./TerrainSculpt";
 import {
@@ -323,6 +324,11 @@ export class EditApplier {
 			case "paint-cave": {
 				const target = this.host.getSculptTarget();
 				if (!target || op.nodes.length < 1) return false;
+				
+				sculptCaveMouths(target, op.nodes);
+				setIslandTerrain(target.mesh);
+				this.colliderDirty = true;
+
 				// Meshed off-thread; a few million voxel samples would otherwise freeze
 				// the frame the moment a cave is carved.
 				const cave = await createCave({
@@ -345,8 +351,13 @@ export class EditApplier {
 				// Grass positions are baked into instance matrices, so blades over the
 				// mouth would hang in mid-air above the hole.
 				const grass = this.host.getGrassField();
-				if (grass) {
-					for (const n of op.nodes) grass.maskRoadCircle(n.x, n.z, n.r + 1.5);
+				if (grass && op.nodes.length > 0) {
+					const first = op.nodes[0];
+					grass.maskRoadCircle(first.x, first.z, first.r + 1.5);
+					if (op.nodes.length > 1) {
+						const last = op.nodes[op.nodes.length - 1];
+						grass.maskRoadCircle(last.x, last.z, last.r + 1.5);
+					}
 				}
 
 				this.markCaveTerrainDirty();

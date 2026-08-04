@@ -102,6 +102,14 @@ function segmentDistance(
 	return Math.sqrt(cx * cx + cy * cy + cz * cz) - r;
 }
 
+function caveNoise(x: number, y: number, z: number): number {
+	return (
+		Math.sin(x * 0.4) * Math.sin(y * 0.5) * Math.sin(z * 0.3) * 0.6 +
+		Math.sin(x * 0.8 + 1) * Math.sin(y * 1.1 + 2) * Math.sin(z * 0.9 + 3) * 0.3 +
+		Math.sin(x * 1.5 + 4) * Math.sin(y * 1.6 + 5) * Math.sin(z * 1.4 + 6) * 0.15
+	);
+}
+
 /**
  * Signed distance to the cave void: negative inside the tunnel, positive in rock.
  */
@@ -118,7 +126,7 @@ export function caveDistance(
 		const dx = x - n.x;
 		const dy = y - n.y;
 		const dz = z - n.z;
-		return Math.sqrt(dx * dx + dy * dy + dz * dz) - n.r;
+		return Math.sqrt(dx * dx + dy * dy + dz * dz) - n.r + caveNoise(x, y, z);
 	}
 
 	let best = Infinity;
@@ -131,7 +139,7 @@ export function caveDistance(
 		const k = Math.min(a.r, b.r) * 0.55;
 		best = i === 0 ? d : smoothMin(best, d, k);
 	}
-	return best;
+	return best + caveNoise(x, y, z);
 }
 
 /** Largest tunnel radius in the chain. */
@@ -147,7 +155,7 @@ export function maxCaveRadius(nodes: CaveNode[]): number {
  * of the mesh into empty space.
  */
 export function cavePadding(nodes: CaveNode[], voxel: number): number {
-	return maxCaveRadius(nodes) + voxel * 4 + 0.6;
+	return maxCaveRadius(nodes) + voxel * 4 + 0.6 + 1.1;
 }
 
 export type CaveBounds = {
@@ -218,6 +226,8 @@ export function isMouthColumn(
 	z: number,
 	dilate = 0.6
 ): boolean {
+	if (nodes.length === 0) return false;
+
 	const h = sampleHeight(x, z);
 	return caveDistance(nodes, x, h - 0.15, z) < dilate;
 }

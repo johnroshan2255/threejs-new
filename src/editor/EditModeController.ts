@@ -88,6 +88,7 @@ export class EditModeController {
 	readonly persistence: WorldEditPersistence;
 
 	private readonly ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.5, 5000);
+	public readonly pipCamera = new THREE.PerspectiveCamera(60, 1, 0.5, 8000);
 	private readonly orbitCam = new THREE.PerspectiveCamera(55, 1, 0.5, 8000);
 	private readonly raycaster = new THREE.Raycaster();
 	private readonly pointer = new THREE.Vector2();
@@ -115,8 +116,10 @@ export class EditModeController {
 	private orbitYaw = 0.7;
 	private orbitPitch = 0.55;
 	private orbitDistance = 160;
+	private preDigDistance = 160;
 
 	private painting = false;
+	private digging = false;
 	private panning = false;
 	private orbiting = false;
 	private lastPan = new THREE.Vector2();
@@ -387,9 +390,17 @@ export class EditModeController {
 		return this.enabled;
 	}
 
-	get activeCamera(): THREE.Camera {
+	public get isDigging() {
+		return this.digging;
+	}
+
+	public get activeCamera(): THREE.Camera {
 		if (!this.enabled) return this.host.playCamera;
 		return this.viewMode === "orbit" ? this.orbitCam : this.ortho;
+	}
+
+	public get orthoCamera() {
+		return this.ortho;
 	}
 
 	attachSocket(socket: Socket | null) {
@@ -643,9 +654,8 @@ export class EditModeController {
 		if (this.tool === "paint-cave") {
 			const minR = this.minCaveRadius();
 			this.ui.setHint(
-				`Cave: click to drop tunnel nodes (${this.caveNodes.length}) · Tunnel = width` +
-					` (min ${minR.toFixed(1)}m on this world) · Depth = how deep` +
-					" · Enter carves · Esc clears"
+				`Cave: Click and hold to fly underground! Steer with mouse and fly with WASD. Release to carve.` +
+					` (min radius ${minR.toFixed(1)}m)`
 			);
 			return;
 		}
@@ -698,8 +708,9 @@ export class EditModeController {
 	update() {
 		if (!this.enabled) return;
 		this.updateCameraKeys();
-		if (this.viewMode === "top") this.syncOrtho();
-		else this.syncOrbit();
+		this.syncOrtho();
+		this.syncOrbit();
+		if (this.digging) this.syncPipCamera();
 		this.syncTransformControlsCamera();
 		if (this.selectionHelper && this.selectedEntityId) {
 			const obj = this.applier.getEntityObject(this.selectedEntityId);
@@ -1306,6 +1317,21 @@ export class EditModeController {
 		this.orbitCam.updateProjectionMatrix();
 	}
 
+	private syncPipCamera() {
+		const aspect =
+			this.host.canvas.clientWidth / Math.max(1, this.host.canvas.clientHeight);
+		this.pipCamera.aspect = aspect;
+		// Trail behind and above the digger
+		const pipDist = 80;
+		this.pipCamera.position.set(
+			this.target.x + Math.sin(this.orbitYaw) * pipDist,
+			this.target.y + 40,
+			this.target.z + Math.cos(this.orbitYaw) * pipDist
+		);
+		this.pipCamera.lookAt(this.target);
+		this.pipCamera.updateProjectionMatrix();
+	}
+
 	private getSculptTarget(): TerrainSculptTarget | null {
 		const mesh = this.host.getTerrainMesh();
 		const heights = this.host.getTerrainHeights();
@@ -1371,7 +1397,14 @@ export class EditModeController {
 			if (op.type === "paint-road") {
 				grass.maskRoadCircle(op.x, op.z, op.radius);
 			} else if (op.type === "paint-cave") {
-				for (const n of op.nodes) grass.maskRoadCircle(n.x, n.z, n.r + 1.5);
+				if (op.nodes.length > 0) {
+					const first = op.nodes[0];
+					grass.maskRoadCircle(first.x, first.z, first.r + 1.5);
+					if (op.nodes.length > 1) {
+						const last = op.nodes[op.nodes.length - 1];
+						grass.maskRoadCircle(last.x, last.z, last.r + 1.5);
+					}
+				}
 			} else if (op.type === "paint-water" && op.createSurface) {
 				const r =
 					op.basin?.digRadius ??
@@ -1455,7 +1488,7 @@ export class EditModeController {
 					return;
 				}
 			}
-			if (this.tool !== "camera") return;
+			if (this.tool !== "camera" && this.tool !== "paint-cave") return;
 			if (["w", "a", "s", "d", "q", "e"].includes(key)) {
 				this.keys.add(key);
 				event.preventDefault();
@@ -1468,15 +1501,16 @@ export class EditModeController {
 	}
 
 	private updateCameraKeys() {
-		if (this.tool !== "camera" || this.keys.size === 0) return;
-		const speed =
-			(this.viewMode === "orbit" ? this.orbitDistance : this.frustumSize) * 0.012;
+		if ((this.tool !== "camera" && !this.digging) || this.keys.size === 0) return;
+		const speed = this.digging 
+			? 0.5 
+			: (this.viewMode === "orbit" ? this.orbitDistance : this.frustumSize) * 0.012;
 
 		const right = new THREE.Vector3();
 		const forward = new THREE.Vector3();
 		if (this.viewMode === "orbit") {
 			this.orbitCam.getWorldDirection(forward);
-			forward.y = 0;
+			if (!this.digging) forward.y = 0;
 			forward.normalize();
 			right.crossVectors(forward, new THREE.Vector3(0, 1, 0)).normalize();
 		} else {
@@ -1488,10 +1522,26 @@ export class EditModeController {
 		if (this.keys.has("s")) this.target.addScaledVector(forward, -speed);
 		if (this.keys.has("a")) this.target.addScaledVector(right, -speed);
 		if (this.keys.has("d")) this.target.addScaledVector(right, speed);
-		if (this.keys.has("q")) this.target.y = Math.max(-40, this.target.y - speed * 0.5);
+		if (this.keys.has("q")) this.target.y = Math.max(-100, this.target.y - speed * 0.5);
 		if (this.keys.has("e")) this.target.y = Math.min(120, this.target.y + speed * 0.5);
 
 		this.clampTargetToMap();
+
+		if (this.digging) {
+			const last = this.caveNodes[this.caveNodes.length - 1];
+			if (last) {
+				const dist = Math.hypot(
+					this.target.x - last.x,
+					this.target.y - last.y,
+					this.target.z - last.z
+				);
+				const r = Math.max(this.minCaveRadius(), this.brushRadius);
+				if (dist > r * 0.5) {
+					this.caveNodes.push({ x: this.target.x, y: this.target.y, z: this.target.z, r });
+					this.refreshCaveDraft();
+				}
+			}
+		}
 	}
 
 	private bindPointer() {
@@ -1554,10 +1604,22 @@ export class EditModeController {
 					return;
 				}
 
-				// Caves are placed node by node, not dragged like a brush.
+				// First-person cave digger
 				if (this.tool === "paint-cave") {
 					const hit = this.pickTerrain(event.clientX, event.clientY);
-					if (hit) this.addCaveNode(hit);
+					if (hit) {
+						this.target.copy(hit);
+						this.digging = true;
+						this.lastPan.set(event.clientX, event.clientY);
+						this.cameraClickFocus = false;
+						this.preDigDistance = this.orbitDistance;
+						this.orbitDistance = 0.1; // FPV mode
+						this.caveNodes = [];
+						const r = Math.max(this.minCaveRadius(), this.brushRadius);
+						this.caveNodes.push({ x: hit.x, y: hit.y, z: hit.z, r });
+						this.refreshCaveDraft();
+						try { el.requestPointerLock(); } catch {}
+					}
 					event.preventDefault();
 					return;
 				}
@@ -1591,6 +1653,21 @@ export class EditModeController {
 		el.addEventListener("pointermove", (event) => {
 			if (!this.enabled) return;
 			if (this.transformDragging) return;
+
+			if (this.digging) {
+				const dx = event.movementX || 0;
+				const dy = event.movementY || 0;
+				this.orbitYaw -= dx * 0.005;
+				const minPitch = -Math.PI / 2 + 0.1;
+				const maxPitch = Math.PI / 2 - 0.1;
+				this.orbitPitch = THREE.MathUtils.clamp(
+					this.orbitPitch + dy * 0.005,
+					minPitch,
+					maxPitch
+				);
+				this.syncOrbit();
+				return;
+			}
 
 			if (this.orbiting) {
 				const dx = event.clientX - this.lastPan.x;
@@ -1640,6 +1717,7 @@ export class EditModeController {
 				if (finishingTerrain) this.commitRebuildCollider();
 				this.store.endStroke();
 			}
+
 
 			// Short click focuses the camera on that map spot (surface height).
 			if (
@@ -1809,15 +1887,19 @@ export class EditModeController {
 		const group = new THREE.Group();
 		group.name = "cave-draft";
 		// depthTest off: the spine is mostly underground and must stay visible.
-		const ghost = new THREE.MeshBasicMaterial({
-			color: 0xd9a066,
-			transparent: true,
-			opacity: 0.32,
-			depthTest: false,
+		const ghost = new THREE.MeshStandardMaterial({
+			color: 0x4a3c31,
+			roughness: 1.0,
+			side: THREE.BackSide,
+			depthTest: true,
+			flatShading: true,
 		});
+		const rockGeo = this.getRockGeometry();
 		for (const n of this.caveNodes) {
-			const sphere = new THREE.Mesh(new THREE.SphereGeometry(n.r, 16, 12), ghost);
+			const sphere = new THREE.Mesh(rockGeo, ghost);
+			sphere.scale.setScalar(n.r);
 			sphere.position.set(n.x, n.y, n.z);
+			sphere.rotation.set(n.x % 10, n.y % 10, n.z % 10);
 			group.add(sphere);
 		}
 		if (this.caveNodes.length > 1) {
@@ -1834,7 +1916,36 @@ export class EditModeController {
 		this.caveDraftGroup = group;
 	}
 
+	private rockGeoCache: THREE.BufferGeometry | null = null;
+	private getRockGeometry() {
+		if (this.rockGeoCache) return this.rockGeoCache;
+		const geo = new THREE.IcosahedronGeometry(1, 2).toNonIndexed();
+		const pos = geo.attributes.position;
+		const v = new THREE.Vector3();
+		for (let i = 0; i < pos.count; i += 3) {
+			const offset = (Math.random() - 0.5) * 0.4;
+			for (let j = 0; j < 3; j++) {
+				v.fromBufferAttribute(pos, i + j);
+				v.normalize().multiplyScalar(1 + offset);
+				pos.setXYZ(i + j, v.x, v.y, v.z);
+			}
+		}
+		geo.computeVertexNormals();
+		this.rockGeoCache = geo;
+		return geo;
+	}
+
+	private exitDiggingMode() {
+		if (!this.digging) return;
+		this.digging = false;
+		this.orbitDistance = this.preDigDistance;
+		this.orbitPitch = THREE.MathUtils.clamp(this.orbitPitch, 0.05, 1.45);
+		this.syncOrbit();
+		try { document.exitPointerLock(); } catch {}
+	}
+
 	private clearCaveDraft() {
+		this.exitDiggingMode();
 		if (!this.caveNodes.length && !this.caveDraftGroup) return;
 		this.caveNodes = [];
 		this.refreshCaveDraft();
