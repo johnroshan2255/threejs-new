@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { getCaveMeshes, getCaveVersion, isInsideCave } from "./caveRegistry";
 
 const _raycaster = new THREE.Raycaster();
 const _origin = new THREE.Vector3();
@@ -6,7 +7,9 @@ const _down = new THREE.Vector3(0, -1, 0);
 const _hitPoint = new THREE.Vector3();
 const _worldNormal = new THREE.Vector3();
 
-let terrainMeshes: THREE.Object3D[] = [];
+let baseTerrainMesh: THREE.Mesh | null = null;
+let composedMeshes: THREE.Object3D[] = [];
+let composedCaveVersion = -1;
 let terrainBounds: THREE.Box3 | null = null;
 let fallbackY = 0;
 let rayStartY = 200;
@@ -18,8 +21,25 @@ export type TerrainRayHit = {
 	normal: THREE.Vector3;
 };
 
+/**
+ * Terrain plus every cave shell. Cave interiors are real surfaces you stand on,
+ * so they have to be part of every ground query, not a separate system.
+ * Rebuilt only when the cave set actually changes — these run per frame.
+ */
+function terrainMeshes(): THREE.Object3D[] {
+	const version = getCaveVersion();
+	if (composedCaveVersion !== version) {
+		composedMeshes = baseTerrainMesh
+			? [baseTerrainMesh, ...getCaveMeshes()]
+			: getCaveMeshes();
+		composedCaveVersion = version;
+	}
+	return composedMeshes;
+}
+
 export function setIslandTerrain(mesh: THREE.Mesh) {
-	terrainMeshes = [mesh];
+	baseTerrainMesh = mesh;
+	composedCaveVersion = -1;
 	mesh.updateMatrixWorld(true);
 	const box = new THREE.Box3().setFromObject(mesh);
 	terrainBounds = box.clone();
@@ -28,17 +48,21 @@ export function setIslandTerrain(mesh: THREE.Mesh) {
 	// *inside* a sculpted hill, and since terrain is DoubleSide the downward ray
 	// then hits the far underside and reports a height below the real surface.
 	rayStartY = box.max.y + 50;
-	rayFar = box.max.y - box.min.y + 100;
+	// Generous far plane: caves sink well below the terrain's own AABB.
+	rayFar = box.max.y - box.min.y + 300;
 }
 
 export function clearIslandTerrain() {
-	terrainMeshes = [];
+	baseTerrainMesh = null;
+	composedCaveVersion = -1;
+	composedMeshes = [];
 	terrainBounds = null;
 }
 
 /** True when a downward ray hits the active terrain mesh at (x, z). */
 export function hasTerrainAt(x: number, z: number): boolean {
-	if (terrainMeshes.length === 0) return false;
+	const meshes = terrainMeshes();
+	if (meshes.length === 0) return false;
 	if (terrainBounds) {
 		const pad = 2;
 		if (
@@ -54,7 +78,7 @@ export function hasTerrainAt(x: number, z: number): boolean {
 	_origin.set(x, rayStartY, z);
 	_raycaster.set(_origin, _down);
 	_raycaster.far = rayFar;
-	return _raycaster.intersectObjects(terrainMeshes, true).length > 0;
+	return _raycaster.intersectObjects(meshes, true).length > 0;
 }
 
 /**
@@ -67,7 +91,12 @@ export function isOutsideTerrain(
 	options?: { belowSlack?: number; aboveSlack?: number }
 ): boolean {
 	if (y < -120 || y > 90) return true;
-	if (terrainMeshes.length === 0) return true;
+	const meshes = terrainMeshes();
+	if (meshes.length === 0) return true;
+	// Being under the surface is the whole point of a cave. Without this the
+	// below-ground slack below flags anyone in a tunnel as fallen out of the
+	// world and resetCar teleports them back to the surface.
+	if (isInsideCave(x, y, z, 1.6)) return false;
 	if (terrainBounds) {
 		const pad = 2;
 		if (
@@ -83,7 +112,7 @@ export function isOutsideTerrain(
 	_origin.set(x, rayStartY, z);
 	_raycaster.set(_origin, _down);
 	_raycaster.far = rayFar;
-	const hits = _raycaster.intersectObjects(terrainMeshes, true);
+	const hits = _raycaster.intersectObjects(meshes, true);
 	if (hits.length === 0) return true;
 
 	const groundY = hits[0].point.y;
@@ -131,16 +160,26 @@ export function findSafeTerrainSpawn(
 	return new THREE.Vector3(preferX, fallbackY + clearance, preferZ);
 }
 
-export function getWorldTerrainY(x: number, z: number): number {
-	if (terrainMeshes.length === 0) return fallbackY;
+/**
+ * Height of the ground at (x, z).
+ *
+ * By default the probe starts above every peak, so it reports the outdoor
+ * surface — correct for grass, props and spawning. Pass `fromY` to get the
+ * surface directly *beneath* a known position instead; inside a cave the
+ * topmost hit is the hillside overhead, not the floor you are standing on.
+ */
+export function getWorldTerrainY(x: number, z: number, fromY?: number): number {
+	const meshes = terrainMeshes();
+	if (meshes.length === 0) return fallbackY;
 
-	_origin.set(x, rayStartY, z);
+	_origin.set(x, fromY == null ? rayStartY : fromY + 0.5, z);
 	_raycaster.set(_origin, _down);
-	_raycaster.far = rayFar;
+	_raycaster.far = fromY == null ? rayFar : rayFar + 50;
 
-	const hits = _raycaster.intersectObjects(terrainMeshes, true);
+	const hits = _raycaster.intersectObjects(meshes, true);
 	if (hits.length > 0) {
-		// Highest surface first — the ray starts above every peak.
+		// First hit from the probe origin: the outdoor surface when probing from
+		// above, or the nearest floor below the caller when given fromY.
 		return hits[0].point.y;
 	}
 
@@ -165,14 +204,15 @@ export function raycastTerrainHit(
 	direction: THREE.Vector3,
 	maxDistance: number
 ): TerrainRayHit | null {
-	if (terrainMeshes.length === 0) return null;
+	const meshes = terrainMeshes();
+	if (meshes.length === 0) return null;
 	if (direction.lengthSq() < 1e-12) return null;
 
 	_raycaster.set(origin, direction);
 	_raycaster.near = 0;
 	_raycaster.far = maxDistance;
 
-	const hits = _raycaster.intersectObjects(terrainMeshes, true);
+	const hits = _raycaster.intersectObjects(meshes, true);
 	for (const hit of hits) {
 		if (hit.distance < 0.35) continue;
 		if (hit.distance > maxDistance) continue;

@@ -13,11 +13,12 @@ import { MeshSurfaceSampler } from "three/addons/math/MeshSurfaceSampler.js";
 import { GrassMaterial } from "./GrassMaterial";
 import { initPhysics, getWorld } from "./physics/world";
 import {
-	createTerrainHeightfieldCollider,
+	createTerrainCollider,
 	type TerrainColliderHandle,
 } from "./physics/terrainCollider";
 import { setIslandTerrain, getWorldTerrainY, findSafeTerrainSpawn, isOutsideTerrain } from "./terrain/islandHeight";
 import { createLargeTerrain, TERRAIN_CONFIG } from "./terrain/createLargeTerrain";
+import { clearCaves } from "./terrain/caveRegistry";
 import { Pond, REFERENCE_WATER_LOOK } from "./entities/water";
 import { createCar, type CarEntity } from "./entities/car/createCar";
 import { loadKenneySuvVisual } from "./entities/car/kenneyCarVisual";
@@ -1723,7 +1724,8 @@ export class FluffyGrass {
 
 		mesh.updateMatrixWorld(true);
 		setIslandTerrain(mesh);
-		this.islandTerrainHandle = createTerrainHeightfieldCollider(
+		this.islandTerrainHandle = createTerrainCollider(
+			mesh,
 			heights,
 			nrows,
 			ncols,
@@ -4667,7 +4669,8 @@ export class FluffyGrass {
 		this.customWorldGroup.add(mesh);
 		mesh.updateMatrixWorld(true);
 		setIslandTerrain(mesh);
-		this.customTerrainHandle = createTerrainHeightfieldCollider(
+		this.customTerrainHandle = createTerrainCollider(
+			mesh,
 			heights,
 			nrows,
 			ncols,
@@ -4700,6 +4703,9 @@ export class FluffyGrass {
 	}
 
 	private disposeCustomWorld() {
+		// Caves are registered globally for ground queries, so they must go with the
+		// world — otherwise the next world inherits them and leaks their colliders.
+		clearCaves();
 		this.disposeEditorPondsIn(this.customWorldGroup);
 		for (const stone of this.editorStones) stone.dispose();
 		this.editorStones = [];

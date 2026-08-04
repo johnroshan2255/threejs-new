@@ -18,7 +18,8 @@ import {
 } from "../ui/EditModeUI";
 import { pickPlaceScale, resolveEditMesh, type EditMeshId } from "./meshCatalog";
 import type { TerrainColliderHandle } from "../physics/terrainCollider";
-import { createTerrainHeightfieldCollider } from "../physics/terrainCollider";
+import type { CaveNode } from "../terrain/caveShape";
+import { createTerrainCollider } from "../physics/terrainCollider";
 import { WorldEditStore } from "./WorldEditStore";
 import { WorldEditPersistence } from "./WorldEditPersistence";
 import { WorldEditApi } from "./WorldEditApi";
@@ -103,6 +104,11 @@ export class EditModeController {
 	private roadStyle: RoadStyle = "mud";
 	private brushRadius = 3;
 	private brushStrength = 0.35;
+	/** Depth below the local surface for tunnel nodes after the mouth. */
+	private caveDepth = 6;
+	/** Spine being authored; committed as one paint-cave op. */
+	private caveNodes: CaveNode[] = [];
+	private caveDraftGroup: THREE.Group | null = null;
 	private frustumSize = 120;
 	private target = new THREE.Vector3(0, 0, 0);
 	private orbitYaw = 0.7;
@@ -265,6 +271,10 @@ export class EditModeController {
 				this.tool = tool;
 				this.brushHelper.visible = this.enabled && this.isBrushTool(tool);
 				this.updateBrushColor();
+				this.syncBrushHelperScale();
+				// Leaving the cave tool abandons an unfinished spine rather than
+				// letting it reappear later on an unrelated click.
+				if (tool !== "paint-cave") this.clearCaveDraft();
 				if (tool !== "select") this.clearSelection();
 				if (tool === "camera" && this.viewMode === "orbit") {
 					this.syncOrbit();
@@ -275,10 +285,24 @@ export class EditModeController {
 			onSculptChange: (sculpt) => {
 				this.sculpt = sculpt;
 			},
+			onCaveDepthChange: (depth) => {
+				this.caveDepth = depth;
+			},
+			onCaveFinish: () => {
+				void this.commitCaveDraft();
+			},
+			onCaveUndoNode: () => {
+				this.caveNodes.pop();
+				this.refreshCaveDraft();
+			},
+			onCaveCancel: () => {
+				this.clearCaveDraft();
+			},
 			onBrushChange: (radius, strength) => {
 				this.brushRadius = radius;
 				this.brushStrength = strength;
-				this.brushHelper.scale.setScalar(radius);
+				this.syncBrushHelperScale();
+				if (this.tool === "paint-cave") this.refreshHint();
 			},
 			onViewModeChange: (mode) => {
 				this.viewMode = mode;
@@ -535,6 +559,8 @@ export class EditModeController {
 		this.orbiting = false;
 		this.keys.clear();
 		this.clearSelection();
+		// An uncarved spine must not linger as a ghost overlay in play mode.
+		this.clearCaveDraft();
 		this.brushHelper.visible = enabled && this.isBrushTool(this.tool);
 
 		if (this.transformControls) {
@@ -597,7 +623,7 @@ export class EditModeController {
 		const defaultR = Math.max(this.brushRadius, minR);
 		this.brushRadius = THREE.MathUtils.clamp(defaultR, minR, maxR);
 		this.ui.setBrushLimits(minR, maxR, this.brushRadius);
-		this.brushHelper.scale.setScalar(this.brushRadius);
+		this.syncBrushHelperScale();
 	}
 
 	private refreshHint() {
@@ -610,6 +636,15 @@ export class EditModeController {
 		if (this.tool === "place-mesh") {
 			this.ui.setHint(
 				"Pick a thumbnail, click terrain to place · Select tool to move / rotate / scale"
+			);
+			return;
+		}
+		if (this.tool === "paint-cave") {
+			const minR = this.minCaveRadius();
+			this.ui.setHint(
+				`Cave: click to drop tunnel nodes (${this.caveNodes.length}) · Tunnel = width` +
+					` (min ${minR.toFixed(1)}m on this world) · Depth = how deep` +
+					" · Enter carves · Esc clears"
 			);
 			return;
 		}
@@ -888,13 +923,19 @@ export class EditModeController {
 	}
 
 	private isBrushTool(tool: EditTool) {
-		return tool === "sculpt" || tool === "paint-road" || tool === "paint-water";
+		return (
+			tool === "sculpt" ||
+			tool === "paint-road" ||
+			tool === "paint-water" ||
+			tool === "paint-cave"
+		);
 	}
 
 	private updateBrushColor() {
 		const mat = this.brushHelper.material as THREE.MeshBasicMaterial;
 		if (this.tool === "paint-road") mat.color.setHex(0xa8906e);
 		else if (this.tool === "paint-water") mat.color.setHex(0x7eb8e8);
+		else if (this.tool === "paint-cave") mat.color.setHex(0xd9a066);
 		else mat.color.setHex(0xc8e6a0);
 	}
 
@@ -1285,7 +1326,8 @@ export class EditModeController {
 		if (!heights || !mesh) return;
 
 		this.host.getTerrainHandle()?.dispose();
-		const handle = createTerrainHeightfieldCollider(
+		const handle = createTerrainCollider(
+			mesh,
 			heights,
 			def.segments,
 			def.segments,
@@ -1323,6 +1365,8 @@ export class EditModeController {
 		for (const op of this.store.toJSON().ops) {
 			if (op.type === "paint-road") {
 				grass.maskRoadCircle(op.x, op.z, op.radius);
+			} else if (op.type === "paint-cave") {
+				for (const n of op.nodes) grass.maskRoadCircle(n.x, n.z, n.r + 1.5);
 			} else if (op.type === "paint-water" && op.createSurface) {
 				const r =
 					op.basin?.digRadius ??
@@ -1359,6 +1403,26 @@ export class EditModeController {
 				event.preventDefault();
 				void this.redo();
 				return;
+			}
+			if (this.tool === "paint-cave") {
+				if (event.key === "Enter") {
+					event.preventDefault();
+					void this.commitCaveDraft();
+					return;
+				}
+				if (event.key === "Escape") {
+					event.preventDefault();
+					this.clearCaveDraft();
+					this.refreshHint();
+					return;
+				}
+				if (event.key === "Backspace" || event.key === "Delete") {
+					event.preventDefault();
+					this.caveNodes.pop();
+					this.refreshCaveDraft();
+					this.refreshHint();
+					return;
+				}
 			}
 			if (
 				(event.key === "Delete" || event.key === "Backspace") &&
@@ -1481,6 +1545,14 @@ export class EditModeController {
 					// Let TransformControls own the pointer when hovering a gizmo axis.
 					if (this.transformControls?.axis) return;
 					this.handleSelectClick(event.clientX, event.clientY);
+					event.preventDefault();
+					return;
+				}
+
+				// Caves are placed node by node, not dragged like a brush.
+				if (this.tool === "paint-cave") {
+					const hit = this.pickTerrain(event.clientX, event.clientY);
+					if (hit) this.addCaveNode(hit);
 					event.preventDefault();
 					return;
 				}
@@ -1663,6 +1735,121 @@ export class EditModeController {
 		if (!hits.length) return null;
 		this.hitPoint.copy(hits[0].point);
 		return this.hitPoint;
+	}
+
+	/**
+	 * Add a spine node under the cursor.
+	 *
+	 * The first node sits just under the surface so the shell opens a mouth there.
+	 * Later nodes hang at the chosen depth below the *local* surface, so a tunnel
+	 * clicked into rising ground follows the hill instead of breaking out the side.
+	 */
+	private addCaveNode(point: THREE.Vector3) {
+		const surfaceY = this.sampleTerrainY(point.x, point.z) ?? point.y;
+		const r = Math.max(this.minCaveRadius(), this.brushRadius);
+		const y =
+			this.caveNodes.length === 0
+				? surfaceY - r * 0.35
+				: // Never shallower than the tunnel is wide, or the roof breaks open.
+					surfaceY - Math.max(this.caveDepth, r * 1.15);
+		this.caveNodes.push({ x: point.x, y, z: point.z, r });
+		this.refreshCaveDraft();
+	}
+
+	/**
+	 * Smallest tunnel that can actually open a mouth on this world.
+	 *
+	 * The hole is cut by dropping whole terrain triangles, so a mouth narrower than
+	 * the terrain cell has no triangle to remove and the cave would end up sealed
+	 * under intact ground. Segments are capped at 254, so a 10 km world has ~39 m
+	 * cells and needs a correspondingly wide tunnel.
+	 */
+	/** Keep the on-terrain disc honest: the cave tool enforces its own minimum. */
+	private syncBrushHelperScale() {
+		this.brushHelper.scale.setScalar(
+			this.tool === "paint-cave"
+				? Math.max(this.minCaveRadius(), this.brushRadius)
+				: this.brushRadius
+		);
+	}
+
+	private minCaveRadius(): number {
+		const def = this.host.getActiveWorldDefinition();
+		const cell = def.size / Math.max(1, def.segments);
+		return Math.max(1.2, cell * 1.3);
+	}
+
+	/** Ghost spheres + spine line so the tunnel is visible before it is carved. */
+	private refreshCaveDraft() {
+		this.ui.setCaveNodeCount(this.caveNodes.length);
+
+		if (this.caveDraftGroup) {
+			this.host.scene.remove(this.caveDraftGroup);
+			const geometries = new Set<THREE.BufferGeometry>();
+			const materials = new Set<THREE.Material>();
+			this.caveDraftGroup.traverse((child) => {
+				const withGeo = child as THREE.Mesh | THREE.Line;
+				if (withGeo.geometry) geometries.add(withGeo.geometry);
+				const mat = withGeo.material as THREE.Material | THREE.Material[] | undefined;
+				if (Array.isArray(mat)) mat.forEach((m) => materials.add(m));
+				else if (mat) materials.add(mat);
+			});
+			geometries.forEach((g) => g.dispose());
+			materials.forEach((m) => m.dispose());
+			this.caveDraftGroup = null;
+		}
+
+		if (!this.caveNodes.length) return;
+
+		const group = new THREE.Group();
+		group.name = "cave-draft";
+		// depthTest off: the spine is mostly underground and must stay visible.
+		const ghost = new THREE.MeshBasicMaterial({
+			color: 0xd9a066,
+			transparent: true,
+			opacity: 0.32,
+			depthTest: false,
+		});
+		for (const n of this.caveNodes) {
+			const sphere = new THREE.Mesh(new THREE.SphereGeometry(n.r, 16, 12), ghost);
+			sphere.position.set(n.x, n.y, n.z);
+			group.add(sphere);
+		}
+		if (this.caveNodes.length > 1) {
+			const line = new THREE.Line(
+				new THREE.BufferGeometry().setFromPoints(
+					this.caveNodes.map((n) => new THREE.Vector3(n.x, n.y, n.z))
+				),
+				new THREE.LineBasicMaterial({ color: 0xffe08a, depthTest: false })
+			);
+			group.add(line);
+		}
+		group.renderOrder = 999;
+		this.host.scene.add(group);
+		this.caveDraftGroup = group;
+	}
+
+	private clearCaveDraft() {
+		if (!this.caveNodes.length && !this.caveDraftGroup) return;
+		this.caveNodes = [];
+		this.refreshCaveDraft();
+	}
+
+	private async commitCaveDraft() {
+		if (this.caveNodes.length < 2) {
+			this.ui.setHint(
+				"Cave: needs at least two nodes — one at the mouth, one for the tunnel to reach"
+			);
+			return;
+		}
+		const nodes = this.caveNodes.map((n) => ({ ...n }));
+		this.clearCaveDraft();
+		this.store.beginStroke();
+		await this.commitOp(this.store.createOp({ type: "paint-cave", nodes }));
+		this.store.endStroke();
+		// Terrain now has a hole, so its collider has to become a trimesh.
+		this.commitRebuildCollider();
+		this.refreshHint();
 	}
 
 	private async brushAt(point: THREE.Vector3) {

@@ -5,6 +5,7 @@ import { getCarGroundForward } from "../entities/car/cameraDrive";
 import type { ChaseCameraInput } from "./chaseCameraInput";
 import type { HumanEntity } from "../entities/human/HumanEntity";
 import { getWorldTerrainY } from "../terrain/islandHeight";
+import { isInsideCave } from "../terrain/caveRegistry";
 
 const CAM_HEIGHT = 2.8;
 const CAM_LOOK_AHEAD = 5;
@@ -21,10 +22,28 @@ const CAM_GROUND_CLEARANCE = 0.6;
  * is also sampled at the target's x/z, which is not where the camera actually
  * ends up mid-lerp — so the sample has to be retaken at the final position.
  */
+/**
+ * Ground height to clamp a camera position against.
+ *
+ * Outdoors this is the topmost surface, probed from above every peak. Inside a
+ * cave that surface is the hillside *overhead*, and clamping to it would shove
+ * the camera up through the mountain — so probe downward from the point itself
+ * and clamp against the tunnel floor instead.
+ */
+function cameraGroundY(x: number, y: number, z: number): number {
+	if (isInsideCave(x, y, z, 1.2)) return getWorldTerrainY(x, z, y);
+	return getWorldTerrainY(x, z);
+}
+
 function liftAboveTerrain(camera: PerspectiveCamera): void {
-	const groundY = getWorldTerrainY(camera.position.x, camera.position.z);
-	const minY = groundY + CAM_GROUND_CLEARANCE;
-	if (camera.position.y < minY) camera.position.y = minY;
+	const p = camera.position;
+	const inCave = isInsideCave(p.x, p.y, p.z, 1.2);
+	const minY = cameraGroundY(p.x, p.y, p.z) + CAM_GROUND_CLEARANCE;
+	if (p.y >= minY) return;
+	// In a tunnel shorter than the clearance, lifting would bury the camera in the
+	// ceiling. Only take the lift while it keeps the camera inside the void.
+	if (inCave && !isInsideCave(p.x, minY, p.z, -0.2)) return;
+	p.y = minY;
 }
 
 const _carPos = new THREE.Vector3();
@@ -89,7 +108,7 @@ export function updateChaseCamera(
 		_carPos.z - Math.cos(camYaw) * horizDist
 	);
 
-	const terrainY = getWorldTerrainY(_targetCam.x, _targetCam.z);
+	const terrainY = cameraGroundY(_targetCam.x, _targetCam.y, _targetCam.z);
 	_targetCam.y = Math.max(_targetCam.y, terrainY + 0.5);
 
 	const blend = 1 - Math.exp(-CAM_SMOOTH * dt);
@@ -194,7 +213,11 @@ export function updateHumanCamera(
 		_humanPos.z - Math.cos(camYaw) * horizDist
 	);
 
-	const terrainY = getWorldTerrainY(_humanTargetCam.x, _humanTargetCam.z);
+	const terrainY = cameraGroundY(
+		_humanTargetCam.x,
+		_humanTargetCam.y,
+		_humanTargetCam.z
+	);
 	_humanTargetCam.y = Math.max(_humanTargetCam.y, terrainY + 0.5);
 
 	const blend = 1 - Math.exp(-CAM_SMOOTH * dt * 1.5);

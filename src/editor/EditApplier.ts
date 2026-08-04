@@ -34,6 +34,10 @@ import {
 } from "./basinWater";
 import type { WorldEditOp } from "./types";
 import { resolveEditMesh } from "./meshCatalog";
+import { createCave, type CaveHandle } from "../entities/cave/createCave";
+import { punchTerrainHoles, restoreTerrainHoles } from "../terrain/caveMesh";
+import { createHeightSampler } from "../terrain/caveShape";
+import { getCaveSpecs, hasCaves } from "../terrain/caveRegistry";
 
 /** Default dig radius when placing water on flat ground. */
 export const DEFAULT_WATER_RADIUS = 10;
@@ -41,7 +45,8 @@ export const DEFAULT_WATER_RADIUS = 10;
 type TrackedEntity =
 	| { kind: "tree"; tree: TreeHandle }
 	| { kind: "stone"; stone: PlacedStoneHandle }
-	| { kind: "pond"; pond: Pond };
+	| { kind: "pond"; pond: Pond }
+	| { kind: "cave"; cave: CaveHandle };
 
 export type EditApplierHost = {
 	worldGroup: THREE.Group;
@@ -70,6 +75,7 @@ export class EditApplier {
 	private readonly applied = new Set<string>();
 	private readonly entities = new Map<string, TrackedEntity>();
 	private colliderDirty = false;
+	private caveTerrainDirty = false;
 	private deferColliderRebuild = false;
 	/** When false (edit mode), dig basins only — no Pond meshes. */
 	private spawnWaterSurfaces = true;
@@ -113,6 +119,7 @@ export class EditApplier {
 		for (const entry of this.entities.values()) {
 			if (entry.kind === "stone") list.push(entry.stone.group);
 			else if (entry.kind === "pond") list.push(entry.pond.mesh);
+			else if (entry.kind === "cave") list.push(entry.cave.mesh);
 		}
 		return list;
 	}
@@ -158,10 +165,11 @@ export class EditApplier {
 			return entry.tree.group;
 		}
 		if (entry.kind === "stone") return entry.stone.group;
+		if (entry.kind === "cave") return entry.cave.mesh;
 		return entry.pond.mesh;
 	}
 
-	getEntityKind(entityId: string): "tree" | "stone" | "pond" | null {
+	getEntityKind(entityId: string): "tree" | "stone" | "pond" | "cave" | null {
 		return this.entities.get(entityId)?.kind ?? null;
 	}
 
@@ -189,6 +197,9 @@ export class EditApplier {
 				);
 				setIslandTerrain(target.mesh);
 				this.colliderDirty = true;
+				// Mouth footprints are derived from terrain height, so sculpting near
+				// a cave moves where the hole belongs.
+				if (hasCaves()) this.markCaveTerrainDirty();
 				return true;
 			}
 			case "place-tree": {
@@ -309,6 +320,42 @@ export class EditApplier {
 				}
 				return true;
 			}
+			case "paint-cave": {
+				const target = this.host.getSculptTarget();
+				if (!target || op.nodes.length < 1) return false;
+				const cave = createCave({
+					id: op.id,
+					nodes: op.nodes,
+					sampleHeight: createHeightSampler(
+						target.heights,
+						target.nrows,
+						target.ncols,
+						target.size
+					),
+				});
+				if (!cave) {
+					debugLine(`[cave] spine too small to carve (${op.nodes.length} nodes)`);
+					// Let a later, larger spine with this id succeed.
+					this.applied.delete(op.id);
+					return false;
+				}
+				this.host.worldGroup.add(cave.mesh);
+				this.entities.set(op.id, { kind: "cave", cave });
+
+				// Grass positions are baked into instance matrices, so blades over the
+				// mouth would hang in mid-air above the hole.
+				const grass = this.host.getGrassField();
+				if (grass) {
+					for (const n of op.nodes) grass.maskRoadCircle(n.x, n.z, n.r + 1.5);
+				}
+
+				this.markCaveTerrainDirty();
+				debugLine(
+					`[cave] ${op.nodes.length} nodes · ${cave.triangles} tris` +
+						` · voxel ${cave.voxelSize.toFixed(2)}m`
+				);
+				return true;
+			}
 			case "paint-forest": {
 				for (const treeSpec of op.trees) {
 					const id = "forest_" + Math.random().toString(36).substring(2, 9);
@@ -345,6 +392,11 @@ export class EditApplier {
 					} else if (handle.kind === "pond") {
 						this.host.removeEditorPond(handle.pond);
 						handle.pond.dispose();
+					} else if (handle.kind === "cave") {
+						handle.cave.dispose();
+						// The mouth hole has to close again, and terrain can go back to a
+						// heightfield collider once the last cave is gone.
+						this.markCaveTerrainDirty();
 					}
 					this.entities.delete(op.entityId);
 				}
@@ -396,15 +448,25 @@ export class EditApplier {
 			this.host.removeEditorPond(handle.pond);
 			handle.pond.mesh.removeFromParent();
 			handle.pond.dispose();
+		} else if (handle.kind === "cave") {
+			handle.cave.dispose();
+			this.markCaveTerrainDirty();
 		}
 		this.entities.delete(entityId);
 	}
 
 	/** Drop all tracked props (before full reapply). */
 	clearEntities() {
-		for (const entityId of [...this.entities.keys()]) {
-			this.removeEntity(entityId);
+		// Batch: each removed cave would otherwise re-punch the whole terrain index.
+		this.deferColliderRebuild = true;
+		try {
+			for (const entityId of [...this.entities.keys()]) {
+				this.removeEntity(entityId);
+			}
+		} finally {
+			this.deferColliderRebuild = false;
 		}
+		this.flushCaveTerrain();
 		const tm = this.host.getTreeManager();
 		if (tm) tm.clear();
 	}
@@ -666,6 +728,42 @@ export class EditApplier {
 		}
 	}
 
+	/**
+	 * Terrain mouth holes need re-cutting. Batched during applyMany — punching walks
+	 * every terrain triangle, so doing it per cave on a full replay is wasteful.
+	 */
+	private markCaveTerrainDirty() {
+		this.caveTerrainDirty = true;
+		this.colliderDirty = true;
+		if (!this.deferColliderRebuild) this.flushCaveTerrain();
+	}
+
+	private flushCaveTerrain() {
+		if (!this.caveTerrainDirty) return;
+		this.caveTerrainDirty = false;
+
+		const mesh = this.host.getTerrainMesh();
+		const target = this.host.getSculptTarget();
+		if (!mesh) return;
+		const geometry = mesh.geometry as THREE.BufferGeometry;
+
+		if (!hasCaves() || !target) {
+			restoreTerrainHoles(geometry);
+		} else {
+			punchTerrainHoles(
+				geometry,
+				getCaveSpecs(),
+				createHeightSampler(
+					target.heights,
+					target.nrows,
+					target.ncols,
+					target.size
+				)
+			);
+		}
+		setIslandTerrain(mesh);
+	}
+
 	async applyMany(ops: WorldEditOp[]) {
 		this.deferColliderRebuild = true;
 		try {
@@ -675,6 +773,7 @@ export class EditApplier {
 		} finally {
 			this.deferColliderRebuild = false;
 		}
+		this.flushCaveTerrain();
 		if (this.colliderDirty) {
 			this.host.rebuildCollider();
 			this.colliderDirty = false;
@@ -682,6 +781,8 @@ export class EditApplier {
 	}
 
 	flushColliderIfNeeded() {
+		// Holes first: the collider is built from the punched terrain geometry.
+		this.flushCaveTerrain();
 		if (!this.colliderDirty) return;
 		this.host.rebuildCollider();
 		this.colliderDirty = false;

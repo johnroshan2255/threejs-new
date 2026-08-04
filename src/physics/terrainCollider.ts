@@ -1,6 +1,9 @@
+import * as THREE from "three";
 import RAPIER from "@dimforge/rapier3d-compat";
 import { getWorld } from "./world";
 import { TERRAIN_CONFIG } from "../terrain/createLargeTerrain";
+import { hasCaves } from "../terrain/caveRegistry";
+import { createTrimeshCollider } from "./caveCollider";
 
 export type TerrainColliderHandle = {
 	body: RAPIER.RigidBody;
@@ -40,4 +43,25 @@ export function createTerrainHeightfieldCollider(
 			world.removeRigidBody(body);
 		},
 	};
+}
+
+/**
+ * Ground collider for the active terrain.
+ *
+ * Prefers the heightfield — it is far cheaper for the vehicle's wheel raycasts.
+ * Falls back to a trimesh built from the punched mesh once caves exist, because a
+ * heightfield has no way to express the hole a cave mouth needs.
+ */
+export function createTerrainCollider(
+	mesh: THREE.Mesh | null,
+	heights: Float32Array,
+	nrows: number,
+	ncols: number,
+	size: number = TERRAIN_CONFIG.size
+): TerrainColliderHandle {
+	if (mesh && hasCaves()) {
+		const trimesh = createTrimeshCollider(mesh);
+		if (trimesh) return trimesh;
+	}
+	return createTerrainHeightfieldCollider(heights, nrows, ncols, size);
 }

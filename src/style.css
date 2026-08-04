@@ -1554,6 +1554,19 @@ body.orientation-portrait-lock .dg.ac {
 	color: var(--edit-text);
 }
 
+.edit-cave-count {
+	padding: 2px 0 4px;
+	font-size: 11px;
+	font-variant-numeric: tabular-nums;
+	opacity: 0.75;
+	color: var(--edit-text);
+}
+
+#edit-cave-finish[disabled] {
+	opacity: 0.45;
+	pointer-events: none;
+}
+
 .edit-left-bar {
 	/* Sit fully below the top header so the bars never overlap. */
 	position: fixed;
