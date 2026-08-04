@@ -1,9 +1,12 @@
 import * as THREE from "three";
-import { buildCaveGeometry } from "../../terrain/caveMesh";
+import { buildCaveGeometry, geometryFromCaveMeshData } from "../../terrain/caveMesh";
+import type { CaveGeometryResult } from "../../terrain/caveMesh";
+import type { CaveMeshRequest } from "../../terrain/caveMeshCore";
 import { registerCave, unregisterCave } from "../../terrain/caveRegistry";
-import type { CaveNode, HeightSampler } from "../../terrain/caveShape";
+import type { CaveNode } from "../../terrain/caveShape";
 import { createTrimeshCollider } from "../../physics/caveCollider";
 import type { TerrainColliderHandle } from "../../physics/terrainCollider";
+import { caveMeshWorker } from "../../workers/caveMeshClient";
 
 export type CaveHandle = {
 	id: string;
@@ -42,13 +45,33 @@ function rockMaterial(): THREE.MeshPhongMaterial {
  * moving it would desync the mesh from the SDF the registry queries, which is why
  * caves are not transformable entities.
  */
-export function createCave(options: {
+export async function createCave(options: {
 	id: string;
 	nodes: CaveNode[];
-	sampleHeight: HeightSampler;
+	heights: Float32Array;
+	nrows: number;
+	ncols: number;
+	size: number;
 	withCollider?: boolean;
-}): CaveHandle | null {
-	const built = buildCaveGeometry({ nodes: options.nodes }, options.sampleHeight);
+}): Promise<CaveHandle | null> {
+	const request: CaveMeshRequest = {
+		nodes: options.nodes,
+		heights: options.heights,
+		nrows: options.nrows,
+		ncols: options.ncols,
+		size: options.size,
+	};
+
+	let built: CaveGeometryResult | null;
+	try {
+		// heights is NOT transferred — the main thread keeps owning it for sculpting
+		// and the heightfield collider.
+		const data = await caveMeshWorker.run(request);
+		built = data ? geometryFromCaveMeshData(data) : null;
+	} catch (error) {
+		console.warn("[cave] worker unavailable, meshing on main thread", error);
+		built = buildCaveGeometry(request);
+	}
 	if (!built) return null;
 
 	const mesh = new THREE.Mesh(built.geometry, rockMaterial());

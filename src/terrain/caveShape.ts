@@ -1,4 +1,7 @@
-import * as THREE from "three";
+/**
+ * Cave geometry primitives. Deliberately free of THREE so this module can be
+ * imported by the meshing worker without pulling the renderer into its bundle.
+ */
 
 /**
  * One node on a cave tunnel spine (world position + tunnel radius there).
@@ -147,17 +150,42 @@ export function cavePadding(nodes: CaveNode[], voxel: number): number {
 	return maxCaveRadius(nodes) + voxel * 4 + 0.6;
 }
 
+export type CaveBounds = {
+	minX: number;
+	minY: number;
+	minZ: number;
+	maxX: number;
+	maxY: number;
+	maxZ: number;
+};
+
 /** World-space voxel region for a cave chain. */
-export function caveBounds(nodes: CaveNode[], pad: number): THREE.Box3 {
-	const box = new THREE.Box3();
-	if (!nodes.length) return box;
-	box.makeEmpty();
+export function caveBounds(nodes: CaveNode[], pad: number): CaveBounds {
+	let minX = Infinity;
+	let minY = Infinity;
+	let minZ = Infinity;
+	let maxX = -Infinity;
+	let maxY = -Infinity;
+	let maxZ = -Infinity;
 	for (const n of nodes) {
-		box.expandByPoint(new THREE.Vector3(n.x - n.r, n.y - n.r, n.z - n.r));
-		box.expandByPoint(new THREE.Vector3(n.x + n.r, n.y + n.r, n.z + n.r));
+		if (n.x - n.r < minX) minX = n.x - n.r;
+		if (n.y - n.r < minY) minY = n.y - n.r;
+		if (n.z - n.r < minZ) minZ = n.z - n.r;
+		if (n.x + n.r > maxX) maxX = n.x + n.r;
+		if (n.y + n.r > maxY) maxY = n.y + n.r;
+		if (n.z + n.r > maxZ) maxZ = n.z + n.r;
 	}
-	box.expandByScalar(pad);
-	return box;
+	if (!nodes.length) {
+		return { minX: 0, minY: 0, minZ: 0, maxX: 0, maxY: 0, maxZ: 0 };
+	}
+	return {
+		minX: minX - pad,
+		minY: minY - pad,
+		minZ: minZ - pad,
+		maxX: maxX + pad,
+		maxY: maxY + pad,
+		maxZ: maxZ + pad,
+	};
 }
 
 /** Rock density: negative inside solid rock, positive in air or inside the cave. */

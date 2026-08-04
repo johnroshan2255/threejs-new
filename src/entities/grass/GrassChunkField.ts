@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import type { GrassChunkData } from "./grassPlacementCore";
 
 const CHUNK_SIZE = 15;
 /** Extra radius so wind-displaced blades near chunk edges don't pop. */
@@ -14,7 +15,14 @@ const DEFAULT_SHOW_DISTANCE = 62;
 export const DEFAULT_GRASS_CULL_DISTANCE = 72;
 
 export type GrassChunkFieldOptions = {
-	matrices: THREE.Matrix4[];
+	/**
+	 * Per-instance matrices. Prefer `chunks` — building Matrix4 objects for a
+	 * million blades is exactly the main-thread cost the worker path removes.
+	 * Kept for the MeshSurfaceSampler path on the built-in worlds.
+	 */
+	matrices?: THREE.Matrix4[];
+	/** Pre-chunked flat matrix buffers from the placement worker. */
+	chunks?: GrassChunkData[];
 	geometry: THREE.BufferGeometry;
 	material: THREE.Material;
 	origin?: THREE.Vector3;
@@ -66,10 +74,15 @@ export class GrassChunkField {
 			this.setCullDistance(options.cullDistance);
 		}
 
+		if (options.chunks) {
+			this.buildFromChunks(options.chunks, options.geometry, options.material);
+			return;
+		}
+
 		const buckets = new Map<string, THREE.Matrix4[]>();
 		const matrixPosition = new THREE.Vector3();
 
-		for (const matrix of options.matrices) {
+		for (const matrix of options.matrices ?? []) {
 			matrixPosition.setFromMatrixPosition(matrix);
 			const chunkX = Math.floor(matrixPosition.x / this.chunkSize);
 			const chunkZ = Math.floor(matrixPosition.z / this.chunkSize);
@@ -122,6 +135,55 @@ export class GrassChunkField {
 			this.distanceScale.push(1);
 			this.hidden.push(false);
 			this.roadMasked.push(masked);
+		}
+	}
+
+	/**
+	 * Adopt worker output with no per-instance JS work: each chunk's matrix buffer
+	 * is blitted straight into instanceMatrix, and bounds come from the worker's
+	 * position extents rather than InstancedMesh.computeBoundingBox (which would
+	 * walk every instance again on the main thread).
+	 */
+	private buildFromChunks(
+		chunks: GrassChunkData[],
+		geometry: THREE.BufferGeometry,
+		material: THREE.Material
+	) {
+		// Conservative padding: blade extent at its largest instance scale. Bounding
+		// volumes only have to enclose, so overestimating costs nothing but culling.
+		if (!geometry.boundingSphere) geometry.computeBoundingSphere();
+		const bladeReach = (geometry.boundingSphere?.radius ?? 1) * 1.2 + BOUND_PADDING;
+
+		for (const chunk of chunks) {
+			if (chunk.count === 0) continue;
+			const mesh = new THREE.InstancedMesh(geometry, material, chunk.count);
+			mesh.name = "GrassChunk";
+			mesh.receiveShadow = true;
+			mesh.frustumCulled = true;
+			mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+			mesh.layers.set(0);
+
+			(mesh.instanceMatrix.array as Float32Array).set(chunk.matrices);
+			mesh.instanceMatrix.needsUpdate = true;
+
+			mesh.userData.maxGrassCount = chunk.count;
+			mesh.count = Math.floor(chunk.count * (this.density / 100));
+
+			mesh.boundingBox = new THREE.Box3(
+				new THREE.Vector3(chunk.minX, chunk.minY, chunk.minZ),
+				new THREE.Vector3(chunk.maxX, chunk.maxY, chunk.maxZ)
+			).expandByScalar(bladeReach);
+			mesh.boundingSphere = new THREE.Sphere();
+			mesh.boundingBox.getBoundingSphere(mesh.boundingSphere);
+
+			this.group.add(mesh);
+			this.meshes.push(mesh);
+			this.chunkCenters.push(
+				new THREE.Vector3(chunk.centerX, chunk.centerY, chunk.centerZ)
+			);
+			this.distanceScale.push(1);
+			this.hidden.push(false);
+			this.roadMasked.push(new Array(chunk.count).fill(false));
 		}
 	}
 

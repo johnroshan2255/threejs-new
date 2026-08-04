@@ -62,6 +62,12 @@ import {
 	type ScenicPropHandle,
 } from "./entities/props";
 import { GrassChunkField, DEFAULT_GRASS_CULL_DISTANCE } from "./entities/grass";
+import {
+	buildGrassPlacement,
+	type GrassChunkData,
+	type GrassPlacementRequest,
+} from "./entities/grass/grassPlacementCore";
+import { grassPlacementWorker } from "./workers/grassPlacementClient";
 import { EditModeController } from "./editor/EditModeController";
 import {
 	createLargeBlankWorld,
@@ -187,6 +193,20 @@ const NEUTRAL_GRADE = {
 const nextFrame = () =>
 	new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
 
+/** Shared shape of addGrass / addGrassAsync placement options. */
+type GrassPlacementOptions = {
+	chunkSize?: number;
+	clearPondHole?: boolean;
+	/** Even grid + jitter (custom worlds) — avoids random patchy gaps. */
+	evenCoverage?: boolean;
+	/** Skip grass steeper than this slope angle (degrees). Default 65. */
+	maxSlopeDeg?: number;
+	heights?: Float32Array;
+	nrows?: number;
+	ncols?: number;
+	terrainSize?: number;
+};
+
 export class FluffyGrass {
 	private loadingManager: THREE.LoadingManager;
 	private textureLoader: THREE.TextureLoader;
@@ -228,6 +248,8 @@ export class FluffyGrass {
 	private islandGrassField: GrassChunkField | null = null;
 	private valleyGrassField: GrassChunkField | null = null;
 	private customGrassField: GrassChunkField | null = null;
+	/** Bumps per off-thread grass build so only the newest result is adopted. */
+	private grassBuildGeneration = 0;
 	private customWorldGroup = new THREE.Group();
 	private customTerrainMesh: THREE.Mesh | null = null;
 	private customHeights: Float32Array | null = null;
@@ -1584,80 +1606,25 @@ export class FluffyGrass {
 			return true;
 		};
 
-		const useEven =
-			options?.evenCoverage &&
-			options.heights &&
-			options.nrows != null &&
-			options.ncols != null &&
-			options.terrainSize != null;
+		// Even coverage is pure math over the heightfield, so it runs through the
+		// shared placement core — which emits ready-to-upload chunk buffers instead
+		// of a Matrix4 per blade, and can be handed to a worker (see addGrassAsync).
+		const request = this.grassPlacementRequest(
+			pondLocalPos,
+			grassHeightMultiplier,
+			options
+		);
+		if (request) {
+			return this.grassFieldFromChunks(
+				buildGrassPlacement(request).chunks,
+				grassGeometry,
+				targetGroup,
+				surfaceMesh,
+				options
+			);
+		}
 
-		if (useEven) {
-			const heights = options.heights!;
-			const nrows = options.nrows!;
-			const ncols = options.ncols!;
-			const size = options.terrainSize!;
-			const half = size * 0.5;
-			// Same blade spacing as island (~0.9 m). If budget is lower than full
-			// coverage, keep probability so thinning stays uniform (not patchy corners).
-			const spacing = Math.sqrt(1 / ISLAND_GRASS_DENSITY);
-			const fullCount = (size * size) * ISLAND_GRASS_DENSITY;
-			const keepProb = Math.min(1, this.grassCount / Math.max(1, fullCount));
-			const stride = nrows + 1;
-			/**
-			 * Bilinear over the terrain grid. The rendered surface interpolates
-			 * between vertices, so nearest-vertex snapping would sink blades into
-			 * slopes (or float them) by up to half a cell × tan(slope) — metres on
-			 * big worlds, where cells reach ~39 m at the 254-segment cap.
-			 */
-			const sampleH = (x: number, z: number) => {
-				const fx = THREE.MathUtils.clamp(((x + half) / size) * ncols, 0, ncols);
-				const fz = THREE.MathUtils.clamp(((z + half) / size) * nrows, 0, nrows);
-				const col0 = Math.floor(fx);
-				const row0 = Math.floor(fz);
-				const col1 = Math.min(col0 + 1, ncols);
-				const row1 = Math.min(row0 + 1, nrows);
-				const tx = fx - col0;
-				const tz = fz - row0;
-				const h00 = heights[row0 + col0 * stride]!;
-				const h10 = heights[row0 + col1 * stride]!;
-				const h01 = heights[row1 + col0 * stride]!;
-				const h11 = heights[row1 + col1 * stride]!;
-				const hRow0 = h00 + (h10 - h00) * tx;
-				const hRow1 = h01 + (h11 - h01) * tx;
-				return hRow0 + (hRow1 - hRow0) * tz;
-			};
-			const sampleN = (x: number, z: number, out: THREE.Vector3) => {
-				const e = Math.max(spacing * 0.5, size / ncols);
-				out.set(
-					sampleH(x - e, z) - sampleH(x + e, z),
-					e * 2,
-					sampleH(x, z - e) - sampleH(x, z + e)
-				).normalize();
-			};
-
-			let rowIndex = 0;
-			for (let gz = -half + spacing * 0.5; gz < half; gz += spacing, rowIndex++) {
-				if (matrices.length >= this.grassCount) break;
-				// Offset every other row by half a cell (hex-style packing). A square
-				// lattice lines blades up in axis-aligned rows, and the seam between
-				// rows reads as a bare stripe on any hillside seen face-on.
-				const rowShift = (rowIndex & 1) * spacing * 0.5;
-				for (let gx = -half + spacing * 0.5 + rowShift; gx < half; gx += spacing) {
-					if (matrices.length >= this.grassCount) break;
-					if (keepProb < 1 && Math.random() > keepProb) continue;
-					// Full-cell jitter (stratified). At 0.9 every cell kept a 5%
-					// no-blade margin, and those margins joined up into grid lines.
-					const x = gx + (Math.random() - 0.5) * spacing;
-					const z = gz + (Math.random() - 0.5) * spacing;
-					if (x < -half || x > half || z < -half || z > half) continue;
-					sampleN(x, z, normal);
-					// Only bare on steep slopes (> maxSlopeDeg). Gentle hills keep grass.
-					if (normal.y < minNormalY) continue;
-					position.set(x, sampleH(x, z), z);
-					pushBlade();
-				}
-			}
-		} else {
+		{
 			const sampler = new MeshSurfaceSampler(surfaceMesh).build();
 			let instanceIndex = 0;
 			const maxAttempts = this.grassCount * (isNewWorld ? 4 : 2);
@@ -1697,6 +1664,121 @@ export class FluffyGrass {
 		});
 		targetGroup.add(field.group);
 		return field;
+	}
+
+	/**
+	 * Placement inputs for the even-coverage path, or null when this world has to
+	 * fall back to MeshSurfaceSampler (built-in island / valley meshes).
+	 */
+	private grassPlacementRequest(
+		pondLocalPos: THREE.Vector2,
+		grassHeightMultiplier: number,
+		options?: GrassPlacementOptions
+	): GrassPlacementRequest | null {
+		if (
+			!options?.evenCoverage ||
+			!options.heights ||
+			options.nrows == null ||
+			options.ncols == null ||
+			options.terrainSize == null
+		) {
+			return null;
+		}
+		const size = options.terrainSize;
+		// Same blade spacing as island (~0.9 m). If the budget is lower than full
+		// coverage, keep a probability so thinning stays uniform (not patchy corners).
+		const spacing = Math.sqrt(1 / ISLAND_GRASS_DENSITY);
+		const fullCount = size * size * ISLAND_GRASS_DENSITY;
+		return {
+			heights: options.heights,
+			nrows: options.nrows,
+			ncols: options.ncols,
+			size,
+			spacing,
+			keepProb: Math.min(1, this.grassCount / Math.max(1, fullCount)),
+			maxCount: this.grassCount,
+			minNormalY: Math.cos(((options.maxSlopeDeg ?? 65) * Math.PI) / 180),
+			chunkSize: options.chunkSize ?? 15,
+			heightMultiplier: grassHeightMultiplier,
+			clearPondHole: options.clearPondHole !== false,
+			pondX: pondLocalPos.x,
+			pondZ: pondLocalPos.y,
+		};
+	}
+
+	private grassFieldFromChunks(
+		chunks: GrassChunkData[],
+		grassGeometry: THREE.BufferGeometry,
+		targetGroup: THREE.Group,
+		surfaceMesh: THREE.Mesh,
+		options?: { chunkSize?: number }
+	): GrassChunkField {
+		const field = new GrassChunkField({
+			chunks,
+			geometry: grassGeometry,
+			material: this.grassMaterial.material,
+			origin: surfaceMesh.position,
+			chunkSize: options?.chunkSize ?? 15,
+			density: this.grassDensity,
+			cullDistance: this.grassCullDistance,
+		});
+		targetGroup.add(field.group);
+		return field;
+	}
+
+	/**
+	 * Same result as addGrass, but placement runs off-thread.
+	 *
+	 * Used where the stall is worst: custom-world load and every sculpt stroke,
+	 * which regenerates the whole field (up to 1.3M blades). Falls back to the
+	 * synchronous core if the worker is unavailable or fails — a hitch is
+	 * acceptable, a grassless world is not.
+	 */
+	private async addGrassAsync(
+		surfaceMesh: THREE.Mesh,
+		grassGeometry: THREE.BufferGeometry,
+		targetGroup: THREE.Group,
+		pondLocalPos: THREE.Vector2,
+		grassHeightMultiplier: number,
+		options?: GrassPlacementOptions
+	): Promise<GrassChunkField> {
+		const request = this.grassPlacementRequest(
+			pondLocalPos,
+			grassHeightMultiplier,
+			options
+		);
+		if (!request) {
+			return this.addGrass(
+				surfaceMesh,
+				grassGeometry,
+				targetGroup,
+				pondLocalPos,
+				grassHeightMultiplier,
+				false,
+				options
+			);
+		}
+
+		this.grassMaterial.setBladeHeightScale(grassHeightMultiplier);
+
+		let chunks: GrassChunkData[];
+		try {
+			// heights is NOT transferred — the main thread keeps owning it for the
+			// heightfield collider and sculpting. Cloning 260KB is free next to the
+			// work being moved.
+			chunks = (await grassPlacementWorker.run(request)).chunks;
+		} catch (error) {
+			console.warn("[grass] worker unavailable, placing on main thread", error);
+			chunks = buildGrassPlacement(request).chunks;
+		}
+
+		return this.grassFieldFromChunks(
+			chunks,
+			grassGeometry,
+			targetGroup,
+			surfaceMesh,
+			options
+		);
 	}
 
 	private loadGltf(url: string): Promise<THREE.Group> {
@@ -4504,9 +4586,7 @@ export class FluffyGrass {
 				await this.switchWorld(worldId);
 			},
 			listLocalCustomWorlds: () => [...this.customWorldDefs],
-			rebuildEditGrass: () => {
-				this.rebuildActiveEditGrass();
-			},
+			rebuildEditGrass: () => this.rebuildActiveEditGrass(),
 			liftPlayersAboveTerrain: () => {
 				this.liftPlayersAboveTerrain();
 			},
@@ -4587,7 +4667,14 @@ export class FluffyGrass {
 	}
 
 	/** Re-sample grass after undo/redo restores terrain (roads bury blades in place). */
-	private rebuildActiveEditGrass() {
+	/**
+	 * Rebuild the active world's grass after terrain changes.
+	 *
+	 * Returns a promise so the editor can re-apply road / water / cave grass masks
+	 * *after* the new field exists — custom worlds place blades off-thread, and
+	 * masking the outgoing field would leave the replacement unmasked.
+	 */
+	private async rebuildActiveEditGrass(): Promise<void> {
 		const mesh = this.activeWorldDef.kind === "custom"
 			? this.customTerrainMesh
 			: this.currentWorld === "valley"
@@ -4607,14 +4694,19 @@ export class FluffyGrass {
 		if (this.activeWorldDef.kind === "custom") {
 			const heights = this.customHeights;
 			const segs = this.activeWorldDef.segments;
-			this.customGrassField?.dispose();
-			this.customGrassField = this.addGrass(
+			// Off-thread: this runs after every sculpt stroke settles, and rebuilding
+			// up to 1.3M blades on the main thread is the worst stall in edit mode.
+			// Generation guard so rapid strokes only apply the newest result.
+			const generation = ++this.grassBuildGeneration;
+			// addGrassAsync captures the blade budget synchronously, before its first
+			// await, so grassCount can be restored right away rather than left at the
+			// temporary value for the whole off-thread build.
+			const pending = this.addGrassAsync(
 				mesh,
 				this.grassGeometry,
 				group,
 				new THREE.Vector2(1e6, 1e6),
 				0.6,
-				false,
 				{
 					chunkSize: 15,
 					clearPondHole: false,
@@ -4626,8 +4718,23 @@ export class FluffyGrass {
 					terrainSize: this.activeWorldDef.size,
 				}
 			);
-			this.customGrassField.setDensity(this.grassDensity);
-		} else if (this.currentWorld === "valley") {
+			this.grassCount = previousCount;
+			this.grassMaterial.setTerrainSize(this.activeWorldDef.size);
+
+			const field = await pending;
+			if (generation !== this.grassBuildGeneration) {
+				// A newer stroke already superseded this field.
+				field.dispose();
+				return;
+			}
+			// Swap in the same tick the new field is added, so no frame draws both.
+			this.customGrassField?.dispose();
+			this.customGrassField = field;
+			field.setDensity(this.grassDensity);
+			return;
+		}
+
+		if (this.currentWorld === "valley") {
 			this.valleyGrassField?.dispose();
 			this.valleyGrassField = this.addGrass(
 				mesh,
@@ -4679,13 +4786,14 @@ export class FluffyGrass {
 
 		const previousCount = this.grassCount;
 		this.grassCount = grassCountForSize(def.size);
-		this.customGrassField = this.addGrass(
+		// Off-thread so opening a world does not freeze on blade placement.
+		this.grassBuildGeneration++;
+		this.customGrassField = await this.addGrassAsync(
 			mesh,
 			this.grassGeometry,
 			this.customWorldGroup,
 			new THREE.Vector2(1e6, 1e6),
 			0.6,
-			false,
 			{
 				chunkSize: 15,
 				clearPondHole: false,

@@ -5,7 +5,12 @@ import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from "three-
 (THREE.Mesh.prototype as any).raycast = acceleratedRaycast;
 
 import { buildCaveGeometry, punchTerrainHoles } from "../src/terrain/caveMesh";
-import { caveDistance, createHeightSampler, isMouthColumn } from "../src/terrain/caveShape";
+import { caveDistance, createHeightSampler } from "../src/terrain/caveShape";
+
+/** Zero-height grid for the flat-ground cases. */
+function flatHeights(segments: number) {
+	return new Float32Array((segments + 1) * (segments + 1));
+}
 
 let failures = 0;
 function check(name: string, ok: boolean, detail = "") {
@@ -21,7 +26,13 @@ const nodes = [
 	{ x: 0, y: -6, z: 20, r: 2 },
 ];
 
-const built = buildCaveGeometry({ nodes }, flat);
+const built = buildCaveGeometry({
+	nodes,
+	heights: flatHeights(200),
+	nrows: 200,
+	ncols: 200,
+	size: 100,
+});
 check("builds geometry", !!built);
 if (!built) {
 	process.exit(1);
@@ -192,7 +203,13 @@ const hillNodes = [
 	{ x: 0, y: hillSampler(0, 0) - 7, z: 0, r: 2.2 },
 	{ x: 12, y: hillSampler(12, 0) - 6, z: 0, r: 1.8 },
 ];
-const hillBuilt = buildCaveGeometry({ nodes: hillNodes }, hillSampler);
+const hillBuilt = buildCaveGeometry({
+	nodes: hillNodes,
+	heights,
+	nrows: segs,
+	ncols: segs,
+	size,
+});
 check("builds against a sculpted heightfield", !!hillBuilt, `${hillBuilt?.triangles ?? 0} tris`);
 
 // ------------------------------- coarse worlds (10km map => ~39m cells)
@@ -214,7 +231,13 @@ for (const [label, worldSize, segments] of [
 	const cut = punchTerrainHoles(plane, [{ nodes: spine }], flat);
 	check(`${label}: mouth opens (cell ${cell.toFixed(1)}m, r ${r.toFixed(1)}m)`, cut > 0, `${cut} tris`);
 
-	const shell = buildCaveGeometry({ nodes: spine }, flat);
+	const shell = buildCaveGeometry({
+		nodes: spine,
+		heights: flatHeights(segments),
+		nrows: segments,
+		ncols: segments,
+		size: worldSize,
+	});
 	check(`${label}: shell builds`, !!shell, `${shell?.triangles ?? 0} tris, voxel ${shell?.voxelSize.toFixed(2)}m`);
 	if (!shell || cut === 0) continue;
 

@@ -65,7 +65,8 @@ export type EditModeHost = {
 	/** In-memory custom world defs (created this session, not yet in the DB). */
 	listLocalCustomWorlds: () => WorldDefinition[];
 	/** Rebuild fluffy grass from the current terrain (used after undo/redo). */
-	rebuildEditGrass: () => void;
+	/** May place blades off-thread; resolve before touching the new grass field. */
+	rebuildEditGrass: () => void | Promise<void>;
 	/** Lift car / human out of terrain that rose over them. */
 	liftPlayersAboveTerrain?: () => void;
 	/** The DB's saved-world list changed (e.g. after Save World). */
@@ -1353,8 +1354,12 @@ export class EditModeController {
 	 */
 	private onTerrainSettled() {
 		// Slopes steeper than 65° stay bare — the filter re-runs on every rebuild.
-		this.host.rebuildEditGrass();
-		void this.reapplyGrassMasksOnly();
+		// Masks must wait for the rebuild: custom worlds place blades off-thread, and
+		// clearing the outgoing field would leave its replacement covered in grass
+		// over roads, ponds and cave mouths.
+		void Promise.resolve(this.host.rebuildEditGrass()).then(() =>
+			this.reapplyGrassMasksOnly()
+		);
 		this.host.liftPlayersAboveTerrain?.();
 	}
 

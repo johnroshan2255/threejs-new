@@ -323,15 +323,15 @@ export class EditApplier {
 			case "paint-cave": {
 				const target = this.host.getSculptTarget();
 				if (!target || op.nodes.length < 1) return false;
-				const cave = createCave({
+				// Meshed off-thread; a few million voxel samples would otherwise freeze
+				// the frame the moment a cave is carved.
+				const cave = await createCave({
 					id: op.id,
 					nodes: op.nodes,
-					sampleHeight: createHeightSampler(
-						target.heights,
-						target.nrows,
-						target.ncols,
-						target.size
-					),
+					heights: target.heights,
+					nrows: target.nrows,
+					ncols: target.ncols,
+					size: target.size,
 				});
 				if (!cave) {
 					debugLine(`[cave] spine too small to carve (${op.nodes.length} nodes)`);
