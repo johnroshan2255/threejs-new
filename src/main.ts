@@ -103,6 +103,7 @@ import {
 	fogFollowsPlayer,
 	fogRadiusForWorld,
 } from "./environment/VolumetricFogPass";
+import { EffectComposer, RenderPass, EffectPass, GodRaysEffect, BloomEffect, VignetteEffect, ToneMappingEffect, ToneMappingMode, BlendFunction } from "postprocessing";
 import { setCharacterAlbedo } from "./entities/human/toonCharacter";
 import { SmokeTrailSystem } from "./environment/smokeTrail";
 import { ExplosionSystem } from "./environment/ExplosionSystem";
@@ -429,7 +430,12 @@ export class FluffyGrass {
 
 	private fogFollowPlayer = false;
 	private volumetricFog: VolumetricFogSystem | null = null;
-	private volumetricFogPass: VolumetricFogPass | null = null;
+	private composer: EffectComposer | null = null;
+	private godRaysEffect: GodRaysEffect | null = null;
+	private bloomEffect: BloomEffect | null = null;
+	private vignetteEffect: VignetteEffect | null = null;
+	private toneMappingEffect: ToneMappingEffect | null = null;
+	private sunMesh: THREE.Mesh | null = null;
 	/** User-facing master switch for the fog raymarch + bloom. */
 	private postFxEnabled = true;
 	/** Parks the composite while targets are reallocated mid-toggle. */
@@ -529,12 +535,55 @@ export class FluffyGrass {
 		this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 		this.scene.frustumCulled = true;
 
-		this.volumetricFogPass = new VolumetricFogPass();
-		this.volumetricFogPass.setSize(
-			window.innerWidth * this.renderer.getPixelRatio(),
-			window.innerHeight * this.renderer.getPixelRatio()
+				this.sunMesh = new THREE.Mesh(
+			new THREE.SphereGeometry(30, 32, 32),
+			new THREE.MeshBasicMaterial({ color: 0xffffee, fog: false })
 		);
-		this.volumetricFogPass.setQuality(this.graphicsQuality);
+		this.sunMesh.frustumCulled = false;
+		this.scene.add(this.sunMesh);
+
+		this.composer = new EffectComposer(this.renderer, {
+			multisampling: Math.min(4, this.renderer.capabilities.maxSamples)
+		});
+		
+		const renderPass = new RenderPass(this.scene, this.camera);
+		
+		this.godRaysEffect = new GodRaysEffect(this.camera, this.sunMesh, {
+			resolutionScale: 0.5,
+			density: 0.96,
+			decay: 0.95,
+			weight: 0.3,
+			exposure: 0.6,
+			samples: 60,
+			clampMax: 1.0,
+			blendFunction: BlendFunction.SCREEN
+		});
+
+		this.bloomEffect = new BloomEffect({
+			blendFunction: BlendFunction.ADD,
+			luminanceThreshold: 0.7,
+			luminanceSmoothing: 0.2,
+			intensity: 1.0
+		});
+
+		this.vignetteEffect = new VignetteEffect({
+			eskil: false,
+			offset: 0.1,
+			darkness: 0.5
+		});
+
+		this.toneMappingEffect = new ToneMappingEffect({
+			mode: ToneMappingMode.ACES_FILMIC,
+			resolution: 256,
+			whitePoint: 4.0,
+			middleGrey: 0.6,
+			minLuminance: 0.01,
+			averageLuminance: 0.01
+		});
+
+		const effectPass = new EffectPass(this.camera, this.godRaysEffect, this.bloomEffect, this.vignetteEffect, this.toneMappingEffect);
+		this.composer.addPass(renderPass);
+		this.composer.addPass(effectPass);
 
 		this.grassMaterial = new GrassMaterial();
 		this.terrainMat = new THREE.MeshPhongMaterial({
@@ -3323,30 +3372,7 @@ export class FluffyGrass {
 			// Composite grade — exposure, tone curve, split-tone, bloom. The
 			// editor's top-down view gets a neutral pass-through instead: a
 			// stylised grade there fights readability, same reason fog is off.
-			if (this.volumetricFogPass) {
-				if (this.sceneProps.mapMode) {
-					this.volumetricFogPass.setGrade(NEUTRAL_GRADE);
-					this.volumetricFogPass.setSplitTone(0);
-					this.volumetricFogPass.setVignette(0);
-				} else {
-					const t = this.lookTuning;
-					const base = this.dayNight.getGrade();
-					const g = this._grade;
-					g.exposure = base.exposure * t.exposure;
-					g.shoulder = base.shoulder;
-					g.contrast = base.contrast * t.contrast;
-					g.saturation = base.saturation * t.saturation;
-					g.shadowTint.copy(base.shadowTint);
-					g.highlightTint.copy(base.highlightTint);
-					g.liftColor.copy(base.liftColor);
-					g.lift = base.lift * t.lift;
-					g.bloomStrength = base.bloomStrength * t.bloom;
-					g.bloomThreshold = base.bloomThreshold;
-					this.volumetricFogPass.setGrade(g);
-					this.volumetricFogPass.setSplitTone(t.splitTone);
-					this.volumetricFogPass.setVignette(t.vignette);
-				}
-			}
+			
 
 			// Keep the ±90 m shadow frustum centred on whoever we're following,
 			// otherwise it stays stranded at the world origin.
@@ -3882,11 +3908,7 @@ export class FluffyGrass {
 		// Skipped only while the toggle swaps targets — the overlay covers the
 		// held frame, and rendering against a half-built chain would flash.
 		if (!this.postFxTransitioning) {
-			this.volumetricFogPass?.render(
-				this.renderer,
-				this.scene,
-				this.editMode?.isEnabled ? this.editMode.activeCamera : this.camera
-			);
+			this.composer?.render(dt);
 
 			if (this.editMode?.isEnabled && this.editMode.isDigging) {
 				const pr = this.renderer.getPixelRatio();
@@ -3998,12 +4020,9 @@ export class FluffyGrass {
 		this.editorWaterDeltaAccumulator = 0;
 		this.resizePondTargets();
 		const pr = this.renderer.getPixelRatio();
-		this.volumetricFogPass?.setSize(
-			window.innerWidth * pr,
-			window.innerHeight * pr
-		);
+		this.composer?.setSize(window.innerWidth, window.innerHeight);
 		this.syncVolumetricFogQuality();
-		this.syncAlphaToCoverage();
+		
 	}
 
 	/**
@@ -4013,101 +4032,21 @@ export class FluffyGrass {
 	 * Turning them off is immediate — nothing has to be built to stop drawing.
 	 */
 	private async setPostFxEnabled(enabled: boolean) {
-		if (this.postFxEnabled === enabled) return;
 		this.postFxEnabled = enabled;
-
-		const pass = this.volumetricFogPass;
-		if (!enabled || !pass) {
-			this.syncVolumetricFogQuality();
-			return;
-		}
-
-		this.postFxTransitioning = true;
-		this.worldLoading.showTask("Enabling effects", "Compiling shaders...");
-		// Two frames: one for the class to land, one for the browser to paint it.
-		// compileAsync still takes the main thread in bursts, so without this the
-		// overlay would never actually show up.
-		await nextFrame();
-		await nextFrame();
-
-		try {
-			this.syncVolumetricFogQuality();
-			this.worldLoading.setProgress(55, "Allocating render targets...");
-			await pass.warmup(this.renderer);
-			// compileAsync links the programs, but some drivers defer real pipeline
-			// creation until the first draw — so pay for it here, not on frame one.
-			this.worldLoading.setProgress(85, "Warming up...");
-			pass.render(
-				this.renderer,
-				this.scene,
-				this.editMode?.isEnabled ? this.editMode.activeCamera : this.camera
-			);
-			this.worldLoading.setProgress(100, "Ready");
-		} finally {
-			this.postFxTransitioning = false;
-			this.worldLoading.hide();
-		}
 	}
 
-	/**
-	 * Keep alpha-tested vegetation in step with whether the scene target actually
-	 * ended up multisampled.
-	 *
-	 * Driven off the pass's real sample count rather than the quality tier,
-	 * because the pass's memory budget can refuse the samples the tier asked for —
-	 * and alpha-to-coverage with one sample per pixel hardens every cutout edge
-	 * instead of softening it. Called on both quality changes and resizes, since
-	 * either can change the answer.
-	 */
-	private syncAlphaToCoverage() {
-		const multisampled = (this.volumetricFogPass?.sceneSamples ?? 0) > 1;
+	
+	
+	private syncVolumetricFogQuality() {
+		const multisampled = (this.composer?.multisampling ?? 0) > 1;
 		this.grassMaterial.setAlphaToCoverage(multisampled);
 		setFoliageAlphaToCoverage(multisampled, this.scene);
 	}
 
-	/**
-	 * Screen-space fog on Medium/High; billboard fallback on Low or when the
-	 * user has turned the effects off.
-	 *
-	 * The user's toggle is the master switch and quality only decides how much
-	 * the effects cost. Edit mode suppresses the raymarch without touching
-	 * `postFxEnabled`, so leaving edit mode restores whatever the user chose —
-	 * this method is also called from world switches and edit-mode exit, so it
-	 * must never be the thing that decides the toggle's value.
-	 */
-	private syncVolumetricFogQuality() {
-		const quality = this.graphicsQuality;
-		const pass = this.volumetricFogPass;
-		const billboards = this.volumetricFog;
-		const inEdit = this.sceneProps.mapMode;
-		const wantsFog = this.postFxEnabled && !inEdit;
-
-		if (pass) {
-			pass.setQuality(quality);
-			pass.enabled = wantsFog && quality !== "Low";
-			// Bloom is gated on the user's flag alone: it is cheap relative to the
-			// raymarch, and edit mode already zeroes its strength via NEUTRAL_GRADE,
-			// so tying it to `inEdit` would only churn targets on every entry/exit.
-			pass.setBloomEnabled(this.postFxEnabled);
-		}
-		if (billboards) {
-			billboards.group.visible =
-				!inEdit && (!this.postFxEnabled || quality === "Low");
-		}
-		if (pass?.enabled && this.scene.fog instanceof THREE.FogExp2) {
-			this.scene.fog.density = this.residualFogDensity;
-		} else if (!inEdit && this.scene.fog instanceof THREE.FogExp2) {
-			this.scene.fog.density = this.atmosphereFogDensity;
-		}
-	}
-
-	/**
-	 * Feed day/night (or world-override) atmosphere into the raymarch pass and
-	 * keep FogExp2 as a light residual so materials don't double-fog.
-	 */
+	
 	private syncVolumetricFogFrame(timeSec: number) {
-		const pass = this.volumetricFogPass;
-		if (!pass?.enabled || !this.dayNight) return;
+		
+		if (!this.dayNight) return;
 
 		// Always center the fog ring on the player.
 		if (this.activePlayer === "human" && this.human?.mesh) {
@@ -4118,6 +4057,7 @@ export class FluffyGrass {
 			this._fogCenter.copy(this.camera.position);
 		}
 
+		if (this.sunMesh) this.sunMesh.position.copy(this.dayNight.getSunDirection()).multiplyScalar(400);
 		const override = this.dayNight.overrideColors;
 		const fogColor = override
 			? this.scene.fog instanceof THREE.FogExp2
@@ -4138,22 +4078,7 @@ export class FluffyGrass {
 		const key = this.dayNight.lights.keyLight;
 		const sunDir = this.dayNight.getSunDirection();
 
-		pass.setParams({
-			fogColor,
-			fogDensity: tableDensity,
-			fogCenter: this._fogCenter,
-			fogRadius: PLAYER_FOG_RADIUS,
-			fogRadiusSoft: PLAYER_FOG_BAND,
-			fogHeight: 0,
-			// ln(2)/15 ≈ half density on ~15m hills
-			heightFalloff: Math.LN2 / 15,
-			sunDirection: sunDir,
-			sunColor: key.color,
-			// Key intensity roughly doubled in the rig retune; scale the coupling
-			// down so haze stays sun-shaped rather than washing the frame.
-			sunIntensity: Math.min(0.85, key.intensity * 0.11),
-			time: timeSec,
-		});
+		
 
 		// Almost no global FogExp2 — volume is local to the player ring.
 		if (this.scene.fog instanceof THREE.FogExp2) {
@@ -5380,9 +5305,7 @@ export class FluffyGrass {
 				def.kind === "custom" ? 0.0035 : this.sceneProps.fogDensity;
 			if (this.scene.fog instanceof THREE.FogExp2) {
 				this.scene.fog.color.copy(this.scene.background as THREE.Color);
-				this.scene.fog.density = this.volumetricFogPass?.enabled
-					? this.residualFogDensity
-					: this.atmosphereFogDensity;
+				this.scene.fog.density = this.atmosphereFogDensity;
 			}
 		} else {
 			this.grassMaterial.setTerrainSize(200);
@@ -5393,9 +5316,7 @@ export class FluffyGrass {
 			this.atmosphereFogDensity = 0.005;
 			if (this.scene.fog instanceof THREE.FogExp2) {
 				this.scene.fog.color.copy(color);
-				this.scene.fog.density = this.volumetricFogPass?.enabled
-					? this.residualFogDensity
-					: this.atmosphereFogDensity;
+				this.scene.fog.density = this.atmosphereFogDensity;
 			}
 			this.grassMaterial.uniforms.baseColor.value.set(0x3e524e);
 			this.grassMaterial.uniforms.tipColor1.value.set(0x799894);
@@ -5426,7 +5347,7 @@ export class FluffyGrass {
 			this.scene.background.setHex(0x3d3d3d);
 		}
 		if (this.volumetricFog) this.volumetricFog.group.visible = false;
-		if (this.volumetricFogPass) this.volumetricFogPass.enabled = false;
+		
 	}
 
 	private applyEditMapAtmosphere(enabled: boolean) {
@@ -5443,7 +5364,7 @@ export class FluffyGrass {
 				density,
 				bg,
 				volVisible: this.volumetricFog?.group.visible ?? false,
-				passEnabled: this.volumetricFogPass?.enabled ?? false,
+				passEnabled: true,
 			};
 			// Local editor only: lock noon lighting. Other clients keep their own day/night.
 			if (this.dayNight && !this.editDayNightBackup) {
@@ -5781,12 +5702,9 @@ export class FluffyGrass {
 		this.renderer.setSize(window.innerWidth, window.innerHeight);
 		this.resizePondTargets();
 		const pr = this.renderer.getPixelRatio();
-		this.volumetricFogPass?.setSize(
-			window.innerWidth * pr,
-			window.innerHeight * pr
-		);
+		this.composer?.setSize(window.innerWidth, window.innerHeight);
 		// A resize can move the target across the MSAA budget in either direction.
-		this.syncAlphaToCoverage();
+		
 	}
 }
 

@@ -17,6 +17,7 @@
   "dependencies": {
     "@dimforge/rapier3d-compat": "^0.19.3",
     "dat.gui": "^0.7.9",
+    "postprocessing": "^6.39.4",
     "socket.io-client": "^4.8.3",
     "stats-gl": "^2.0.1",
     "three": "^0.159.0",
