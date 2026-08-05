@@ -251,18 +251,47 @@ export class GrassChunkField {
 	 * Clear fluffy grass in a circle (mud road). Buries instances under the terrain.
 	 */
 	maskRoadCircle(worldX: number, worldZ: number, radius: number) {
+		this.maskCircles([{ x: worldX, z: worldZ, radius }]);
+	}
+
+	/**
+	 * Clear grass under many circles in a single instance pass.
+	 *
+	 * A cave mouth is not one circle — it is however much of the tunnel runs near
+	 * the surface, which can be tens of metres of spine. Masking that circle by
+	 * circle would rescan every blade in range once per circle.
+	 */
+	maskCircles(circles: { x: number; z: number; radius: number }[]) {
+		if (!circles.length) return;
+
 		const originX = this.group.position.x;
 		const originZ = this.group.position.z;
-		const localX = worldX - originX;
-		const localZ = worldZ - originZ;
-		const radiusSq = radius * radius;
-		const pad = (this.chunkSize * 0.5 + radius) ** 2;
+		const cx = new Float64Array(circles.length);
+		const cz = new Float64Array(circles.length);
+		const cr = new Float64Array(circles.length);
+		const cr2 = new Float64Array(circles.length);
+		for (let n = 0; n < circles.length; n++) {
+			const c = circles[n]!;
+			cx[n] = c.x - originX;
+			cz[n] = c.z - originZ;
+			cr[n] = c.radius;
+			cr2[n] = c.radius * c.radius;
+		}
 
+		const nearby: number[] = [];
 		for (let c = 0; c < this.meshes.length; c++) {
 			const center = this.chunkCenters[c]!;
-			const cdx = center.x - localX;
-			const cdz = center.z - localZ;
-			if (cdx * cdx + cdz * cdz > pad) continue;
+
+			// Narrow to the circles this chunk can actually touch, so the per-blade
+			// loop below stays proportional to local mouth width, not spine length.
+			nearby.length = 0;
+			for (let n = 0; n < circles.length; n++) {
+				const pad = this.chunkSize * 0.5 + cr[n]!;
+				const dx = center.x - cx[n]!;
+				const dz = center.z - cz[n]!;
+				if (dx * dx + dz * dz <= pad * pad) nearby.push(n);
+			}
+			if (!nearby.length) continue;
 
 			const mesh = this.meshes[c]!;
 			const masked = this.roadMasked[c]!;
@@ -273,9 +302,17 @@ export class GrassChunkField {
 				if (masked[i]) continue;
 				mesh.getMatrixAt(i, this._matrix);
 				this._matrix.decompose(this._pos, this._quat, this._scale);
-				const dx = this._pos.x - localX;
-				const dz = this._pos.z - localZ;
-				if (dx * dx + dz * dz > radiusSq) continue;
+
+				let inside = false;
+				for (const n of nearby) {
+					const dx = this._pos.x - cx[n]!;
+					const dz = this._pos.z - cz[n]!;
+					if (dx * dx + dz * dz <= cr2[n]!) {
+						inside = true;
+						break;
+					}
+				}
+				if (!inside) continue;
 
 				masked[i] = true;
 				this._pos.y = -50;

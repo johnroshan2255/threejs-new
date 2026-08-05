@@ -210,6 +210,15 @@ export function rockDensity(
 }
 
 /**
+ * How far past the void a terrain column still counts as part of the mouth.
+ * Wider than the void itself so a shallow tunnel still opens a usable mouth on a
+ * coarse terrain grid. The terrain punch, the entrance ramps and the grass mask
+ * all threshold on this same number — a hole that grass still covers is invisible,
+ * and a ramp cut where no hole was punched is a sinkhole to nowhere.
+ */
+export const PUNCH_DILATE = 3.0;
+
+/**
  * True where the cave void breaks (or nearly breaks) the terrain surface.
  *
  * Single source of truth for three consumers that must agree exactly, or the mouth
@@ -226,8 +235,126 @@ export function isMouthColumn(
 	z: number,
 	dilate = 0.6
 ): boolean {
-	if (nodes.length === 0) return false;
+	return mouthClearance(nodes, sampleHeight, x, z) < dilate;
+}
+
+/**
+ * Distance from a terrain column down to the cave void. Negative where the void
+ * pokes through the surface, and the raw quantity every mouth test thresholds.
+ */
+export function mouthClearance(
+	nodes: CaveNode[],
+	sampleHeight: HeightSampler,
+	x: number,
+	z: number
+): number {
+	if (nodes.length === 0) return Infinity;
 
 	const h = sampleHeight(x, z);
-	return caveDistance(nodes, x, h - 0.15, z) < dilate;
+	return caveDistance(nodes, x, h - 0.15, z);
+}
+
+/** A point on the spine, carrying how close the void gets to the surface there. */
+export type CaveSpineSample = CaveNode & { clearance: number };
+
+/**
+ * Walk the spine at roughly `step` metres and measure the mouth clearance at each
+ * point.
+ *
+ * Everything that keys off "the mouth" has to key off this, because the terrain
+ * punch is spine-wide: a tunnel driven through a hill surfaces in the *middle* of
+ * its spine, not at its ends. Anything that only looks at the first and last node
+ * misses that opening entirely.
+ */
+export function sampleCaveSpine(
+	nodes: CaveNode[],
+	sampleHeight: HeightSampler,
+	step?: number
+): CaveSpineSample[] {
+	if (nodes.length === 0) return [];
+
+	let minR = Infinity;
+	for (const n of nodes) minR = Math.min(minR, n.r);
+	const stride = step ?? Math.max(1, minR * 0.6);
+
+	const out: CaveSpineSample[] = [];
+	const push = (x: number, y: number, z: number, r: number) => {
+		out.push({ x, y, z, r, clearance: mouthClearance(nodes, sampleHeight, x, z) });
+	};
+
+	const first = nodes[0]!;
+	if (nodes.length === 1) {
+		push(first.x, first.y, first.z, first.r);
+		return out;
+	}
+
+	for (let i = 0; i < nodes.length - 1; i++) {
+		const a = nodes[i]!;
+		const b = nodes[i + 1]!;
+		const len = Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z);
+		const steps = Math.max(1, Math.ceil(len / stride));
+		// Half-open: the segment's end node is the next segment's start, and the very
+		// last node is pushed after the loop. Keeps samples from doubling up at joints.
+		for (let s = 0; s < steps; s++) {
+			const t = s / steps;
+			push(
+				a.x + (b.x - a.x) * t,
+				a.y + (b.y - a.y) * t,
+				a.z + (b.z - a.z) * t,
+				a.r + (b.r - a.r) * t
+			);
+		}
+	}
+	const last = nodes[nodes.length - 1]!;
+	push(last.x, last.y, last.z, last.r);
+	return out;
+}
+
+/**
+ * Split spine samples into contiguous runs that break the surface — one run per
+ * distinct mouth. A cave through a hill yields three: the entrance, the far-side
+ * exit, and wherever the author finally stopped digging.
+ */
+export function caveMouthRuns(
+	samples: CaveSpineSample[],
+	dilate: number
+): CaveSpineSample[][] {
+	const runs: CaveSpineSample[][] = [];
+	let run: CaveSpineSample[] | null = null;
+	for (const s of samples) {
+		if (s.clearance < dilate) {
+			if (!run) {
+				run = [];
+				runs.push(run);
+			}
+			run.push(s);
+		} else {
+			run = null;
+		}
+	}
+	return runs;
+}
+
+/**
+ * Every circle that must be cleared of grass for a cave — one per breach sample.
+ *
+ * Blades are placed once and baked into instance matrices, so any left standing
+ * over a punched hole hang in mid-air; from above they are opaque and simply hide
+ * the opening. Shared by the carve path and by the post-grass-rebuild re-apply,
+ * which must agree or a reload silently restores the covered-up mouth.
+ */
+export function caveMouthMaskCircles(
+	nodes: CaveNode[],
+	sampleHeight: HeightSampler
+): { x: number; z: number; radius: number }[] {
+	return caveMouthRuns(sampleCaveSpine(nodes, sampleHeight), PUNCH_DILATE)
+		.flat()
+		.map((m) => ({ x: m.x, z: m.z, radius: m.r + PUNCH_DILATE }));
+}
+
+/** The most open point of a run — where an entrance ramp belongs. */
+export function mouthAnchor(run: CaveSpineSample[]): CaveSpineSample {
+	let best = run[0]!;
+	for (const s of run) if (s.clearance < best.clearance) best = s;
+	return best;
 }

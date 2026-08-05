@@ -19,11 +19,26 @@ export type CaveHandle = {
 };
 
 let sharedRockMaterial: THREE.MeshPhongMaterial | null = null;
+/**
+ * Ground colour the mouth fades into. Lives outside the material so a world
+ * switch can retint every existing cave without rebuilding shaders.
+ */
+const terrainTint = { value: new THREE.Color(0x1d360c) };
+
+/** Match the mouths to the active world's terrain colour. */
+export function setCaveTerrainColor(color: THREE.ColorRepresentation) {
+	terrainTint.value.set(color);
+}
 
 /**
  * Rock shell material. DoubleSide so a stray back-face never reads as a hole in
  * the tunnel wall; normals come from the SDF gradient, so shading is correct
  * from either side.
+ *
+ * The mesher tags each vertex with how close it is to daylight, and the shader
+ * fades those toward terrain colour. Without it the shell's ground apron meets
+ * the grass as a hard brown ring — a real mouth has the ground cover thinning
+ * into the rock instead.
  */
 function rockMaterial(): THREE.MeshPhongMaterial {
 	if (!sharedRockMaterial) {
@@ -34,6 +49,30 @@ function rockMaterial(): THREE.MeshPhongMaterial {
 			side: THREE.DoubleSide,
 		});
 		sharedRockMaterial.name = "cave-rock";
+		sharedRockMaterial.onBeforeCompile = (shader) => {
+			shader.uniforms.uTerrainColor = terrainTint;
+			shader.vertexShader = shader.vertexShader.replace(
+				"void main() {",
+				`attribute float aTerrainBlend;
+varying float vTerrainBlend;
+void main() {
+	vTerrainBlend = aTerrainBlend;`
+			);
+			shader.fragmentShader = shader.fragmentShader
+				.replace(
+					"void main() {",
+					`uniform vec3 uTerrainColor;
+varying float vTerrainBlend;
+void main() {`
+				)
+				// After <color_fragment>, diffuseColor holds the final albedo — tint it
+				// there so lighting still runs over the blended colour.
+				.replace(
+					"#include <color_fragment>",
+					`#include <color_fragment>
+	diffuseColor.rgb = mix(diffuseColor.rgb, uTerrainColor, clamp(vTerrainBlend, 0.0, 1.0));`
+				);
+		};
 	}
 	return sharedRockMaterial;
 }

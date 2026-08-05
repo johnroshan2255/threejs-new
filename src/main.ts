@@ -19,6 +19,7 @@ import {
 import { setIslandTerrain, getWorldTerrainY, findSafeTerrainSpawn, isOutsideTerrain } from "./terrain/islandHeight";
 import { createLargeTerrain, TERRAIN_CONFIG } from "./terrain/createLargeTerrain";
 import { clearCaves } from "./terrain/caveRegistry";
+import { setCaveTerrainColor } from "./entities/cave/createCave";
 import { Pond, REFERENCE_WATER_LOOK } from "./entities/water";
 import { createCar, type CarEntity } from "./entities/car/createCar";
 import { loadKenneySuvVisual } from "./entities/car/kenneyCarVisual";
@@ -548,6 +549,11 @@ export class FluffyGrass {
 		(window as unknown as { __look?: unknown }).__look = {
 			tuning: this.lookTuning,
 			grass: this.grassMaterial.uniforms,
+			/** Retint every cave mouth's blend-to-ground colour, e.g. "#4c8129". */
+			caveMouthTint: (color: THREE.ColorRepresentation) => {
+				setCaveTerrainColor(color);
+				console.log(`[cave] mouth tint -> ${new THREE.Color(color).getHexString()}`);
+			},
 			/**
 			 * Character albedo ceiling. The GLB is untextured pure white (albedo
 			 * 1.0), which saturates the tone curve and blooms. Lower = more form.
@@ -1325,13 +1331,41 @@ export class FluffyGrass {
 		});
 	}
 
+	/**
+	 * Keep `?world=` naming the world you are actually in.
+	 *
+	 * replaceState, not pushState: switching worlds is not a navigation, and the
+	 * back button should leave the game rather than walk back through every world
+	 * the player visited.
+	 */
+	private syncWorldUrl(worldId: GameWorldId) {
+		const url = new URL(window.location.href);
+		if (url.searchParams.get("world") === worldId) return;
+		url.searchParams.set("world", worldId);
+		window.history.replaceState(window.history.state, "", url);
+	}
+
+	/**
+	 * Reopen the world named in the URL, so a reload drops you back where you were
+	 * instead of in the default Island — and so the address bar stays a shareable
+	 * link to the same place.
+	 */
 	private async tryOpenSharedWorldFromUrl() {
 		const worldId = new URLSearchParams(window.location.search).get("world");
-		if (!worldId || !this.editMode) return;
+		if (!worldId) {
+			// First visit: state where we are, so the very next reload restores it.
+			this.syncWorldUrl(this.activeWorldDef.id);
+			return;
+		}
+		if (!this.editMode) return;
 		try {
 			await this.editMode.onRoomWorldBound(worldId);
 		} catch (error) {
-			console.warn("[world] Failed to open shared world", worldId, error);
+			// A world that no longer resolves — deleted, or someone else's — must not
+			// wedge every future reload on the same failure. Point the URL back at
+			// whatever we did land in.
+			console.warn("[world] Failed to open world from URL", worldId, error);
+			this.syncWorldUrl(this.activeWorldDef.id);
 		}
 	}
 
@@ -5153,6 +5187,7 @@ export class FluffyGrass {
 			this.teleportPlayerToCurrentTerrain(target);
 
 			this.settings.setWorld(target);
+			this.syncWorldUrl(target);
 
 			this.worldLoading.setProgress(100, "Ready");
 			await this.nextFrame();
@@ -5168,6 +5203,7 @@ export class FluffyGrass {
 			this.newWorldGroup.visible = previous === "valley";
 			this.customWorldGroup.visible = previousDef.kind === "custom";
 			this.settings.setWorld(previous);
+			this.syncWorldUrl(previous);
 			const message = error instanceof Error ? error.message : "Unable to load world.";
 			this.worldLoading.showError(message);
 			throw error;
@@ -5282,6 +5318,18 @@ export class FluffyGrass {
 		}
 	}
 
+	/**
+	 * Ground colour a cave mouth fades into: the terrain colour lifted most of the
+	 * way toward the grass tips, which is what the surrounding ground reads as.
+	 */
+	private caveMouthTint(): THREE.Color {
+		const tip = this.grassMaterial.uniforms.tipColor1?.value as
+			| THREE.Color
+			| undefined;
+		const tint = new THREE.Color(this.sceneProps.terrainColor);
+		return tip ? tint.lerp(tip, 0.7) : tint;
+	}
+
 	private applyWorldEnvironment(world: GameWorldId) {
 		const sky = this.scene.getObjectByName("sky-dome");
 		const def = this.knownWorldDefinition(world);
@@ -5335,6 +5383,13 @@ export class FluffyGrass {
 				this.terrainMat.color.set("#3e524e");
 			}
 		}
+		// Cave mouths fade into the ground they open onto, so they follow whatever
+		// colour this world just picked. Biased toward the grass canopy rather than
+		// sceneProps.terrainColor: that value is the soil *under* the blades, and a
+		// mouth blended to it reads as a dark stain next to the green the player
+		// actually sees. Live-tunable via __look.caveMouthTint().
+		setCaveTerrainColor(this.caveMouthTint());
+
 		if (this.sceneProps.mapMode) this.suppressFogForEditMode();
 		else this.syncVolumetricFogQuality();
 	}

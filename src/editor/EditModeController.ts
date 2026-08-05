@@ -18,7 +18,11 @@ import {
 } from "../ui/EditModeUI";
 import { pickPlaceScale, resolveEditMesh, type EditMeshId } from "./meshCatalog";
 import type { TerrainColliderHandle } from "../physics/terrainCollider";
-import type { CaveNode } from "../terrain/caveShape";
+import {
+	caveMouthMaskCircles,
+	createHeightSampler,
+	type CaveNode,
+} from "../terrain/caveShape";
 import { createTerrainCollider } from "../physics/terrainCollider";
 import { WorldEditStore } from "./WorldEditStore";
 import { WorldEditPersistence } from "./WorldEditPersistence";
@@ -1393,17 +1397,18 @@ export class EditModeController {
 	private async reapplyGrassMasksOnly() {
 		const grass = this.host.getGrassField();
 		if (!grass) return;
+		const target = this.getSculptTarget();
+		const sampleHeight = target
+			? createHeightSampler(target.heights, target.nrows, target.ncols, target.size)
+			: null;
 		for (const op of this.store.toJSON().ops) {
 			if (op.type === "paint-road") {
 				grass.maskRoadCircle(op.x, op.z, op.radius);
 			} else if (op.type === "paint-cave") {
-				if (op.nodes.length > 0) {
-					const first = op.nodes[0];
-					grass.maskRoadCircle(first.x, first.z, first.r + 1.5);
-					if (op.nodes.length > 1) {
-						const last = op.nodes[op.nodes.length - 1];
-						grass.maskRoadCircle(last.x, last.z, last.r + 1.5);
-					}
+				// Same spine-wide mouth region the carve path clears. Anything narrower
+				// here quietly re-covers far-side exits every time grass is rebuilt.
+				if (sampleHeight) {
+					grass.maskCircles(caveMouthMaskCircles(op.nodes, sampleHeight));
 				}
 			} else if (op.type === "paint-water" && op.createSurface) {
 				const r =

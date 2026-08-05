@@ -14,6 +14,7 @@ serveWorker<CaveMeshRequest, CaveMeshData | null>((payload) => {
 		transfer: [
 			result.positions.buffer,
 			result.normals.buffer,
+			result.terrainBlend.buffer,
 			result.indices.buffer,
 		],
 	};

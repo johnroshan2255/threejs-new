@@ -5,6 +5,8 @@ import {
 	createHeightSampler,
 	isMouthColumn,
 	maxCaveRadius,
+	mouthClearance,
+	PUNCH_DILATE,
 	rockDensity,
 	type CaveBounds,
 	type CaveNode,
@@ -36,6 +38,25 @@ export const MOUTH_DILATE = 0.6;
 const SURFACE_SINK = -0.05;
 /** How far past the void the high-res rock apron extends to cover the terrain hole. */
 const APRON_DILATE = 6.0;
+/**
+ * Depth over which the shell fades from terrain colour to rock.
+ *
+ * A real cave mouth is not a colour edge — the ground cover thins out as it turns
+ * into the tunnel wall. Scaled by tunnel size so a wide chamber mouth gets a
+ * proportionally longer transition than a crawlspace.
+ */
+const blendDepth = (nodes: CaveNode[]) =>
+	Math.min(8, Math.max(2.5, maxCaveRadius(nodes) * 1.5));
+
+function clamp01(v: number) {
+	return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
+/** Smoothstep, so the colour transition has no visible banding at either end. */
+function smoothFade(t: number) {
+	const c = clamp01(t);
+	return c * c * (3 - 2 * c);
+}
 
 /**
  * Everything the mesher needs, all structured-cloneable so it can be posted to a
@@ -55,6 +76,8 @@ export type CaveMeshRequest = {
 export type CaveMeshData = {
 	positions: Float32Array;
 	normals: Float32Array;
+	/** Per-vertex 0..1: how much terrain colour bleeds into the rock here. */
+	terrainBlend: Float32Array;
 	indices: Uint32Array;
 	voxelSize: number;
 	bounds: CaveBounds;
@@ -155,8 +178,11 @@ export function buildCaveMeshData(req: CaveMeshRequest): CaveMeshData | null {
 	const onSurface: number[] = [];
 	/** 1 where a vertex's column belongs to the punched mouth region. */
 	const inMouth: number[] = [];
+	/** 0 = bare rock, 1 = terrain colour. Drives the mouth's colour transition. */
+	const terrainBlend: number[] = [];
 	const corner = new Float64Array(8);
 	const grad = voxel * 0.4;
+	const fadeDepth = blendDepth(nodes);
 
 	for (let k = 0; k < cnz; k++) {
 		for (let j = 0; j < cny; j++) {
@@ -229,9 +255,18 @@ export function buildCaveMeshData(req: CaveMeshRequest): CaveMeshData | null {
 				positions.push(wx, wy, wz);
 				normals.push(gx, gy, gz);
 				onSurface.push(isSurface ? 1 : 0);
-				inMouth.push(
-					isMouthColumn(nodes, sampleHeight, wx, wz, APRON_DILATE) ? 1 : 0
-				);
+
+				const clearance = mouthClearance(nodes, sampleHeight, wx, wz);
+				inMouth.push(clearance < APRON_DILATE ? 1 : 0);
+				// Two fades, whichever is weaker: how far below the surface this vertex
+					// sits, and how open its column is. The second is what keeps a tunnel
+					// running shallow under a hillside from greening its ceiling — only rock
+					// near an actual opening picks up ground colour. Taking the min rather
+					// than the product keeps the walk-in gradient gradual instead of
+					// collapsing back to rock within a few centimetres.
+					const depthFade = smoothFade(1 - (surfaceH - wy) / fadeDepth);
+					const openFade = smoothFade((PUNCH_DILATE - clearance) / fadeDepth);
+					terrainBlend.push(isSurface ? 1 : Math.min(depthFade, openFade));
 			}
 		}
 	}
@@ -335,6 +370,7 @@ export function buildCaveMeshData(req: CaveMeshRequest): CaveMeshData | null {
 	const remap = new Int32Array(positions.length / 3).fill(-1);
 	const outPos: number[] = [];
 	const outNrm: number[] = [];
+	const outBlend: number[] = [];
 	const outIdx = new Uint32Array(kept.length);
 	for (let n = 0; n < kept.length; n++) {
 		const src = kept[n]!;
@@ -344,6 +380,7 @@ export function buildCaveMeshData(req: CaveMeshRequest): CaveMeshData | null {
 			remap[src] = dst;
 			outPos.push(positions[src * 3]!, positions[src * 3 + 1]!, positions[src * 3 + 2]!);
 			outNrm.push(normals[src * 3]!, normals[src * 3 + 1]!, normals[src * 3 + 2]!);
+			outBlend.push(terrainBlend[src]!);
 		}
 		outIdx[n] = dst;
 	}
@@ -351,6 +388,7 @@ export function buildCaveMeshData(req: CaveMeshRequest): CaveMeshData | null {
 	return {
 		positions: new Float32Array(outPos),
 		normals: new Float32Array(outNrm),
+		terrainBlend: new Float32Array(outBlend),
 		indices: outIdx,
 		voxelSize: voxel,
 		bounds,

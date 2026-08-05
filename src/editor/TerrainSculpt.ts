@@ -1,5 +1,12 @@
 import * as THREE from "three";
-import type { CaveNode } from "../terrain/caveShape";
+import {
+	caveMouthRuns,
+	createHeightSampler,
+	mouthAnchor,
+	PUNCH_DILATE,
+	sampleCaveSpine,
+	type CaveNode,
+} from "../terrain/caveShape";
 
 export type SculptBrush = "raise" | "lower" | "smooth" | "flatten";
 
@@ -269,7 +276,13 @@ export function smoothBasinRim(
 	}
 }
 
-/** Sculpt terrain down at cave entrances and exits to create smooth ramps. */
+/**
+ * Sculpt terrain down into a ramp at every place the tunnel breaks the surface.
+ *
+ * Every place, not just the spine's ends: a tunnel bored through a hill and out
+ * the far side surfaces mid-spine, and that opening needs the same ramp as the
+ * entrance the author started from.
+ */
 export function sculptCaveMouths(target: TerrainSculptTarget, nodes: CaveNode[]) {
 	if (nodes.length === 0) return;
 	const { mesh, heights, nrows, ncols, size } = target;
@@ -335,10 +348,11 @@ export function sculptCaveMouths(target: TerrainSculptTarget, nodes: CaveNode[])
 		}
 	};
 
-	processMouth(nodes[0]);
-	if (nodes.length > 1) {
-		processMouth(nodes[nodes.length - 1]);
-	}
+	// Measured against the pre-sculpt heightfield, so a ramp cut at one mouth
+	// cannot drag a neighbouring column into looking like a mouth of its own.
+	const sampleHeight = createHeightSampler(heights, nrows, ncols, size);
+	const runs = caveMouthRuns(sampleCaveSpine(nodes, sampleHeight), PUNCH_DILATE);
+	for (const run of runs) processMouth(mouthAnchor(run));
 
 	positions.needsUpdate = true;
 	geometry.computeVertexNormals();

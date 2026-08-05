@@ -37,7 +37,7 @@ import type { WorldEditOp } from "./types";
 import { resolveEditMesh } from "./meshCatalog";
 import { createCave, type CaveHandle } from "../entities/cave/createCave";
 import { punchTerrainHoles, restoreTerrainHoles } from "../terrain/caveMesh";
-import { createHeightSampler } from "../terrain/caveShape";
+import { caveMouthMaskCircles, createHeightSampler } from "../terrain/caveShape";
 import { getCaveSpecs, hasCaves } from "../terrain/caveRegistry";
 
 /** Default dig radius when placing water on flat ground. */
@@ -348,16 +348,24 @@ export class EditApplier {
 				this.host.worldGroup.add(cave.mesh);
 				this.entities.set(op.id, { kind: "cave", cave });
 
-				// Grass positions are baked into instance matrices, so blades over the
-				// mouth would hang in mid-air above the hole.
+				// Grass positions are baked into instance matrices, so blades left over
+				// a hole hang in mid-air — and being opaque from above, they read as
+				// solid ground and hide the opening completely. Clear them wherever the
+				// punch actually opens terrain, which is every stretch of spine that
+				// runs near the surface, not just the two ends the author clicked.
 				const grass = this.host.getGrassField();
-				if (grass && op.nodes.length > 0) {
-					const first = op.nodes[0];
-					grass.maskRoadCircle(first.x, first.z, first.r + 1.5);
-					if (op.nodes.length > 1) {
-						const last = op.nodes[op.nodes.length - 1];
-						grass.maskRoadCircle(last.x, last.z, last.r + 1.5);
-					}
+				if (grass) {
+					grass.maskCircles(
+						caveMouthMaskCircles(
+							op.nodes,
+							createHeightSampler(
+								target.heights,
+								target.nrows,
+								target.ncols,
+								target.size
+							)
+						)
+					);
 				}
 
 				this.markCaveTerrainDirty();

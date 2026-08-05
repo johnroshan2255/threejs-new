@@ -1,5 +1,11 @@
 import * as THREE from "three";
-import { isMouthColumn, maxCaveRadius, type CaveSpec, type HeightSampler } from "./caveShape";
+import {
+	isMouthColumn,
+	maxCaveRadius,
+	PUNCH_DILATE,
+	type CaveSpec,
+	type HeightSampler,
+} from "./caveShape";
 import {
 	buildCaveMeshData,
 	MOUTH_DILATE,
@@ -19,6 +25,11 @@ export function geometryFromCaveMeshData(data: CaveMeshData): CaveGeometryResult
 	const geometry = new THREE.BufferGeometry();
 	geometry.setAttribute("position", new THREE.BufferAttribute(data.positions, 3));
 	geometry.setAttribute("normal", new THREE.BufferAttribute(data.normals, 3));
+	// Read by the rock shader to fade the mouth into terrain colour.
+	geometry.setAttribute(
+		"aTerrainBlend",
+		new THREE.BufferAttribute(data.terrainBlend, 1)
+	);
 	geometry.setIndex(new THREE.BufferAttribute(data.indices, 1));
 	geometry.computeBoundingBox();
 	geometry.computeBoundingSphere();
@@ -108,7 +119,7 @@ export function punchTerrainHoles(
 					vx <= region.maxX &&
 					vz >= region.minZ &&
 					vz <= region.maxZ &&
-					isMouthColumn(region.nodes, sampleHeight, vx, vz, 3.0)
+					isMouthColumn(region.nodes, sampleHeight, vx, vz, PUNCH_DILATE)
 				) {
 					anyInside = true;
 					break;
@@ -122,7 +133,7 @@ export function punchTerrainHoles(
 					cx <= region.maxX &&
 					cz >= region.minZ &&
 					cz <= region.maxZ &&
-					isMouthColumn(region.nodes, sampleHeight, cx, cz, 3.0)
+					isMouthColumn(region.nodes, sampleHeight, cx, cz, PUNCH_DILATE)
 				) {
 					anyInside = true;
 				}
