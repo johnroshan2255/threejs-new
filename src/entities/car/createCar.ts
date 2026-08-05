@@ -62,6 +62,7 @@ export async function createCar(
 	rightExhaust.position.set(0.6, -0.65, -2.15);
 	layout.body.add(rightExhaust);
 
+
 	const gltfLoader = new GLTFLoader(manager);
 	try {
 		const blasterGltf = await gltfLoader.loadAsync("/blaster.glb");
