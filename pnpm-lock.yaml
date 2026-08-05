@@ -14,6 +14,9 @@ importers:
       dat.gui:
         specifier: ^0.7.9
         version: 0.7.9
+      postprocessing:
+        specifier: ^6.39.4
+        version: 6.39.4(three@0.159.0)
       socket.io-client:
         specifier: ^4.8.3
         version: 4.8.3
@@ -26,6 +29,9 @@ importers:
       three-custom-shader-material:
         specifier: ^4.0.0
         version: 4.0.0(three@0.159.0)
+      three-mesh-bvh:
+        specifier: ^0.9.13
+        version: 0.9.14(three@0.159.0)
     devDependencies:
       '@types/dat.gui':
         specifier: ^0.7.12
@@ -343,6 +349,11 @@ packages:
     resolution: {integrity: sha512-u5U8qYpBCpN13BsiEB0CbR1Hhh4Gc0zLFuedrHJKMctHCHAGrMdG0PRM/KErzAL3CU6/eckEtmHNB3x6e3c0vA==}
     engines: {node: ^10 || ^12 || >=14}
 
+  postprocessing@6.39.4:
+    resolution: {integrity: sha512-oAS/PjAbc/xT3OzjUrGsorJ4J064XwhVD2t0OwKLP/E8QwDMUJ0oOv6ZI1SYMtLchv4g0ySEx+JcLy92+48vlA==}
+    peerDependencies:
+      three: '>= 0.168.0 < 0.186.0'
+
   readable-stream@1.0.34:
     resolution: {integrity: sha512-ok1qVCJuRkNmvebYikljxJA/UEsKwLl2nI1OmaqAu4/UE+h0wKCHok4XkL/gvi39OacXvw59RJUOFUkDib2rHg==}
 
@@ -380,6 +391,11 @@ packages:
         optional: true
       react:
         optional: true
+
+  three-mesh-bvh@0.9.14:
+    resolution: {integrity: sha512-xJzfUXnLYjgw5tRKGxjfJW3Pcx0IbwNskvpdwRryhK07SYrKrYB4W8zAaPxu784gK7G4lCBgG+vfG3YeYn95kg==}
+    peerDependencies:
+      three: '>= 0.159.0'
 
   three@0.159.0:
     resolution: {integrity: sha512-eCmhlLGbBgucuo4VEA9IO3Qpc7dh8Bd4VKzr7WfW4+8hMcIfoAVi1ev0pJYN9PTTsCslbcKgBwr2wNZ1EvLInA==}
@@ -650,6 +666,10 @@ snapshots:
       picocolors: 1.0.0
       source-map-js: 1.0.2
 
+  postprocessing@6.39.4(three@0.159.0):
+    dependencies:
+      three: 0.159.0
+
   readable-stream@1.0.34:
     dependencies:
       core-util-is: 1.0.3
@@ -706,6 +726,10 @@ snapshots:
       glsl-token-string: 1.0.1
       glsl-tokenizer: 2.1.5
       object-hash: 3.0.0
+      three: 0.159.0
+
+  three-mesh-bvh@0.9.14(three@0.159.0):
+    dependencies:
       three: 0.159.0
 
   three@0.159.0: {}
