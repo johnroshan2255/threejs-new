@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import type { GrassChunkData } from "./grassPlacementCore";
 
 const CHUNK_SIZE = 15;
 /** Extra radius so wind-displaced blades near chunk edges don't pop. */
@@ -14,7 +15,14 @@ const DEFAULT_SHOW_DISTANCE = 62;
 export const DEFAULT_GRASS_CULL_DISTANCE = 72;
 
 export type GrassChunkFieldOptions = {
-	matrices: THREE.Matrix4[];
+	/**
+	 * Per-instance matrices. Prefer `chunks` — building Matrix4 objects for a
+	 * million blades is exactly the main-thread cost the worker path removes.
+	 * Kept for the MeshSurfaceSampler path on the built-in worlds.
+	 */
+	matrices?: THREE.Matrix4[];
+	/** Pre-chunked flat matrix buffers from the placement worker. */
+	chunks?: GrassChunkData[];
 	geometry: THREE.BufferGeometry;
 	material: THREE.Material;
 	origin?: THREE.Vector3;
@@ -66,10 +74,15 @@ export class GrassChunkField {
 			this.setCullDistance(options.cullDistance);
 		}
 
+		if (options.chunks) {
+			this.buildFromChunks(options.chunks, options.geometry, options.material);
+			return;
+		}
+
 		const buckets = new Map<string, THREE.Matrix4[]>();
 		const matrixPosition = new THREE.Vector3();
 
-		for (const matrix of options.matrices) {
+		for (const matrix of options.matrices ?? []) {
 			matrixPosition.setFromMatrixPosition(matrix);
 			const chunkX = Math.floor(matrixPosition.x / this.chunkSize);
 			const chunkZ = Math.floor(matrixPosition.z / this.chunkSize);
@@ -122,6 +135,55 @@ export class GrassChunkField {
 			this.distanceScale.push(1);
 			this.hidden.push(false);
 			this.roadMasked.push(masked);
+		}
+	}
+
+	/**
+	 * Adopt worker output with no per-instance JS work: each chunk's matrix buffer
+	 * is blitted straight into instanceMatrix, and bounds come from the worker's
+	 * position extents rather than InstancedMesh.computeBoundingBox (which would
+	 * walk every instance again on the main thread).
+	 */
+	private buildFromChunks(
+		chunks: GrassChunkData[],
+		geometry: THREE.BufferGeometry,
+		material: THREE.Material
+	) {
+		// Conservative padding: blade extent at its largest instance scale. Bounding
+		// volumes only have to enclose, so overestimating costs nothing but culling.
+		if (!geometry.boundingSphere) geometry.computeBoundingSphere();
+		const bladeReach = (geometry.boundingSphere?.radius ?? 1) * 1.2 + BOUND_PADDING;
+
+		for (const chunk of chunks) {
+			if (chunk.count === 0) continue;
+			const mesh = new THREE.InstancedMesh(geometry, material, chunk.count);
+			mesh.name = "GrassChunk";
+			mesh.receiveShadow = true;
+			mesh.frustumCulled = true;
+			mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+			mesh.layers.set(0);
+
+			(mesh.instanceMatrix.array as Float32Array).set(chunk.matrices);
+			mesh.instanceMatrix.needsUpdate = true;
+
+			mesh.userData.maxGrassCount = chunk.count;
+			mesh.count = Math.floor(chunk.count * (this.density / 100));
+
+			mesh.boundingBox = new THREE.Box3(
+				new THREE.Vector3(chunk.minX, chunk.minY, chunk.minZ),
+				new THREE.Vector3(chunk.maxX, chunk.maxY, chunk.maxZ)
+			).expandByScalar(bladeReach);
+			mesh.boundingSphere = new THREE.Sphere();
+			mesh.boundingBox.getBoundingSphere(mesh.boundingSphere);
+
+			this.group.add(mesh);
+			this.meshes.push(mesh);
+			this.chunkCenters.push(
+				new THREE.Vector3(chunk.centerX, chunk.centerY, chunk.centerZ)
+			);
+			this.distanceScale.push(1);
+			this.hidden.push(false);
+			this.roadMasked.push(new Array(chunk.count).fill(false));
 		}
 	}
 
@@ -189,18 +251,47 @@ export class GrassChunkField {
 	 * Clear fluffy grass in a circle (mud road). Buries instances under the terrain.
 	 */
 	maskRoadCircle(worldX: number, worldZ: number, radius: number) {
+		this.maskCircles([{ x: worldX, z: worldZ, radius }]);
+	}
+
+	/**
+	 * Clear grass under many circles in a single instance pass.
+	 *
+	 * A cave mouth is not one circle — it is however much of the tunnel runs near
+	 * the surface, which can be tens of metres of spine. Masking that circle by
+	 * circle would rescan every blade in range once per circle.
+	 */
+	maskCircles(circles: { x: number; z: number; radius: number }[]) {
+		if (!circles.length) return;
+
 		const originX = this.group.position.x;
 		const originZ = this.group.position.z;
-		const localX = worldX - originX;
-		const localZ = worldZ - originZ;
-		const radiusSq = radius * radius;
-		const pad = (this.chunkSize * 0.5 + radius) ** 2;
+		const cx = new Float64Array(circles.length);
+		const cz = new Float64Array(circles.length);
+		const cr = new Float64Array(circles.length);
+		const cr2 = new Float64Array(circles.length);
+		for (let n = 0; n < circles.length; n++) {
+			const c = circles[n]!;
+			cx[n] = c.x - originX;
+			cz[n] = c.z - originZ;
+			cr[n] = c.radius;
+			cr2[n] = c.radius * c.radius;
+		}
 
+		const nearby: number[] = [];
 		for (let c = 0; c < this.meshes.length; c++) {
 			const center = this.chunkCenters[c]!;
-			const cdx = center.x - localX;
-			const cdz = center.z - localZ;
-			if (cdx * cdx + cdz * cdz > pad) continue;
+
+			// Narrow to the circles this chunk can actually touch, so the per-blade
+			// loop below stays proportional to local mouth width, not spine length.
+			nearby.length = 0;
+			for (let n = 0; n < circles.length; n++) {
+				const pad = this.chunkSize * 0.5 + cr[n]!;
+				const dx = center.x - cx[n]!;
+				const dz = center.z - cz[n]!;
+				if (dx * dx + dz * dz <= pad * pad) nearby.push(n);
+			}
+			if (!nearby.length) continue;
 
 			const mesh = this.meshes[c]!;
 			const masked = this.roadMasked[c]!;
@@ -211,9 +302,17 @@ export class GrassChunkField {
 				if (masked[i]) continue;
 				mesh.getMatrixAt(i, this._matrix);
 				this._matrix.decompose(this._pos, this._quat, this._scale);
-				const dx = this._pos.x - localX;
-				const dz = this._pos.z - localZ;
-				if (dx * dx + dz * dz > radiusSq) continue;
+
+				let inside = false;
+				for (const n of nearby) {
+					const dx = this._pos.x - cx[n]!;
+					const dz = this._pos.z - cz[n]!;
+					if (dx * dx + dz * dz <= cr2[n]!) {
+						inside = true;
+						break;
+					}
+				}
+				if (!inside) continue;
 
 				masked[i] = true;
 				this._pos.y = -50;

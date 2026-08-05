@@ -6,6 +6,9 @@ interface GrassUniformsInterface {
 	uEnableShadows?: { value: boolean };
 	uShadowDarkness?: { value: number };
 	uGrassLightIntensity?: { value: number };
+	uGrassLightColor?: { value: THREE.Color };
+	uGrassAmbientColor?: { value: THREE.Color };
+	uGrassShadowTint?: { value: THREE.Color };
 	uNoiseScale?: { value: number };
 	uBladeHeightScale?: { value: number };
 	uTerrainSize?: { value: number };
@@ -30,8 +33,14 @@ export class GrassMaterial {
 	uniforms: { [key: string]: { value: any } } = {
 		uTime: { value: 0 },
 		uEnableShadows: { value: true },
-		uShadowDarkness: { value: 0.5 },
+		uShadowDarkness: { value: 0.42 },
 		uGrassLightIntensity: { value: 1 },
+		/** Key light colour — grass shades itself, so this is fed in per frame. */
+		uGrassLightColor: { value: new THREE.Color(0xffd2a1) },
+		/** Cool sky fill so the unlit side isn't just a darker green. */
+		uGrassAmbientColor: { value: new THREE.Color(0x40608f) },
+		/** Hue multiplier inside cast shadows (blue shadows, not grey ones). */
+		uGrassShadowTint: { value: new THREE.Color(0x7d9ad6) },
 		uNoiseScale: { value: 1.5 },
 		/** Scales tip stretch / wind — must match blade instance height or grass stays tall. */
 		uBladeHeightScale: { value: 0.6 },
@@ -77,6 +86,24 @@ export class GrassMaterial {
 		this.uniforms.uTime.value = delta;
 	}
 
+	/**
+	 * The grass shader does its own lighting and never reads the scene's key
+	 * light, so the day/night colours have to be handed to it explicitly —
+	 * otherwise grass stays neutral while everything else picks up the
+	 * warm-key / cool-fill split.
+	 */
+	setLightParams(p: {
+		keyColor: THREE.Color;
+		intensity: number;
+		ambient: THREE.Color;
+		shadowTint: THREE.Color;
+	}) {
+		this.uniforms.uGrassLightColor.value.copy(p.keyColor);
+		this.uniforms.uGrassLightIntensity.value = p.intensity;
+		this.uniforms.uGrassAmbientColor.value.copy(p.ambient);
+		this.uniforms.uGrassShadowTint.value.copy(p.shadowTint);
+	}
+
 	/** Blade visual height (1 = original). Affects shader tip lift + wind amp. */
 	setBladeHeightScale(scale: number) {
 		this.uniforms.uBladeHeightScale.value = Math.max(0.05, scale);
@@ -93,6 +120,9 @@ export class GrassMaterial {
 				uEnableShadows: this.uniforms.uEnableShadows,
 				uShadowDarkness: this.uniforms.uShadowDarkness,
 				uGrassLightIntensity: this.uniforms.uGrassLightIntensity,
+				uGrassLightColor: this.uniforms.uGrassLightColor,
+				uGrassAmbientColor: this.uniforms.uGrassAmbientColor,
+				uGrassShadowTint: this.uniforms.uGrassShadowTint,
 				uNoiseScale: this.uniforms.uNoiseScale,
 				uBladeHeightScale: this.uniforms.uBladeHeightScale,
 				uTerrainSize: this.uniforms.uTerrainSize,
@@ -200,6 +230,9 @@ export class GrassMaterial {
       uniform int uEnableShadows;
       
       uniform float uGrassLightIntensity;
+      uniform vec3 uGrassLightColor;
+      uniform vec3 uGrassAmbientColor;
+      uniform vec3 uGrassShadowTint;
       uniform float uShadowDarkness;
       uniform float uDayTime;
       varying vec3 vColor;
@@ -217,8 +250,13 @@ export class GrassMaterial {
         vec3 tipColor = mix(uTipColor1,uTipColor2,grassVariation.r);
         
         vec4 diffuseColor = vec4( mix(uBaseColor,tipColor,vUv.y), step(0.1,grassAlpha.r) );
-        vec3 grassFinalColor = diffuseColor.rgb * uGrassLightIntensity;
-        
+
+        // Warm key + cool fill. Blades are near-vertical so NdotL reads badly on
+        // them; the base->tip gradient stands in for it and doubles as cheap AO.
+        vec3 grassKey = uGrassLightColor * uGrassLightIntensity;
+        float tipLift = mix(0.55, 1.0, vUv.y);
+        vec3 grassFinalColor = diffuseColor.rgb * (uGrassAmbientColor + grassKey * tipLift);
+
         // light calculation derived from <lights_fragment_begin>
         vec3 geometryPosition = vViewPosition;
         vec3 geometryNormal = vNormal;
@@ -254,7 +292,16 @@ export class GrassMaterial {
               }
               #pragma unroll_loop_end
             #endif
-            grassFinalColor = mix(grassFinalColor , grassFinalColor * uShadowDarkness,  1.-shadow) ;
+            // Luminance-normalise the tint so it rotates hue instead of also
+            // darkening — uShadowDarkness alone owns how dark shadows get.
+            vec3 shadowTint = uGrassShadowTint /
+              max(dot(uGrassShadowTint, vec3(0.2126, 0.7152, 0.0722)), 1e-4);
+            shadowTint = mix(vec3(1.0), shadowTint, 0.6);
+            grassFinalColor = mix(
+              grassFinalColor,
+              grassFinalColor * uShadowDarkness * shadowTint,
+              1. - shadow
+            );
           } else{
             grassFinalColor = grassFinalColor ;
           }

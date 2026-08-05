@@ -13,11 +13,13 @@ import { MeshSurfaceSampler } from "three/addons/math/MeshSurfaceSampler.js";
 import { GrassMaterial } from "./GrassMaterial";
 import { initPhysics, getWorld } from "./physics/world";
 import {
-	createTerrainHeightfieldCollider,
+	createTerrainCollider,
 	type TerrainColliderHandle,
 } from "./physics/terrainCollider";
 import { setIslandTerrain, getWorldTerrainY, findSafeTerrainSpawn, isOutsideTerrain } from "./terrain/islandHeight";
 import { createLargeTerrain, TERRAIN_CONFIG } from "./terrain/createLargeTerrain";
+import { clearCaves } from "./terrain/caveRegistry";
+import { setCaveTerrainColor } from "./entities/cave/createCave";
 import { Pond, REFERENCE_WATER_LOOK } from "./entities/water";
 import { createCar, type CarEntity } from "./entities/car/createCar";
 import { loadKenneySuvVisual } from "./entities/car/kenneyCarVisual";
@@ -61,6 +63,12 @@ import {
 	type ScenicPropHandle,
 } from "./entities/props";
 import { GrassChunkField, DEFAULT_GRASS_CULL_DISTANCE } from "./entities/grass";
+import {
+	buildGrassPlacement,
+	type GrassChunkData,
+	type GrassPlacementRequest,
+} from "./entities/grass/grassPlacementCore";
+import { grassPlacementWorker } from "./workers/grassPlacementClient";
 import { EditModeController } from "./editor/EditModeController";
 import {
 	createLargeBlankWorld,
@@ -94,10 +102,14 @@ import {
 	fogFollowsPlayer,
 	fogRadiusForWorld,
 } from "./environment/VolumetricFogPass";
+import { setCharacterAlbedo } from "./entities/human/toonCharacter";
 import { SmokeTrailSystem } from "./environment/smokeTrail";
 import { ExplosionSystem } from "./environment/ExplosionSystem";
+import { NitroSystem } from "./environment/NitroSystem";
+import { createFireflies, type Fireflies } from "./environment/fireflies";
 import { BombSound } from "./audio/BombSound";
 import { HornSound } from "./audio/HornSound";
+import { NitroSound } from "./audio/NitroSound";
 import { ProceduralBridge } from "./environment/ProceduralBridge";
 import {
 	createMobileControls,
@@ -144,9 +156,57 @@ type RemotePlayer = {
 	benchSeat?: 0 | 1 | null;
 	hp?: number;
 	dead?: boolean;
+	nitro?: boolean;
 };
 
 const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:3000";
+
+/**
+ * Albedo ceiling for untextured character materials.
+ *
+ * Not a stylisation — it compensates for this rig's key light, which is ~2.4x
+ * what it used to be. glTF defaults an absent baseColorFactor to pure white, so
+ * poutine.glb has albedo 1.0; at the current key that pins the whole lit half
+ * into the top few percent of the tone curve and crosses the bloom threshold,
+ * which reads as a washed-out figure. 0.58 restores the response the original
+ * material had under the original lighting. Materials with a colour texture are
+ * skipped — they already carry their own albedo.
+ */
+const CHARACTER_ALBEDO = 0.58;
+
+/**
+ * Pass-through grade for the editor's top-down view. The composite always runs
+ * (so tone mapping is never skipped), but the stylisation is switched off.
+ */
+const NEUTRAL_GRADE = {
+	exposure: 1,
+	shoulder: 0.8,
+	contrast: 1,
+	saturation: 1,
+	shadowTint: new THREE.Color(1, 1, 1),
+	highlightTint: new THREE.Color(1, 1, 1),
+	liftColor: new THREE.Color(1, 1, 1),
+	lift: 0,
+	bloomStrength: 0,
+	bloomThreshold: 1.5,
+};
+
+const nextFrame = () =>
+	new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+
+/** Shared shape of addGrass / addGrassAsync placement options. */
+type GrassPlacementOptions = {
+	chunkSize?: number;
+	clearPondHole?: boolean;
+	/** Even grid + jitter (custom worlds) — avoids random patchy gaps. */
+	evenCoverage?: boolean;
+	/** Skip grass steeper than this slope angle (degrees). Default 65. */
+	maxSlopeDeg?: number;
+	heights?: Float32Array;
+	nrows?: number;
+	ncols?: number;
+	terrainSize?: number;
+};
 
 export class FluffyGrass {
 	private loadingManager: THREE.LoadingManager;
@@ -189,6 +249,8 @@ export class FluffyGrass {
 	private islandGrassField: GrassChunkField | null = null;
 	private valleyGrassField: GrassChunkField | null = null;
 	private customGrassField: GrassChunkField | null = null;
+	/** Bumps per off-thread grass build so only the newest result is adopted. */
+	private grassBuildGeneration = 0;
 	private customWorldGroup = new THREE.Group();
 	private customTerrainMesh: THREE.Mesh | null = null;
 	private customHeights: Float32Array | null = null;
@@ -220,6 +282,8 @@ export class FluffyGrass {
 	private vehicleGrapple: VehicleGrapple | null = null;
 	private chaseCameraInput: ChaseCameraInput | null = null;
 	private engineSound: EngineSound | null = null;
+	private hornSound: HornSound | null = null;
+	private nitroSound: NitroSound | null = null;
 	private carOutOfWorldTimer = 0;
 	private humanOutOfWorldTimer = 0;
 
@@ -241,6 +305,9 @@ export class FluffyGrass {
 	private readonly gunHandQuat = new THREE.Quaternion();
 	private readonly gunWorldOffset = new THREE.Vector3();
 	private readonly gunMuzzleWorld = new THREE.Vector3();
+	/** Character roots, so albedo can be re-dialled from the console. */
+	private readonly characterRoots: THREE.Object3D[] = [];
+
 	private readonly gunMuzzleLocal = new THREE.Vector3(0.02, 0.05, 0.42);
 	private readonly gunOffsetPos = new THREE.Vector3(0.05, 0.02, 0.08);
 	private readonly gunOffsetQuat = new THREE.Quaternion().setFromEuler(
@@ -294,6 +361,7 @@ export class FluffyGrass {
 	private proceduralBridge: ProceduralBridge | null = null;
 	private smokeSystem: SmokeTrailSystem | null = null;
 	private explosionSystem: ExplosionSystem | null = null;
+	private nitroSystem: NitroSystem | null = null;
 	private mobileControls: MobileControls | null = null;
 	private orientationGate: OrientationGate | null = null;
 	private carHeadlights: CarHeadlights | null = null;
@@ -317,9 +385,54 @@ export class FluffyGrass {
 	private initializationPromise: Promise<void>;
 	private currentFogRadius = 65;
 	private volumetricFogDensity = 0.022;
+	/**
+	 * Live look-tuning, exposed as `window.__look` so the grade can be dialled in
+	 * from the console without a rebuild. Multipliers compose on top of the
+	 * interpolated DAY_PERIODS values, so time-of-day still drives everything.
+	 */
+	private lookTuning = {
+		/** Multiplier on grade exposure. */
+		exposure: 1,
+		/** Multiplier on grade contrast. */
+		contrast: 1,
+		/** Multiplier on grade saturation. */
+		saturation: 1,
+		/** Absolute 0..1. How much cool-shadow/warm-highlight split is applied. */
+		splitTone: 0.6,
+		/** Multiplier on bloom strength. */
+		bloom: 1,
+		/** Absolute vignette amount. */
+		vignette: 0.16,
+		/** Multiplier on ambient + hemisphere. Lower = deeper shadows. */
+		fill: 1,
+		/** Multiplier on character rim light. */
+		rim: 1,
+		/** Multiplier on the additive night lift. */
+		lift: 1,
+	};
+	private readonly _waterLight = new THREE.Color();
+	private readonly _waterFill = new THREE.Color();
+	/** Scratch so we never mutate the cycle's own grade object. */
+	private readonly _grade = {
+		exposure: 1,
+		shoulder: 0.72,
+		contrast: 1,
+		saturation: 1,
+		shadowTint: new THREE.Color(1, 1, 1),
+		highlightTint: new THREE.Color(1, 1, 1),
+		liftColor: new THREE.Color(1, 1, 1),
+		lift: 0,
+		bloomStrength: 0,
+		bloomThreshold: 1,
+	};
+
 	private fogFollowPlayer = false;
 	private volumetricFog: VolumetricFogSystem | null = null;
 	private volumetricFogPass: VolumetricFogPass | null = null;
+	/** User-facing master switch for the fog raymarch + bloom. */
+	private postFxEnabled = true;
+	/** Parks the composite while targets are reallocated mid-toggle. */
+	private postFxTransitioning = false;
 	/** Residual FogExp2 while the screen-space pass does the heavy lifting. */
 	private residualFogDensity = 0.0008;
 	/** Full FogExp2 density to restore when the volumetric pass is off. */
@@ -403,7 +516,10 @@ export class FluffyGrass {
 		this.renderer.shadowMap.autoUpdate = true;
 		this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 		this.renderer.outputColorSpace = THREE.SRGBColorSpace;
-		this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+		// Tone mapping lives in VolumetricFogPass's composite, not per-material.
+		// ACES was actively desaturating highlights; the composite runs a
+		// saturation-preserving curve instead, and needs linear HDR to reach it.
+		this.renderer.toneMapping = THREE.NoToneMapping;
 		this.renderer.setSize(window.innerWidth, window.innerHeight);
 		this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 		this.scene.frustumCulled = true;
@@ -425,13 +541,47 @@ export class FluffyGrass {
 			side: THREE.DoubleSide,
 		});
 
+		// Live look tuning from the browser console, e.g.
+		//   __look.tuning.splitTone = 0.3
+		//   __look.tuning.fill = 0.6
+		//   __look.outline.uOutlineWidth.value = 1.6
+		//   __look.character.uCharShadowTintStrength.value = 0.2
+		(window as unknown as { __look?: unknown }).__look = {
+			tuning: this.lookTuning,
+			grass: this.grassMaterial.uniforms,
+			/** Retint every cave mouth's blend-to-ground colour, e.g. "#4c8129". */
+			caveMouthTint: (color: THREE.ColorRepresentation) => {
+				setCaveTerrainColor(color);
+				console.log(`[cave] mouth tint -> ${new THREE.Color(color).getHexString()}`);
+			},
+			/**
+			 * Character albedo ceiling. The GLB is untextured pure white (albedo
+			 * 1.0), which saturates the tone curve and blooms. Lower = more form.
+			 */
+			charAlbedo: (v: number) => {
+				for (const root of this.characterRoots) setCharacterAlbedo(root, v);
+				console.log(`[char] albedo ceiling -> ${v}`);
+			},
+			/** Toggle character shadow casting, to isolate shadow artefacts. */
+			charShadows: (on: boolean) => {
+				for (const root of this.characterRoots) {
+					root.traverse((o) => {
+						const m = o as THREE.Mesh;
+						if (m.isMesh && !m.userData.isToonOutline) m.castShadow = on;
+					});
+				}
+				this.renderer.shadowMap.needsUpdate = true;
+				console.log(`[char] cast shadows -> ${on}`);
+			},
+		};
+
 		this.setupStats();
 		this.setupTextures();
 		this.setupEventListeners();
 		this.setupInteractionUI();
 		this.healthHud = new HealthHud();
 		this.orientationGate = createOrientationGate();
-		this.dayNight = createDayNightCycle(this.scene, { shadowExtent: 90 });
+		this.dayNight = createDayNightCycle(this.scene, { shadowExtent: 200 });
 		this.dayNight.auto = this.dayNightGui.auto;
 		this.worldLoading = new WorldLoadingOverlay();
 		this.setupSettings();
@@ -444,6 +594,9 @@ export class FluffyGrass {
 
 		this.explosionSystem = new ExplosionSystem();
 		this.scene.add(this.explosionSystem.mesh);
+
+		this.nitroSystem = new NitroSystem();
+		this.scene.add(this.nitroSystem.mesh);
 
 		this.bulletSystem = new BulletSystem();
 		this.scene.add(this.bulletSystem.group);
@@ -488,6 +641,9 @@ export class FluffyGrass {
 			const proceed = (_action: "play", user: AuthUser | null) => {
 				this.userData = user;
 				this.isGameActive = true;
+				this.engineSound = new EngineSound();
+				this.hornSound = new HornSound();
+				this.nitroSound = new NitroSound();
 				this.settings.show();
 				this.healthHud?.setVisible(true);
 				this.healthHud?.setHp(this.localHp);
@@ -996,6 +1152,8 @@ export class FluffyGrass {
 				const humanGltf = await this.loadGltfFull("/poutine.glb");
 				const humanGroup = humanGltf.scene;
 				humanGroup.scale.setScalar(this.sceneProps.humanScale);
+				setCharacterAlbedo(humanGroup, CHARACTER_ALBEDO);
+				this.characterRoots.push(humanGroup);
 				this.scene.add(humanGroup);
 
 				const mixer = new THREE.AnimationMixer(humanGroup);
@@ -1109,6 +1267,7 @@ export class FluffyGrass {
 
 			if (typeof state.hp === "number") rp.hp = state.hp;
 			if (typeof state.dead === "boolean") rp.dead = state.dead;
+			if (typeof state.nitro === "boolean") rp.nitro = state.nitro;
 
 			if (state.activeEntity === "human") {
 				rp.carGroup.visible = true; // Wait, actually should carGroup be true here? Yes, if they left it. But humanGroup should be true too!
@@ -1172,13 +1331,41 @@ export class FluffyGrass {
 		});
 	}
 
+	/**
+	 * Keep `?world=` naming the world you are actually in.
+	 *
+	 * replaceState, not pushState: switching worlds is not a navigation, and the
+	 * back button should leave the game rather than walk back through every world
+	 * the player visited.
+	 */
+	private syncWorldUrl(worldId: GameWorldId) {
+		const url = new URL(window.location.href);
+		if (url.searchParams.get("world") === worldId) return;
+		url.searchParams.set("world", worldId);
+		window.history.replaceState(window.history.state, "", url);
+	}
+
+	/**
+	 * Reopen the world named in the URL, so a reload drops you back where you were
+	 * instead of in the default Island — and so the address bar stays a shareable
+	 * link to the same place.
+	 */
 	private async tryOpenSharedWorldFromUrl() {
 		const worldId = new URLSearchParams(window.location.search).get("world");
-		if (!worldId || !this.editMode) return;
+		if (!worldId) {
+			// First visit: state where we are, so the very next reload restores it.
+			this.syncWorldUrl(this.activeWorldDef.id);
+			return;
+		}
+		if (!this.editMode) return;
 		try {
 			await this.editMode.onRoomWorldBound(worldId);
 		} catch (error) {
-			console.warn("[world] Failed to open shared world", worldId, error);
+			// A world that no longer resolves — deleted, or someone else's — must not
+			// wedge every future reload on the same failure. Point the URL back at
+			// whatever we did land in.
+			console.warn("[world] Failed to open world from URL", worldId, error);
+			this.syncWorldUrl(this.activeWorldDef.id);
 		}
 	}
 
@@ -1453,80 +1640,25 @@ export class FluffyGrass {
 			return true;
 		};
 
-		const useEven =
-			options?.evenCoverage &&
-			options.heights &&
-			options.nrows != null &&
-			options.ncols != null &&
-			options.terrainSize != null;
+		// Even coverage is pure math over the heightfield, so it runs through the
+		// shared placement core — which emits ready-to-upload chunk buffers instead
+		// of a Matrix4 per blade, and can be handed to a worker (see addGrassAsync).
+		const request = this.grassPlacementRequest(
+			pondLocalPos,
+			grassHeightMultiplier,
+			options
+		);
+		if (request) {
+			return this.grassFieldFromChunks(
+				buildGrassPlacement(request).chunks,
+				grassGeometry,
+				targetGroup,
+				surfaceMesh,
+				options
+			);
+		}
 
-		if (useEven) {
-			const heights = options.heights!;
-			const nrows = options.nrows!;
-			const ncols = options.ncols!;
-			const size = options.terrainSize!;
-			const half = size * 0.5;
-			// Same blade spacing as island (~0.9 m). If budget is lower than full
-			// coverage, keep probability so thinning stays uniform (not patchy corners).
-			const spacing = Math.sqrt(1 / ISLAND_GRASS_DENSITY);
-			const fullCount = (size * size) * ISLAND_GRASS_DENSITY;
-			const keepProb = Math.min(1, this.grassCount / Math.max(1, fullCount));
-			const stride = nrows + 1;
-			/**
-			 * Bilinear over the terrain grid. The rendered surface interpolates
-			 * between vertices, so nearest-vertex snapping would sink blades into
-			 * slopes (or float them) by up to half a cell × tan(slope) — metres on
-			 * big worlds, where cells reach ~39 m at the 254-segment cap.
-			 */
-			const sampleH = (x: number, z: number) => {
-				const fx = THREE.MathUtils.clamp(((x + half) / size) * ncols, 0, ncols);
-				const fz = THREE.MathUtils.clamp(((z + half) / size) * nrows, 0, nrows);
-				const col0 = Math.floor(fx);
-				const row0 = Math.floor(fz);
-				const col1 = Math.min(col0 + 1, ncols);
-				const row1 = Math.min(row0 + 1, nrows);
-				const tx = fx - col0;
-				const tz = fz - row0;
-				const h00 = heights[row0 + col0 * stride]!;
-				const h10 = heights[row0 + col1 * stride]!;
-				const h01 = heights[row1 + col0 * stride]!;
-				const h11 = heights[row1 + col1 * stride]!;
-				const hRow0 = h00 + (h10 - h00) * tx;
-				const hRow1 = h01 + (h11 - h01) * tx;
-				return hRow0 + (hRow1 - hRow0) * tz;
-			};
-			const sampleN = (x: number, z: number, out: THREE.Vector3) => {
-				const e = Math.max(spacing * 0.5, size / ncols);
-				out.set(
-					sampleH(x - e, z) - sampleH(x + e, z),
-					e * 2,
-					sampleH(x, z - e) - sampleH(x, z + e)
-				).normalize();
-			};
-
-			let rowIndex = 0;
-			for (let gz = -half + spacing * 0.5; gz < half; gz += spacing, rowIndex++) {
-				if (matrices.length >= this.grassCount) break;
-				// Offset every other row by half a cell (hex-style packing). A square
-				// lattice lines blades up in axis-aligned rows, and the seam between
-				// rows reads as a bare stripe on any hillside seen face-on.
-				const rowShift = (rowIndex & 1) * spacing * 0.5;
-				for (let gx = -half + spacing * 0.5 + rowShift; gx < half; gx += spacing) {
-					if (matrices.length >= this.grassCount) break;
-					if (keepProb < 1 && Math.random() > keepProb) continue;
-					// Full-cell jitter (stratified). At 0.9 every cell kept a 5%
-					// no-blade margin, and those margins joined up into grid lines.
-					const x = gx + (Math.random() - 0.5) * spacing;
-					const z = gz + (Math.random() - 0.5) * spacing;
-					if (x < -half || x > half || z < -half || z > half) continue;
-					sampleN(x, z, normal);
-					// Only bare on steep slopes (> maxSlopeDeg). Gentle hills keep grass.
-					if (normal.y < minNormalY) continue;
-					position.set(x, sampleH(x, z), z);
-					pushBlade();
-				}
-			}
-		} else {
+		{
 			const sampler = new MeshSurfaceSampler(surfaceMesh).build();
 			let instanceIndex = 0;
 			const maxAttempts = this.grassCount * (isNewWorld ? 4 : 2);
@@ -1568,6 +1700,121 @@ export class FluffyGrass {
 		return field;
 	}
 
+	/**
+	 * Placement inputs for the even-coverage path, or null when this world has to
+	 * fall back to MeshSurfaceSampler (built-in island / valley meshes).
+	 */
+	private grassPlacementRequest(
+		pondLocalPos: THREE.Vector2,
+		grassHeightMultiplier: number,
+		options?: GrassPlacementOptions
+	): GrassPlacementRequest | null {
+		if (
+			!options?.evenCoverage ||
+			!options.heights ||
+			options.nrows == null ||
+			options.ncols == null ||
+			options.terrainSize == null
+		) {
+			return null;
+		}
+		const size = options.terrainSize;
+		// Same blade spacing as island (~0.9 m). If the budget is lower than full
+		// coverage, keep a probability so thinning stays uniform (not patchy corners).
+		const spacing = Math.sqrt(1 / ISLAND_GRASS_DENSITY);
+		const fullCount = size * size * ISLAND_GRASS_DENSITY;
+		return {
+			heights: options.heights,
+			nrows: options.nrows,
+			ncols: options.ncols,
+			size,
+			spacing,
+			keepProb: Math.min(1, this.grassCount / Math.max(1, fullCount)),
+			maxCount: this.grassCount,
+			minNormalY: Math.cos(((options.maxSlopeDeg ?? 65) * Math.PI) / 180),
+			chunkSize: options.chunkSize ?? 15,
+			heightMultiplier: grassHeightMultiplier,
+			clearPondHole: options.clearPondHole !== false,
+			pondX: pondLocalPos.x,
+			pondZ: pondLocalPos.y,
+		};
+	}
+
+	private grassFieldFromChunks(
+		chunks: GrassChunkData[],
+		grassGeometry: THREE.BufferGeometry,
+		targetGroup: THREE.Group,
+		surfaceMesh: THREE.Mesh,
+		options?: { chunkSize?: number }
+	): GrassChunkField {
+		const field = new GrassChunkField({
+			chunks,
+			geometry: grassGeometry,
+			material: this.grassMaterial.material,
+			origin: surfaceMesh.position,
+			chunkSize: options?.chunkSize ?? 15,
+			density: this.grassDensity,
+			cullDistance: this.grassCullDistance,
+		});
+		targetGroup.add(field.group);
+		return field;
+	}
+
+	/**
+	 * Same result as addGrass, but placement runs off-thread.
+	 *
+	 * Used where the stall is worst: custom-world load and every sculpt stroke,
+	 * which regenerates the whole field (up to 1.3M blades). Falls back to the
+	 * synchronous core if the worker is unavailable or fails — a hitch is
+	 * acceptable, a grassless world is not.
+	 */
+	private async addGrassAsync(
+		surfaceMesh: THREE.Mesh,
+		grassGeometry: THREE.BufferGeometry,
+		targetGroup: THREE.Group,
+		pondLocalPos: THREE.Vector2,
+		grassHeightMultiplier: number,
+		options?: GrassPlacementOptions
+	): Promise<GrassChunkField> {
+		const request = this.grassPlacementRequest(
+			pondLocalPos,
+			grassHeightMultiplier,
+			options
+		);
+		if (!request) {
+			return this.addGrass(
+				surfaceMesh,
+				grassGeometry,
+				targetGroup,
+				pondLocalPos,
+				grassHeightMultiplier,
+				false,
+				options
+			);
+		}
+
+		this.grassMaterial.setBladeHeightScale(grassHeightMultiplier);
+
+		let chunks: GrassChunkData[];
+		try {
+			// heights is NOT transferred — the main thread keeps owning it for the
+			// heightfield collider and sculpting. Cloning 260KB is free next to the
+			// work being moved.
+			chunks = (await grassPlacementWorker.run(request)).chunks;
+		} catch (error) {
+			console.warn("[grass] worker unavailable, placing on main thread", error);
+			chunks = buildGrassPlacement(request).chunks;
+		}
+
+		return this.grassFieldFromChunks(
+			chunks,
+			grassGeometry,
+			targetGroup,
+			surfaceMesh,
+			options
+		);
+	}
+
 	private loadGltf(url: string): Promise<THREE.Group> {
 		return new Promise((resolve, reject) => {
 			this.gltfLoader.load(
@@ -1593,7 +1840,8 @@ export class FluffyGrass {
 
 		mesh.updateMatrixWorld(true);
 		setIslandTerrain(mesh);
-		this.islandTerrainHandle = createTerrainHeightfieldCollider(
+		this.islandTerrainHandle = createTerrainCollider(
+			mesh,
 			heights,
 			nrows,
 			ncols,
@@ -1849,6 +2097,8 @@ export class FluffyGrass {
 		this.carHeadlights.setIntensity(0);
 
 		this.engineSound = new EngineSound();
+		this.hornSound = new HornSound();
+		this.nitroSound = new NitroSound();
 
 		this.carController = new CarController(
 			car.body,
@@ -1897,6 +2147,10 @@ export class FluffyGrass {
 
 		// Default to the scale in sceneProps
 		scene.scale.setScalar(this.sceneProps.humanScale);
+
+		// Original GLB material, only the albedo ceiling (see CHARACTER_ALBEDO).
+		setCharacterAlbedo(scene, CHARACTER_ALBEDO);
+		this.characterRoots.push(scene);
 
 		this.human = new HumanEntity(
 			scene,
@@ -2339,7 +2593,6 @@ export class FluffyGrass {
 		};
 	}
 
-	/** Snap the world-space gun mesh to the animated right-hand bone. */
 	private syncGunToHand() {
 		if (!this.gunMesh || !this.human || !this.gunMesh.visible) return;
 		const hand = this.human.rightHandBone;
@@ -2844,6 +3097,9 @@ export class FluffyGrass {
 			// Set rotation to face the camera. (Math.PI / 4 is exactly forward!)
 			clone.rotation.set(0, Math.PI / 4, 0);
 
+			setCharacterAlbedo(clone, CHARACTER_ALBEDO);
+			this.characterRoots.push(clone);
+
 			// Position exactly aligned with 4 columns at z = -5, moved down slightly to sit nicely
 			clone.position.set(startX + (i * spacing), -1.0, -5.0);
 
@@ -3037,14 +3293,85 @@ export class FluffyGrass {
 				this.settings.setAutoDayNight(this.dayNight.auto);
 			}
 
-			const grassLight = this.dayNight.getGrassLight();
-			this.grassMaterial.uniforms.uGrassLightIntensity.value = grassLight;
+			// Grass shades itself, so hand it the key/fill/shadow colours directly.
+			this.grassMaterial.setLightParams(this.dayNight.getGrassLightParams());
+
+
+			if (this.dayNight.fillScale !== this.lookTuning.fill) {
+				this.dayNight.fillScale = this.lookTuning.fill;
+			}
+
+			// Water's specular + shore foam were hardcoded white, so they stayed
+			// fully bright at midnight and read as a glowing disc. Feed them the
+			// actual light energy instead.
+			const keyL = this.dayNight.lights.keyLight;
+			const ambL = this.dayNight.lights.ambient;
+			this._waterLight
+				.copy(keyL.color)
+				.multiplyScalar(keyL.intensity * 0.28)
+				.add(this._waterFill.copy(ambL.color).multiplyScalar(ambL.intensity));
+			if (this.pond) {
+				this.pond.setLightColor(this._waterLight);
+				this.pond.setSunDirection(this.dayNight.getSunDirection());
+			}
+
+			// Composite grade — exposure, tone curve, split-tone, bloom. The
+			// editor's top-down view gets a neutral pass-through instead: a
+			// stylised grade there fights readability, same reason fog is off.
+			if (this.volumetricFogPass) {
+				if (this.sceneProps.mapMode) {
+					this.volumetricFogPass.setGrade(NEUTRAL_GRADE);
+					this.volumetricFogPass.setSplitTone(0);
+					this.volumetricFogPass.setVignette(0);
+				} else {
+					const t = this.lookTuning;
+					const base = this.dayNight.getGrade();
+					const g = this._grade;
+					g.exposure = base.exposure * t.exposure;
+					g.shoulder = base.shoulder;
+					g.contrast = base.contrast * t.contrast;
+					g.saturation = base.saturation * t.saturation;
+					g.shadowTint.copy(base.shadowTint);
+					g.highlightTint.copy(base.highlightTint);
+					g.liftColor.copy(base.liftColor);
+					g.lift = base.lift * t.lift;
+					g.bloomStrength = base.bloomStrength * t.bloom;
+					g.bloomThreshold = base.bloomThreshold;
+					this.volumetricFogPass.setGrade(g);
+					this.volumetricFogPass.setSplitTone(t.splitTone);
+					this.volumetricFogPass.setVignette(t.vignette);
+				}
+			}
+
+			// Keep the ±90 m shadow frustum centred on whoever we're following,
+			// otherwise it stays stranded at the world origin.
+			//
+			// Only re-anchor on frames where the shadow map is actually redrawn.
+			// Medium quality refreshes it every 6th frame, so moving the frustum
+			// every frame leaves the map's contents describing a stale frustum —
+			// which reads as shadows blinking at ~10 Hz.
+			const shadowsWillRedraw =
+				this.renderer.shadowMap.enabled &&
+				(this.renderer.shadowMap.autoUpdate ||
+					this.renderer.shadowMap.needsUpdate);
+			if (shadowsWillRedraw) {
+				const shadowFocus =
+					this.activePlayer === "human" && this.human?.mesh
+						? this.human.mesh.position
+						: (this.car?.mesh?.position ?? this.camera.position);
+				this.dayNight.setFocus(shadowFocus.x, shadowFocus.z);
+			}
 
 			if (this.terrainMat) {
 				const sunY = this.dayNight.getSunDirection().y;
 				// Fade emissive in as sun drops below horizon (sunY from 0.1 to -0.1)
 				const nightFactor = THREE.MathUtils.clamp((0.1 - sunY) / 0.2, 0, 1);
-				this.terrainMat.emissive.set(this.sceneProps.terrainColor).multiplyScalar(0.7 * nightFactor);
+				// Was terrainColor * 0.7 — a green self-glow, added back when night was
+				// too dark to see. The rig no longer needs it, and a *cool* trace
+				// keeps the ground from going flat black without turning it green.
+				this.terrainMat.emissive
+					.copy(this.dayNight.getGrade().liftColor)
+					.multiplyScalar(0.1 * nightFactor);
 			}
 
 			// Headlights on through evening → night
@@ -3222,6 +3549,18 @@ export class FluffyGrass {
 						this.smokeSystem.emitTire(_smokePos);
 					}
 				}
+			}
+
+			if (this.carInput?.isNitroActive() && this.nitroSystem && this.car) {
+				const _smokePos = new THREE.Vector3();
+				const forward = new THREE.Vector3(0, 0, 1).applyQuaternion(this.car.mesh.quaternion);
+				this.car.leftExhaust.getWorldPosition(_smokePos);
+				this.nitroSystem.emit(_smokePos, forward);
+				this.car.rightExhaust.getWorldPosition(_smokePos);
+				this.nitroSystem.emit(_smokePos, forward);
+				if (this.nitroSound && !this.nitroSound.isPlaying) this.nitroSound.play();
+			} else {
+				if (this.nitroSound && this.nitroSound.isPlaying) this.nitroSound.stop();
 			}
 
 			if (this.engineSound && this.carController) {
@@ -3408,6 +3747,7 @@ export class FluffyGrass {
 			this.smokeSystem.update(dt);
 		}
 		this.explosionSystem?.update(dt);
+		this.nitroSystem?.update(dt);
 
 		// Multiplayer Synchronization Loop
 		if (this.socket && this.socket.connected && this.roomCode && this.isGameActive) {
@@ -3423,6 +3763,7 @@ export class FluffyGrass {
 						this.sitState === "sitting" || this.sitState === "entering"
 							? this.sitSeatIndex
 							: null,
+					nitro: this.carInput?.isNitroActive() ?? false,
 				};
 
 				if (this.human) {
@@ -3499,6 +3840,13 @@ export class FluffyGrass {
 					rp.carBody.setNextKinematicTranslation(rp.carGroup.position);
 					rp.carBody.setNextKinematicRotation(rp.carGroup.quaternion);
 				}
+				if (rp.nitro && this.nitroSystem) {
+					const forward = new THREE.Vector3(0, 0, 1).applyQuaternion(rp.carGroup.quaternion);
+					const lx = new THREE.Vector3(-0.4, 0.2, -1.8).applyMatrix4(rp.carGroup.matrixWorld);
+					const rx = new THREE.Vector3(0.4, 0.2, -1.8).applyMatrix4(rp.carGroup.matrixWorld);
+					this.nitroSystem.emit(lx, forward);
+					this.nitroSystem.emit(rx, forward);
+				}
 			} else {
 				if (rp.carBody) {
 					rp.carBody.setNextKinematicTranslation({ x: 0, y: -100, z: 0 });
@@ -3526,11 +3874,33 @@ export class FluffyGrass {
 			this.bulletSystem.update(dt, targets, bombTargets, vehicleTargets);
 		}
 
-		this.volumetricFogPass?.render(
-			this.renderer,
-			this.scene,
-			this.editMode?.isEnabled ? this.editMode.activeCamera : this.camera
-		);
+		// Skipped only while the toggle swaps targets — the overlay covers the
+		// held frame, and rendering against a half-built chain would flash.
+		if (!this.postFxTransitioning) {
+			this.volumetricFogPass?.render(
+				this.renderer,
+				this.scene,
+				this.editMode?.isEnabled ? this.editMode.activeCamera : this.camera
+			);
+
+			if (this.editMode?.isEnabled && this.editMode.isDigging) {
+				const pr = this.renderer.getPixelRatio();
+				const size = Math.floor(300 * pr);
+				const margin = Math.floor(20 * pr);
+				const w = this.renderer.domElement.width;
+				const h = this.renderer.domElement.height;
+				
+				this.renderer.setViewport(w - size - margin, h - size - margin, size, size);
+				this.renderer.setScissor(w - size - margin, h - size - margin, size, size);
+				this.renderer.setScissorTest(true);
+				this.renderer.clearDepth();
+				
+				this.renderer.render(this.scene, this.editMode.pipCamera);
+				
+				this.renderer.setViewport(0, 0, w, h);
+				this.renderer.setScissorTest(false);
+			}
+		}
 		this.stats.update();
 
 		if (this.editMode?.isEnabled) {
@@ -3563,6 +3933,7 @@ export class FluffyGrass {
 	private setupSettings() {
 		this.settings = new GameSettings({
 			quality: "High",
+			postFx: this.postFxEnabled,
 			period: this.dayNightGui.period,
 			autoDayNight: this.dayNightGui.auto,
 			hour: this.dayNightGui.hour,
@@ -3572,6 +3943,7 @@ export class FluffyGrass {
 			world: this.currentWorld,
 			worldOptions: this.getWorldSelectOptions(),
 			onQualityChange: (quality) => this.applyGraphicsQuality(quality),
+			onPostFxChange: (enabled) => void this.setPostFxEnabled(enabled),
 			onPeriodChange: (period) => {
 				this.dayNight?.setPeriod(period);
 				this.dayNightGui.period = period;
@@ -3608,6 +3980,10 @@ export class FluffyGrass {
 		this.renderer.shadowMap.enabled = shadowsEnabled;
 		this.renderer.shadowMap.autoUpdate = quality === "High";
 		if (shadowsEnabled) this.renderer.shadowMap.needsUpdate = true;
+		// The shadow box has to span the visible range (200 m) to avoid a moving
+		// cutoff, so resolution carries the crispness: 4096 over 400 m gives
+		// ~0.098 m texels, about what 2048 over 180 m used to.
+		this.dayNight?.setShadowQuality(quality === "High" ? 4096 : 2048, 200);
 		this.grassMaterial.updateGrassGraphicsChange(quality === "High");
 		this.waterUpdateInterval =
 			quality === "Low" ? 4 : quality === "Medium" ? 3 : 2;
@@ -3624,19 +4000,77 @@ export class FluffyGrass {
 		this.syncVolumetricFogQuality();
 	}
 
-	/** Screen-space fog on Medium/High; billboard fallback only on Low. */
+	/**
+	 * Turning the effects on allocates the bloom mip chain and links the pass's
+	 * programs. That is a one-off hitch, so it runs behind the loading overlay
+	 * with the composite parked, rather than as a dropped frame mid-play.
+	 * Turning them off is immediate — nothing has to be built to stop drawing.
+	 */
+	private async setPostFxEnabled(enabled: boolean) {
+		if (this.postFxEnabled === enabled) return;
+		this.postFxEnabled = enabled;
+
+		const pass = this.volumetricFogPass;
+		if (!enabled || !pass) {
+			this.syncVolumetricFogQuality();
+			return;
+		}
+
+		this.postFxTransitioning = true;
+		this.worldLoading.showTask("Enabling effects", "Compiling shaders...");
+		// Two frames: one for the class to land, one for the browser to paint it.
+		// compileAsync still takes the main thread in bursts, so without this the
+		// overlay would never actually show up.
+		await nextFrame();
+		await nextFrame();
+
+		try {
+			this.syncVolumetricFogQuality();
+			this.worldLoading.setProgress(55, "Allocating render targets...");
+			await pass.warmup(this.renderer);
+			// compileAsync links the programs, but some drivers defer real pipeline
+			// creation until the first draw — so pay for it here, not on frame one.
+			this.worldLoading.setProgress(85, "Warming up...");
+			pass.render(
+				this.renderer,
+				this.scene,
+				this.editMode?.isEnabled ? this.editMode.activeCamera : this.camera
+			);
+			this.worldLoading.setProgress(100, "Ready");
+		} finally {
+			this.postFxTransitioning = false;
+			this.worldLoading.hide();
+		}
+	}
+
+	/**
+	 * Screen-space fog on Medium/High; billboard fallback on Low or when the
+	 * user has turned the effects off.
+	 *
+	 * The user's toggle is the master switch and quality only decides how much
+	 * the effects cost. Edit mode suppresses the raymarch without touching
+	 * `postFxEnabled`, so leaving edit mode restores whatever the user chose —
+	 * this method is also called from world switches and edit-mode exit, so it
+	 * must never be the thing that decides the toggle's value.
+	 */
 	private syncVolumetricFogQuality() {
 		const quality = this.graphicsQuality;
 		const pass = this.volumetricFogPass;
 		const billboards = this.volumetricFog;
 		const inEdit = this.sceneProps.mapMode;
+		const wantsFog = this.postFxEnabled && !inEdit;
 
 		if (pass) {
 			pass.setQuality(quality);
-			pass.enabled = !inEdit && quality !== "Low";
+			pass.enabled = wantsFog && quality !== "Low";
+			// Bloom is gated on the user's flag alone: it is cheap relative to the
+			// raymarch, and edit mode already zeroes its strength via NEUTRAL_GRADE,
+			// so tying it to `inEdit` would only churn targets on every entry/exit.
+			pass.setBloomEnabled(this.postFxEnabled);
 		}
 		if (billboards) {
-			billboards.group.visible = !inEdit && quality === "Low";
+			billboards.group.visible =
+				!inEdit && (!this.postFxEnabled || quality === "Low");
 		}
 		if (pass?.enabled && this.scene.fog instanceof THREE.FogExp2) {
 			this.scene.fog.density = this.residualFogDensity;
@@ -3693,7 +4127,9 @@ export class FluffyGrass {
 			heightFalloff: Math.LN2 / 15,
 			sunDirection: sunDir,
 			sunColor: key.color,
-			sunIntensity: Math.min(0.85, key.intensity * 0.16),
+			// Key intensity roughly doubled in the rig retune; scale the coupling
+			// down so haze stays sun-shaped rather than washing the frame.
+			sunIntensity: Math.min(0.85, key.intensity * 0.11),
 			time: timeSec,
 		});
 
@@ -4202,9 +4638,7 @@ export class FluffyGrass {
 				await this.switchWorld(worldId);
 			},
 			listLocalCustomWorlds: () => [...this.customWorldDefs],
-			rebuildEditGrass: () => {
-				this.rebuildActiveEditGrass();
-			},
+			rebuildEditGrass: () => this.rebuildActiveEditGrass(),
 			liftPlayersAboveTerrain: () => {
 				this.liftPlayersAboveTerrain();
 			},
@@ -4285,7 +4719,14 @@ export class FluffyGrass {
 	}
 
 	/** Re-sample grass after undo/redo restores terrain (roads bury blades in place). */
-	private rebuildActiveEditGrass() {
+	/**
+	 * Rebuild the active world's grass after terrain changes.
+	 *
+	 * Returns a promise so the editor can re-apply road / water / cave grass masks
+	 * *after* the new field exists — custom worlds place blades off-thread, and
+	 * masking the outgoing field would leave the replacement unmasked.
+	 */
+	private async rebuildActiveEditGrass(): Promise<void> {
 		const mesh = this.activeWorldDef.kind === "custom"
 			? this.customTerrainMesh
 			: this.currentWorld === "valley"
@@ -4305,14 +4746,19 @@ export class FluffyGrass {
 		if (this.activeWorldDef.kind === "custom") {
 			const heights = this.customHeights;
 			const segs = this.activeWorldDef.segments;
-			this.customGrassField?.dispose();
-			this.customGrassField = this.addGrass(
+			// Off-thread: this runs after every sculpt stroke settles, and rebuilding
+			// up to 1.3M blades on the main thread is the worst stall in edit mode.
+			// Generation guard so rapid strokes only apply the newest result.
+			const generation = ++this.grassBuildGeneration;
+			// addGrassAsync captures the blade budget synchronously, before its first
+			// await, so grassCount can be restored right away rather than left at the
+			// temporary value for the whole off-thread build.
+			const pending = this.addGrassAsync(
 				mesh,
 				this.grassGeometry,
 				group,
 				new THREE.Vector2(1e6, 1e6),
 				0.6,
-				false,
 				{
 					chunkSize: 15,
 					clearPondHole: false,
@@ -4324,8 +4770,23 @@ export class FluffyGrass {
 					terrainSize: this.activeWorldDef.size,
 				}
 			);
-			this.customGrassField.setDensity(this.grassDensity);
-		} else if (this.currentWorld === "valley") {
+			this.grassCount = previousCount;
+			this.grassMaterial.setTerrainSize(this.activeWorldDef.size);
+
+			const field = await pending;
+			if (generation !== this.grassBuildGeneration) {
+				// A newer stroke already superseded this field.
+				field.dispose();
+				return;
+			}
+			// Swap in the same tick the new field is added, so no frame draws both.
+			this.customGrassField?.dispose();
+			this.customGrassField = field;
+			field.setDensity(this.grassDensity);
+			return;
+		}
+
+		if (this.currentWorld === "valley") {
 			this.valleyGrassField?.dispose();
 			this.valleyGrassField = this.addGrass(
 				mesh,
@@ -4367,7 +4828,8 @@ export class FluffyGrass {
 		this.customWorldGroup.add(mesh);
 		mesh.updateMatrixWorld(true);
 		setIslandTerrain(mesh);
-		this.customTerrainHandle = createTerrainHeightfieldCollider(
+		this.customTerrainHandle = createTerrainCollider(
+			mesh,
 			heights,
 			nrows,
 			ncols,
@@ -4376,13 +4838,14 @@ export class FluffyGrass {
 
 		const previousCount = this.grassCount;
 		this.grassCount = grassCountForSize(def.size);
-		this.customGrassField = this.addGrass(
+		// Off-thread so opening a world does not freeze on blade placement.
+		this.grassBuildGeneration++;
+		this.customGrassField = await this.addGrassAsync(
 			mesh,
 			this.grassGeometry,
 			this.customWorldGroup,
 			new THREE.Vector2(1e6, 1e6),
 			0.6,
-			false,
 			{
 				chunkSize: 15,
 				clearPondHole: false,
@@ -4400,6 +4863,9 @@ export class FluffyGrass {
 	}
 
 	private disposeCustomWorld() {
+		// Caves are registered globally for ground queries, so they must go with the
+		// world — otherwise the next world inherits them and leaks their colliders.
+		clearCaves();
 		this.disposeEditorPondsIn(this.customWorldGroup);
 		for (const stone of this.editorStones) stone.dispose();
 		this.editorStones = [];
@@ -4721,6 +5187,7 @@ export class FluffyGrass {
 			this.teleportPlayerToCurrentTerrain(target);
 
 			this.settings.setWorld(target);
+			this.syncWorldUrl(target);
 
 			this.worldLoading.setProgress(100, "Ready");
 			await this.nextFrame();
@@ -4736,6 +5203,7 @@ export class FluffyGrass {
 			this.newWorldGroup.visible = previous === "valley";
 			this.customWorldGroup.visible = previousDef.kind === "custom";
 			this.settings.setWorld(previous);
+			this.syncWorldUrl(previous);
 			const message = error instanceof Error ? error.message : "Unable to load world.";
 			this.worldLoading.showError(message);
 			throw error;
@@ -4850,6 +5318,18 @@ export class FluffyGrass {
 		}
 	}
 
+	/**
+	 * Ground colour a cave mouth fades into: the terrain colour lifted most of the
+	 * way toward the grass tips, which is what the surrounding ground reads as.
+	 */
+	private caveMouthTint(): THREE.Color {
+		const tip = this.grassMaterial.uniforms.tipColor1?.value as
+			| THREE.Color
+			| undefined;
+		const tint = new THREE.Color(this.sceneProps.terrainColor);
+		return tip ? tint.lerp(tip, 0.7) : tint;
+	}
+
 	private applyWorldEnvironment(world: GameWorldId) {
 		const sky = this.scene.getObjectByName("sky-dome");
 		const def = this.knownWorldDefinition(world);
@@ -4903,6 +5383,13 @@ export class FluffyGrass {
 				this.terrainMat.color.set("#3e524e");
 			}
 		}
+		// Cave mouths fade into the ground they open onto, so they follow whatever
+		// colour this world just picked. Biased toward the grass canopy rather than
+		// sceneProps.terrainColor: that value is the soil *under* the blades, and a
+		// mouth blended to it reads as a dark stain next to the green the player
+		// actually sees. Live-tunable via __look.caveMouthTint().
+		setCaveTerrainColor(this.caveMouthTint());
+
 		if (this.sceneProps.mapMode) this.suppressFogForEditMode();
 		else this.syncVolumetricFogQuality();
 	}

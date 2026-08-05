@@ -66,6 +66,17 @@ export type PaintWaterOp = WorldEditOpBase & {
 	};
 };
 
+/**
+ * Carve a cave. Only the tunnel spine is stored — the shell mesh is rebuilt from
+ * these nodes on every client, which is why no randomness may enter the mesher.
+ * This is the 3D counterpart of PaintWaterOp's basin cells: a pond is a height and
+ * fits the terrain grid, a cave is a volume and needs its own primitive.
+ */
+export type PaintCaveOp = WorldEditOpBase & {
+	type: "paint-cave";
+	nodes: Array<{ x: number; y: number; z: number; r: number }>;
+};
+
 export type PlaceMeshOp = WorldEditOpBase & {
 	type: "place-mesh";
 	/** Catalog id — see meshCatalog (tree, stone, stone-stone_smallA, …). */
@@ -125,6 +136,7 @@ export type WorldEditOp =
 	| PlaceMeshOp
 	| PaintRoadOp
 	| PaintWaterOp
+	| PaintCaveOp
 	| PaintForestOp
 	| RebuildColliderOp
 	| DeleteEntityOp

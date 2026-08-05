@@ -15,6 +15,7 @@ const GAME_KEYS = new Set([
 	"KeyT",
 	"KeyH",
 	"KeyF",
+	"ShiftLeft",
 ]);
 
 export class CarInput {
@@ -83,6 +84,7 @@ export class CarInput {
 		a: false,
 		d: false,
 		space: false,
+		shift: false,
 	};
 
 	private onKeyDown = (e: KeyboardEvent) => {
@@ -164,6 +166,7 @@ export class CarInput {
 		this.keys.a = false;
 		this.keys.d = false;
 		this.keys.space = false;
+		this.keys.shift = false;
 		this.grappleHeld = false;
 		this.grappleJustPressed = false;
 		this.grappleDetachPressed = false;
@@ -186,7 +189,14 @@ export class CarInput {
 			case "Space":
 				this.keys.space = val;
 				break;
+			case "ShiftLeft":
+				this.keys.shift = val;
+				break;
 		}
+	}
+
+	isNitroActive(): boolean {
+		return this.keys.shift;
 	}
 
 	applyInput(dt: number) {
@@ -208,7 +218,7 @@ export class CarInput {
 			if (touch.braking) braking = true;
 		}
 
-		const input: DriveInput = { throttle, steer, braking };
+		const input: DriveInput = { throttle, steer, braking, nitro: this.keys.shift };
 		this.controller.applyInput(dt, input);
 	}
 

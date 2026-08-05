@@ -12,6 +12,8 @@ uniform float uHasRefractionMap;
 uniform float uHasDepthMap;
 uniform float uDistortionScale;
 uniform vec3 uSunDirection;
+/** Scene light energy (key colour x intensity + fill). 1,1,1 = full daylight. */
+uniform vec3 uLightColor;
 uniform vec2 uTexelSize;
 uniform vec2 uWaveTiles;
 uniform float uSlopeGain;
@@ -86,7 +88,9 @@ void main() {
   reflectUv += distortion;
   reflectUv = clamp(reflectUv, vec2(0.002), vec2(0.998));
 
-  vec3 reflection = vec3(0.55, 0.75, 0.95);
+  // Fallback sky tint, scaled by light energy — a fixed pale blue here stayed
+  // fully bright at night whenever no reflection map was bound.
+  vec3 reflection = uLightColor * vec3(0.55, 0.75, 0.95);
   if (uHasReflectionMap > 0.5) {
     reflection = texture2D(uReflectionMap, reflectUv).rgb;
   }
@@ -136,15 +140,32 @@ void main() {
   color *= uBrightness;
 
   vec3 halfDir = normalize(viewDir + normalize(uSunDirection));
-  float spec = pow(max(dot(normal, halfDir), 0.0), 220.0);
-  color += vec3(1.0) * spec * 0.45;
+
+  // Widen and fade the lobe with distance. A 220-exponent highlight is far
+  // narrower than a distant pixel covers, so the ripple normals undersample it
+  // into isolated bright specks that flicker as the camera moves — and bloom
+  // then turns each speck into a blinking light. Near water keeps the tight
+  // glint; far water gets a broad, stable one.
+  float viewDist = length(vViewPosition);
+  float farFade = 1.0 - smoothstep(45.0, 160.0, viewDist);
+  float specPower = mix(40.0, 220.0, farFade);
+  float spec = pow(max(dot(normal, halfDir), 0.0), specPower);
+
+  // Scaled by the scene's light energy, not a hardcoded white: a constant
+  // highlight becomes a glowing disc once the night rig gets genuinely dark.
+  color += uLightColor * spec * 0.45 * mix(0.35, 1.0, farFade);
 
   float foam = uHasHeightMap > 0.5
     ? smoothstep(0.04, 0.14, abs(vHeight) + length(normal.xz) * 0.08)
     : 0.0;
 
   float shoreFoam = shoreMask * uShoreFoam;
-  color = mix(color, vec3(0.92, 0.97, 1.0), max(foam * 0.22, shoreFoam));
+  // Foam brightens the water it sits on rather than replacing it with a near
+  // white constant. Blending toward an absolute colour made the shore rim a
+  // free-standing bright ring — brighter than anything around it at night, and
+  // strong enough to bloom into a glowing disc.
+  vec3 foamColor = mix(color * 1.8, uLightColor * vec3(0.92, 0.97, 1.0), 0.45);
+  color = mix(color, foamColor, max(foam * 0.22, shoreFoam));
 
   // Soft alpha falloff at the circular / basin rim (blends into grass).
   float alpha = mix(0.97, 1.0, mixFactor) * shore;

@@ -12,6 +12,7 @@ export type EditTool =
 	| "paint-road"
 	| "place-mesh"
 	| "paint-water"
+	| "paint-cave"
 	| "select";
 
 export type SculptType = "raise" | "lower" | "smooth" | "flatten";
@@ -43,6 +44,14 @@ export type EditModeUIOptions = {
 	onMeshChange: (meshId: EditMeshId) => void;
 	onRoadStyleChange: (style: RoadStyle) => void;
 	onTransformModeChange: (mode: EditTransformMode) => void;
+	/** How far below the local surface tunnel nodes after the mouth are placed. */
+	onCaveDepthChange: (depth: number) => void;
+	/** Carve the pending tunnel spine into a cave. */
+	onCaveFinish: () => void;
+	/** Discard the pending spine. */
+	onCaveCancel: () => void;
+	/** Drop the last placed node. */
+	onCaveUndoNode: () => void;
 	onSave: () => void;
 	/** Create a custom world; sizeKm is 0.1–10. */
 	onCreateWorld: (sizeKm: number) => void;
@@ -75,6 +84,8 @@ export class EditModeUI {
 	private readonly roadPanel: HTMLElement;
 	private readonly cameraPanel: HTMLElement;
 	private readonly selectPanel: HTMLElement;
+	private readonly cavePanel: HTMLElement;
+	private readonly caveCount: HTMLElement;
 	private readonly hint: HTMLElement;
 	private readonly saveBtn: HTMLButtonElement;
 	private readonly undoBtn: HTMLButtonElement;
@@ -141,6 +152,7 @@ export class EditModeUI {
 						<button type="button" data-tool="paint-road" class="edit-asset"><span>Road</span></button>
 						<button type="button" data-tool="place-mesh" class="edit-asset"><span>Meshes</span></button>
 						<button type="button" data-tool="paint-water" class="edit-asset"><span>Water</span></button>
+						<button type="button" data-tool="paint-cave" class="edit-asset"><span>Cave</span></button>
 						<button type="button" data-tool="select" class="edit-asset"><span>Select</span></button>
 					</div>
 				</div>
@@ -164,6 +176,18 @@ export class EditModeUI {
 					<div class="edit-sub-panel" id="edit-road-panel" hidden>
 						<div class="edit-bar-label">Road</div>
 						<button type="button" data-road="mud" class="edit-asset is-active"><span>Light mud</span></button>
+					</div>
+					<div class="edit-sub-panel" id="edit-cave-panel" hidden>
+						<div class="edit-bar-label">Cave</div>
+						<label class="edit-slider">
+							<span>Depth</span>
+							<input type="range" id="edit-cave-depth" min="1.5" max="30" step="0.5" value="6" />
+							<span class="edit-slider-value" id="edit-cave-depth-value">6</span>
+						</label>
+						<div class="edit-cave-count" id="edit-cave-count">0 nodes</div>
+						<button type="button" class="edit-asset edit-save" id="edit-cave-finish"><span>Carve Cave</span></button>
+						<button type="button" class="edit-asset" id="edit-cave-undo-node"><span>Undo Node</span></button>
+						<button type="button" class="edit-asset" id="edit-cave-cancel"><span>Clear</span></button>
 					</div>
 					<div class="edit-sub-panel" id="edit-mesh-panel" hidden>
 						<div class="edit-bar-label">Place</div>
@@ -217,6 +241,8 @@ export class EditModeUI {
 		this.roadPanel = this.root.querySelector("#edit-road-panel")!;
 		this.cameraPanel = this.root.querySelector("#edit-camera-panel")!;
 		this.selectPanel = this.root.querySelector("#edit-select-panel")!;
+		this.cavePanel = this.root.querySelector("#edit-cave-panel")!;
+		this.caveCount = this.root.querySelector("#edit-cave-count")!;
 		this.hint = this.root.querySelector("#edit-mode-hint")!;
 		this.saveBtn = this.root.querySelector("#edit-save-btn")!;
 		this.undoBtn = this.root.querySelector("#edit-undo-btn")!;
@@ -313,6 +339,23 @@ export class EditModeUI {
 				this.setRoadStyle(btn.dataset.road as RoadStyle);
 			});
 		});
+
+		const caveDepth = this.root.querySelector<HTMLInputElement>("#edit-cave-depth")!;
+		const caveDepthValue = this.root.querySelector<HTMLElement>("#edit-cave-depth-value")!;
+		caveDepth.addEventListener("input", () => {
+			const depth = Number(caveDepth.value);
+			caveDepthValue.textContent = depth.toFixed(1);
+			this.options.onCaveDepthChange(depth);
+		});
+		this.cavePanel
+			.querySelector("#edit-cave-finish")!
+			.addEventListener("click", () => this.options.onCaveFinish());
+		this.cavePanel
+			.querySelector("#edit-cave-undo-node")!
+			.addEventListener("click", () => this.options.onCaveUndoNode());
+		this.cavePanel
+			.querySelector("#edit-cave-cancel")!
+			.addEventListener("click", () => this.options.onCaveCancel());
 
 		this.topBar.querySelectorAll<HTMLButtonElement>("[data-sculpt]").forEach((btn) => {
 			btn.addEventListener("click", () => {
@@ -487,6 +530,13 @@ export class EditModeUI {
 		this.hint.textContent = text;
 	}
 
+	/** Pending tunnel spine length, so Carve is only offered once it can succeed. */
+	setCaveNodeCount(count: number) {
+		this.caveCount.textContent = count === 1 ? "1 node" : `${count} nodes`;
+		const finish = this.cavePanel.querySelector<HTMLButtonElement>("#edit-cave-finish");
+		if (finish) finish.disabled = count < 2;
+	}
+
 	setTransformMode(mode: EditTransformMode) {
 		this.transformMode = mode;
 		this.selectPanel.querySelectorAll("[data-xform]").forEach((el) => {
@@ -532,12 +582,15 @@ export class EditModeUI {
 		const showCamera = this.enabled && this.tool === "camera";
 		const showSelect = this.enabled && this.tool === "select";
 		const showSculpt = this.enabled && this.tool === "sculpt";
+		const showCave = this.enabled && this.tool === "paint-cave";
 		const showBrush =
 			this.enabled &&
 			(this.tool === "sculpt" ||
 				this.tool === "paint-road" ||
-				this.tool === "paint-water");
-		const showOptions = showMeshes || showRoad || showCamera || showSelect;
+				this.tool === "paint-water" ||
+				this.tool === "paint-cave");
+		const showOptions =
+			showMeshes || showRoad || showCamera || showSelect || showCave;
 
 		this.meshPanel.hidden = !showMeshes;
 		this.meshPanel.classList.toggle("is-open", showMeshes);
@@ -547,6 +600,8 @@ export class EditModeUI {
 		this.cameraPanel.classList.toggle("is-open", showCamera);
 		this.selectPanel.hidden = !showSelect;
 		this.selectPanel.classList.toggle("is-open", showSelect);
+		this.cavePanel.hidden = !showCave;
+		this.cavePanel.classList.toggle("is-open", showCave);
 		this.topBar.classList.toggle("is-sculpt-active", showSculpt);
 		this.topBar.classList.toggle("is-brush-active", showBrush);
 		this.leftBar.classList.toggle("has-options", showOptions);
@@ -560,9 +615,11 @@ export class EditModeUI {
 			sizeLabel.textContent =
 				this.tool === "paint-water"
 					? "Size"
-					: showSculpt
-						? "Radius"
-						: "Pencil";
+					: this.tool === "paint-cave"
+						? "Tunnel"
+						: showSculpt
+							? "Radius"
+							: "Pencil";
 		}
 	}
 

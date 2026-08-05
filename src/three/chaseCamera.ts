@@ -4,10 +4,52 @@ import type { CarEntity } from "../entities/car/createCar";
 import { getCarGroundForward } from "../entities/car/cameraDrive";
 import type { ChaseCameraInput } from "./chaseCameraInput";
 import type { HumanEntity } from "../entities/human/HumanEntity";
+import { getWorldTerrainY } from "../terrain/islandHeight";
+import { isInsideCave } from "../terrain/caveRegistry";
 
 const CAM_HEIGHT = 2.8;
 const CAM_LOOK_AHEAD = 5;
 const CAM_SMOOTH = 9;
+/** Minimum gap kept between the camera and the terrain surface. */
+const CAM_GROUND_CLEARANCE = 0.6;
+
+/**
+ * Keeps the camera above terrain *after* smoothing.
+ *
+ * Clamping only the lerp target is not enough: the camera reaches the target
+ * asymptotically, so cresting a hill or reversing into a slope leaves the
+ * smoothed position inside the hillside for several frames. The target's height
+ * is also sampled at the target's x/z, which is not where the camera actually
+ * ends up mid-lerp — so the sample has to be retaken at the final position.
+ */
+/**
+ * Ground height to clamp a camera position against.
+ *
+ * Outdoors this is the topmost surface, probed from above every peak. Inside a
+ * cave that surface is the hillside *overhead*, and clamping to it would shove
+ * the camera up through the mountain — so probe downward from the point itself
+ * and clamp against the tunnel floor instead.
+ */
+function cameraGroundY(x: number, y: number, z: number, subjectPos?: THREE.Vector3): number {
+	// If the subject we are following is in a cave, use its height to probe the cave floor,
+	// even if the camera itself has clipped slightly into the rock wall.
+	if (subjectPos && isInsideCave(subjectPos.x, subjectPos.y, subjectPos.z, 2.0)) {
+		return getWorldTerrainY(x, z, subjectPos.y);
+	}
+	if (isInsideCave(x, y, z, 1.2)) return getWorldTerrainY(x, z, y);
+	return getWorldTerrainY(x, z);
+}
+
+function liftAboveTerrain(camera: PerspectiveCamera, subjectPos?: THREE.Vector3): void {
+	const p = camera.position;
+	const inCave = isInsideCave(p.x, p.y, p.z, 1.2) || (subjectPos && isInsideCave(subjectPos.x, subjectPos.y, subjectPos.z, 2.0));
+	const minY = cameraGroundY(p.x, p.y, p.z, subjectPos) + CAM_GROUND_CLEARANCE;
+	if (p.y >= minY) return;
+	// In a tunnel shorter than the clearance, lifting would bury the camera in the
+	// ceiling. Only take the lift while it keeps the camera inside the void.
+	if (inCave && !isInsideCave(p.x, minY, p.z, -0.2)) return;
+	p.y = minY;
+}
 
 const _carPos = new THREE.Vector3();
 const _forward = new THREE.Vector3();
@@ -71,8 +113,12 @@ export function updateChaseCamera(
 		_carPos.z - Math.cos(camYaw) * horizDist
 	);
 
+	const terrainY = cameraGroundY(_targetCam.x, _targetCam.y, _targetCam.z, _carPos);
+	_targetCam.y = Math.max(_targetCam.y, terrainY + 0.5);
+
 	const blend = 1 - Math.exp(-CAM_SMOOTH * dt);
 	camera.position.lerp(_targetCam, blend);
+	liftAboveTerrain(camera, _carPos);
 
 	const lookAheadDist = CAM_LOOK_AHEAD * Math.max(0, Math.cos(input.yaw));
 	_lookAt.copy(_carPos).addScaledVector(_forward, lookAheadDist);
@@ -172,8 +218,17 @@ export function updateHumanCamera(
 		_humanPos.z - Math.cos(camYaw) * horizDist
 	);
 
+	const terrainY = cameraGroundY(
+		_humanTargetCam.x,
+		_humanTargetCam.y,
+		_humanTargetCam.z,
+		_humanPos
+	);
+	_humanTargetCam.y = Math.max(_humanTargetCam.y, terrainY + 0.5);
+
 	const blend = 1 - Math.exp(-CAM_SMOOTH * dt * 1.5);
 	camera.position.lerp(_humanTargetCam, blend);
+	liftAboveTerrain(camera, _humanPos);
 
 	_lookAt.copy(_humanPos);
 	_lookAt.y += 1.2;
