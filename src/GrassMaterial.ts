@@ -74,6 +74,28 @@ export class GrassMaterial {
 		this.setupGrassMaterial(this.material);
 	}
 
+	/**
+	 * Swap blade edges from blending to alpha-to-coverage.
+	 *
+	 * Alpha-tested grass in the transparent queue is a compromise: blending gives
+	 * soft edges, but a field of this many blades cannot be depth-sorted
+	 * meaningfully, so the draw order within the queue is effectively arbitrary.
+	 * When the scene target is multisampled we can do better — move grass to the
+	 * opaque queue, where it sorts front-to-back and depth-writes normally, and
+	 * let per-sample coverage resolve the edges instead of blending.
+	 *
+	 * Gated on the pass's *actual* sample count, not the quality tier: with a
+	 * single sample there is no partial coverage to be had and every blade edge
+	 * would harden to the alpha-test cutoff.
+	 */
+	setAlphaToCoverage(enabled: boolean) {
+		const material = this.material;
+		if (material.alphaToCoverage === enabled) return;
+		material.alphaToCoverage = enabled;
+		material.transparent = !enabled;
+		material.needsUpdate = true;
+	}
+
 	public updateGrassGraphicsChange(high: boolean = true) {
 		if (!high) {
 			this.uniforms.uEnableShadows.value = false;

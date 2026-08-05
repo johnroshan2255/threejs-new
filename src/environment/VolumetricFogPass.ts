@@ -87,11 +87,34 @@ export function fogDensityScaleForHour(hour: number): number {
 }
 
 /**
+ * Bytes of MSAA storage per sample per pixel: RGBA16F colour (8) plus the
+ * DEPTH_COMPONENT24 renderbuffer three allocates alongside it (4).
+ */
+const MSAA_BYTES_PER_SAMPLE_PER_PIXEL = 12;
+
+/**
+ * Ceiling on multisample storage for the scene target.
+ *
+ * The cap is on total bytes rather than on the sample count because this target
+ * is full-res at the canvas pixel ratio: at pixelRatio 2 on a 1080p canvas it is
+ * 3840x2160, which costs ~100 MB *per sample*. Asking for 4x there would want
+ * ~400 MB of renderbuffer — more than everything else in the frame combined.
+ * Budgeting the bytes lets big framebuffers step down to 2x instead of either
+ * falling over or being denied MSAA entirely.
+ */
+const MSAA_BUDGET_BYTES = 192 * 1024 * 1024;
+
+/**
  * The scene's single composite pass.
  *
  * Owns the whole back end of the frame: the scene is rendered into a linear
  * HDR target, bloom is built from it, and one fullscreen blit applies fog
  * in-scattering, bloom, the tone curve, the stylised grade and the sRGB encode.
+ *
+ * The scene target is multisampled, which is the *only* thing antialiasing the
+ * scene — the renderer's own `antialias: true` applies to the default
+ * framebuffer, and the only thing ever drawn there is the composite's
+ * fullscreen quad, which has no interior edges to resolve.
  *
  * Tone mapping lives *here*, not in the materials — `renderer.toneMapping` must
  * stay `NoToneMapping` so values above 1.0 reach the bloom threshold instead of
@@ -116,6 +139,13 @@ export class VolumetricFogPass {
 	private readonly _sunDir = new THREE.Vector3(0.4, 0.8, 0.2);
 	private steps = 24;
 
+	private width = 1;
+	private height = 1;
+	/** Samples the quality tier would like, before the memory budget is applied. */
+	private msaaRequest = 4;
+	/** Samples actually in force on `sceneRT`. */
+	private samples = 0;
+
 	private readonly bloom = new BloomChain();
 	private bloomEnabled = true;
 	private bloomThreshold = 0.75;
@@ -136,6 +166,9 @@ export class VolumetricFogPass {
 			type: THREE.HalfFloatType,
 			minFilter: THREE.LinearFilter,
 			magFilter: THREE.LinearFilter,
+			// Raised by `applySamples` once the real size and quality tier are
+			// known — a 1x1 target has nothing worth multisampling.
+			samples: 0,
 		});
 
 		this.material = new THREE.ShaderMaterial({
@@ -449,13 +482,57 @@ export class VolumetricFogPass {
 		this.material.uniforms.uSteps.value = this.steps;
 		// Fewer, wider mips on lower tiers — the glow stays broad, taps drop.
 		this.bloom.setLevels(quality === "High" ? 5 : quality === "Medium" ? 4 : 3);
+		// Low renders at pixelRatio 0.75, where MSAA storage would be the largest
+		// single allocation in the frame for the tier least able to afford it.
+		this.msaaRequest = quality === "High" ? 4 : quality === "Medium" ? 2 : 0;
+		this.applySamples();
 	}
 
 	setSize(width: number, height: number) {
 		const w = Math.max(1, Math.floor(width));
 		const h = Math.max(1, Math.floor(height));
+		this.width = w;
+		this.height = h;
 		this.sceneRT.setSize(w, h);
 		this.bloom.setSize(w, h);
+		// Resizing changes what the budget affords, so re-decide after the resize.
+		this.applySamples();
+	}
+
+	/**
+	 * MSAA samples in force on the scene target, after the memory budget. 0 means
+	 * the scene is not being antialiased — callers that trade behaviour for
+	 * coverage (alpha-to-coverage on foliage) have to gate on this rather than on
+	 * the quality tier, since the budget can veto what the tier asked for.
+	 */
+	get sceneSamples(): number {
+		return this.samples;
+	}
+
+	private resolveSamples(): number {
+		if (this.msaaRequest < 2) return 0;
+		const perSample =
+			this.width * this.height * MSAA_BYTES_PER_SAMPLE_PER_PIXEL;
+		if (perSample <= 0) return 0;
+		const affordable = Math.floor(MSAA_BUDGET_BYTES / perSample);
+		// Below 2x there is no such thing as partial coverage, so don't pay the
+		// resolve blit for nothing.
+		if (affordable < 2) return 0;
+		return Math.min(this.msaaRequest, affordable >= 4 ? 4 : 2);
+	}
+
+	private applySamples() {
+		const next = this.resolveSamples();
+		if (next === this.samples) return;
+		this.samples = next;
+		this.sceneRT.samples = next;
+		// Assigning `samples` alone does nothing: three only builds a target's GL
+		// objects when it finds none cached, so the existing framebuffer would keep
+		// its old sample count. `dispose()` drops the FBO and renderbuffers while
+		// leaving the JS object (and the attached depth texture) intact, so the next
+		// `setRenderTarget` reallocates at the new count. This is the same mechanism
+		// `setSize` relies on.
+		this.sceneRT.dispose();
 	}
 
 	setParams(p: VolumetricFogFrameParams) {

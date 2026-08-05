@@ -49,6 +49,7 @@ import {
 } from "./entities/human/playerCombat";
 import {
 	createTree,
+	setFoliageAlphaToCoverage,
 	updateFoliageWind,
 	type TreeHandle,
 } from "./entities/tree";
@@ -508,6 +509,10 @@ export class FluffyGrass {
 
 		this.renderer = new THREE.WebGLRenderer({
 			canvas: this.canvas,
+			// Does nothing for the scene: that renders into VolumetricFogPass's
+			// multisampled target, and the only thing drawn to the default
+			// framebuffer is the composite's fullscreen quad. It still covers the
+			// edit-mode dig PIP, which does render the scene straight to the canvas.
 			antialias: true,
 			alpha: true,
 			precision: "highp",
@@ -3998,6 +4003,7 @@ export class FluffyGrass {
 			window.innerHeight * pr
 		);
 		this.syncVolumetricFogQuality();
+		this.syncAlphaToCoverage();
 	}
 
 	/**
@@ -4041,6 +4047,22 @@ export class FluffyGrass {
 			this.postFxTransitioning = false;
 			this.worldLoading.hide();
 		}
+	}
+
+	/**
+	 * Keep alpha-tested vegetation in step with whether the scene target actually
+	 * ended up multisampled.
+	 *
+	 * Driven off the pass's real sample count rather than the quality tier,
+	 * because the pass's memory budget can refuse the samples the tier asked for —
+	 * and alpha-to-coverage with one sample per pixel hardens every cutout edge
+	 * instead of softening it. Called on both quality changes and resizes, since
+	 * either can change the answer.
+	 */
+	private syncAlphaToCoverage() {
+		const multisampled = (this.volumetricFogPass?.sceneSamples ?? 0) > 1;
+		this.grassMaterial.setAlphaToCoverage(multisampled);
+		setFoliageAlphaToCoverage(multisampled, this.scene);
 	}
 
 	/**
@@ -5763,6 +5785,8 @@ export class FluffyGrass {
 			window.innerWidth * pr,
 			window.innerHeight * pr
 		);
+		// A resize can move the target across the MSAA budget in either direction.
+		this.syncAlphaToCoverage();
 	}
 }
 

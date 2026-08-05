@@ -29,6 +29,44 @@ export type FoliageMaterial = CustomShaderMaterial & {
  * Exact foliage material from the douges.dev / CodeSandbox tree demo
  * (three-custom-shader-material + same vertex wind shader).
  */
+/**
+ * Whether foliage created from here uses alpha-to-coverage for its leaf cutouts.
+ *
+ * Unlike grass, foliage is already opaque and alpha-tested, so this only softens
+ * the cutout edges — there is no queue change and nothing to trade. Held as
+ * module state because trees are built per-world: a world switch after the
+ * setting changed must produce materials that already agree with it.
+ */
+let foliageAlphaToCoverage = false;
+
+/**
+ * Point foliage at (or away from) alpha-to-coverage, retuning anything already
+ * built under `root`.
+ *
+ * Traverses rather than keeping a registry of live materials: trees are rebuilt
+ * on every world switch, and a registry would retain the discarded ones — these
+ * materials each hold a compiled program.
+ */
+export function setFoliageAlphaToCoverage(
+	enabled: boolean,
+	root?: THREE.Object3D
+) {
+	foliageAlphaToCoverage = enabled;
+	if (!root) return;
+	root.traverse((object) => {
+		const material = (object as THREE.Mesh).material;
+		if (!material) return;
+		const list = Array.isArray(material) ? material : [material];
+		for (const m of list) {
+			// The uniforms bag is what marks a material as ours.
+			if (!m.userData?.foliageUniforms) continue;
+			if (m.alphaToCoverage === enabled) continue;
+			m.alphaToCoverage = enabled;
+			m.needsUpdate = true;
+		}
+	});
+}
+
 export function createFoliageMaterial(
 	options: FoliageMaterialOptions
 ): FoliageMaterial {
@@ -58,6 +96,7 @@ export function createFoliageMaterial(
 		uniforms,
 		alphaMap,
 		alphaTest: 0.35,
+		alphaToCoverage: foliageAlphaToCoverage,
 		color,
 		side: THREE.FrontSide,
 		shadowSide: THREE.FrontSide,
