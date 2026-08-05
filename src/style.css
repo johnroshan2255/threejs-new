@@ -2581,60 +2581,106 @@ button {
   display: none !important; /* hide text on thumbnails, use tooltip/title */
 }
 
-@media (max-width: 800px) {
-  /* Bottom bar instead of top for easier thumb reach */
-  .edit-top-bar {
-    top: auto !important;
-    bottom: 0 !important;
-    border-bottom: none !important;
-    border-top: 1px solid rgba(163, 217, 119, 0.15) !important;
-  }
-  .edit-top-scroll {
-    overflow-x: auto;
-    padding: 10px;
-    flex-wrap: nowrap !important;
-  }
-  .edit-top-options, .edit-top-actions {
-    flex-shrink: 0;
-  }
-  /* Left bar becomes a floating bottom-left palette or right-side sheet */
-  .edit-left-bar {
-    top: auto !important;
-    bottom: 70px !important;
-    left: 10px !important;
-    right: 10px !important;
-    width: auto !important;
-    height: 250px !important;
-    border-radius: 16px !important;
-    border: 1px solid rgba(163, 217, 119, 0.2) !important;
-    flex-direction: column !important;
-    display: none !important;
-  }
-  .edit-left-bar.is-open {
-    display: flex !important;
-  }
-  .edit-tools-rail {
-    flex-direction: row !important;
-    width: 100% !important;
-    height: auto !important;
-    overflow-x: auto !important;
-    border-right: none !important;
-    border-bottom: 1px solid rgba(255,255,255,0.1) !important;
-  }
-  .edit-tools-scroll {
-    display: flex !important;
-    flex-direction: row !important;
-    gap: 8px !important;
-  }
-  .edit-asset {
-    min-width: 60px;
-    padding: 8px !important;
-    text-align: center;
-  }
-  .edit-asset span {
-    font-size: 11px !important;
-  }
+/* Sidebar Toggle Button for Mobile */
+.edit-mobile-tools-toggle {
+	display: none;
+	position: fixed;
+	top: 10px;
+	left: 10px;
+	z-index: 10010;
+	padding: 10px 15px;
+	background: var(--edit-bg);
+	border: 1px solid var(--edit-border);
+	color: var(--edit-text);
+	border-radius: 8px;
+	font-weight: 600;
+	font-family: var(--edit-font);
+	box-shadow: 0 4px 12px rgba(0,0,0,0.5);
+	cursor: pointer;
 }
+
+@media (max-width: 800px) {
+	.edit-mode-active .edit-mobile-tools-toggle {
+		display: block;
+	}
+
+	.edit-mode-active .edit-top-bar, 
+	.edit-mode-active .edit-left-bar {
+		position: fixed !important;
+		left: 0 !important;
+		right: auto !important;
+		width: 260px !important;
+		border-radius: 0 !important;
+		background: rgba(14, 22, 16, 0.95) !important;
+		transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+		z-index: 10008 !important;
+		border: none !important;
+		border-right: 1px solid rgba(255,255,255,0.05) !important;
+	}
+
+	.edit-mode-active .edit-top-bar {
+		top: 0 !important;
+		bottom: auto !important;
+		height: 40vh !important;
+		padding-top: 60px !important; /* space for toggle button */
+		border-bottom: 1px solid rgba(255,255,255,0.05) !important;
+		display: block !important;
+		overflow-y: auto !important;
+	}
+
+	.edit-mode-active .edit-left-bar {
+		top: 40vh !important;
+		bottom: 0 !important;
+		height: 60vh !important;
+		display: flex !important;
+		flex-direction: column !important;
+		overflow-y: auto !important;
+	}
+
+	/* Stack the top bar tools vertically */
+	.edit-top-scroll {
+		flex-direction: column !important;
+		align-items: stretch !important;
+		width: 100% !important;
+		height: auto !important;
+		overflow-x: hidden !important;
+		padding: 10px !important;
+	}
+
+	.edit-top-options, .edit-top-actions {
+		flex-direction: column !important;
+		align-items: stretch !important;
+		width: 100% !important;
+		margin-left: 0 !important;
+	}
+
+	/* Ensure the tools rail (Camera, Sculpt, etc) is vertical */
+	.edit-tools-rail {
+		flex-direction: column !important;
+		width: 100% !important;
+		height: auto !important;
+		border-right: none !important;
+		border-bottom: 1px solid rgba(255,255,255,0.1) !important;
+	}
+	.edit-tools-scroll {
+		flex-direction: row !important;
+		flex-wrap: wrap !important;
+		gap: 6px !important;
+		padding: 10px !important;
+	}
+	.edit-asset {
+		flex: 1 1 40% !important;
+		padding: 8px !important;
+		text-align: center;
+	}
+
+	/* Hide mechanism */
+	#edit-mode-ui.is-tools-hidden .edit-top-bar,
+	#edit-mode-ui.is-tools-hidden .edit-left-bar {
+		transform: translateX(-100%) !important;
+	}
+}
+
 
 /* =========================================
    CUSTOM SETTINGS MODAL
@@ -2902,6 +2948,20 @@ input:checked + .toggle-slider:before {
 
 /* Responsive Modal */
 @media (max-width: 768px) {
+  .custom-settings-modal {
+    width: 95%;
+    max-height: 85vh;
+    border-radius: 16px;
+  }
+  .custom-settings-header {
+    padding: 15px 20px;
+  }
+  .custom-settings-header h2 {
+    font-size: 1.2rem;
+  }
+  .custom-settings-content {
+    padding: 15px 20px;
+  }
   .custom-settings-body {
     flex-direction: column;
   }
@@ -2912,10 +2972,18 @@ input:checked + .toggle-slider:before {
     border-right: none;
     border-bottom: 1px solid rgba(255,255,255,0.05);
     padding: 0;
+    /* Hide scrollbar for a cleaner premium look */
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .custom-settings-sidebar::-webkit-scrollbar {
+    display: none;
   }
   .custom-settings-sidebar button {
-    padding: 15px 20px;
+    padding: 12px 15px;
+    font-size: 0.8rem;
     white-space: nowrap;
+    flex-shrink: 0;
     border-left: none !important;
     border-bottom: 3px solid transparent !important;
   }
@@ -2930,6 +2998,11 @@ input:checked + .toggle-slider:before {
   .setting-row {
     flex-direction: column;
     align-items: flex-start;
-    gap: 10px;
+    gap: 8px;
+    padding-bottom: 15px;
+    margin-bottom: 15px;
+  }
+  .setting-row select {
+    width: 100%;
   }
 }

@@ -700,7 +700,7 @@ export class FluffyGrass {
 				this.engineSound = new EngineSound();
 				this.hornSound = new HornSound();
 				this.nitroSound = new NitroSound();
-				this.settings.show();
+
 				this.healthHud?.setVisible(true);
 				this.healthHud?.setHp(this.localHp);
 				if (this.carInput) this.carInput.isEnabled = this.activePlayer === "car";
@@ -3910,10 +3910,17 @@ export class FluffyGrass {
 		// Skipped only while the toggle swaps targets — the overlay covers the
 		// held frame, and rendering against a half-built chain would flash.
 		if (!this.postFxTransitioning) {
+			const renderCam = this.editMode?.isEnabled ? this.editMode.activeCamera : this.camera;
 			if (this.postFxEnabled && this.composer) {
+				if (this.composer.passes[0] && (this.composer.passes[0] as any).camera !== renderCam) {
+					(this.composer.passes[0] as any).camera = renderCam;
+				}
+				if (this.composer.passes[1] && (this.composer.passes[1] as any).camera !== renderCam) {
+					(this.composer.passes[1] as any).camera = renderCam;
+				}
 				this.composer.render(dt);
 			} else {
-				this.renderer.render(this.scene, this.camera);
+				this.renderer.render(this.scene, renderCam);
 			}
 
 			if (this.editMode?.isEnabled && this.editMode.isDigging) {

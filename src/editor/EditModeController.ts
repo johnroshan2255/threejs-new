@@ -509,9 +509,9 @@ export class EditModeController {
 			if (remote?.definition.kind === "custom") {
 				this.host.ensureWorldDefinition(remote.definition);
 				this.skipNextBindApply = true;
+				this.enableEditMode(true);
 				await this.host.switchToWorldId(remote.definition.id);
 				await this.applyPublishedDocument(remote.document, { silent: true });
-				this.enableEditMode();
 				return;
 			}
 
@@ -521,8 +521,8 @@ export class EditModeController {
 				this.ui.setWorldPickerError("That world could not be loaded.");
 				return;
 			}
+			this.enableEditMode(true);
 			await this.host.switchToWorldId(local.id);
-			this.enableEditMode();
 		} catch (error) {
 			const message =
 				error instanceof Error ? error.message : "Unable to open world.";
@@ -533,8 +533,8 @@ export class EditModeController {
 
 	private async createAndEnterEditableWorld(sizeKm: number) {
 		try {
+			this.enableEditMode(true);
 			await this.host.createNewLargeWorld(sizeKm);
-			this.enableEditMode();
 		} catch (error) {
 			const message =
 				error instanceof Error ? error.message : "Unable to create world.";
@@ -542,10 +542,10 @@ export class EditModeController {
 		}
 	}
 
-	private enableEditMode() {
+	private enableEditMode(force = false) {
 		const def = this.host.getActiveWorldDefinition();
-		if (def.kind !== "custom") return;
-		if (!this.enabled) this.setEnabled(true);
+		if (!force && def.kind !== "custom") return;
+		if (!this.enabled) this.setEnabled(true, force);
 		this.ui.syncEnabled(true);
 	}
 
@@ -564,8 +564,8 @@ export class EditModeController {
 		}
 	}
 
-	setEnabled(enabled: boolean) {
-		if (enabled && this.host.getActiveWorldDefinition().kind !== "custom") {
+	setEnabled(enabled: boolean, force = false) {
+		if (enabled && !force && this.host.getActiveWorldDefinition().kind !== "custom") {
 			return;
 		}
 		if (this.enabled === enabled) return;

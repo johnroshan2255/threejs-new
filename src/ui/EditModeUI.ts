@@ -76,6 +76,7 @@ export type EditWorldPickerItem = {
 export class EditModeUI {
 	readonly root: HTMLElement;
 	private readonly editBtn: HTMLButtonElement;
+	private readonly toolsToggleBtn: HTMLButtonElement;
 	private readonly topBar: HTMLElement;
 	private readonly leftBar: HTMLElement;
 	private readonly meshPanel: HTMLElement;
@@ -114,6 +115,7 @@ export class EditModeUI {
 		this.root.id = "edit-mode-ui";
 		this.root.innerHTML = `
 			<button type="button" class="edit-mode-toggle" id="edit-mode-toggle" title="Edit Mode">Edit Mode</button>
+			<button type="button" class="edit-mobile-tools-toggle" id="edit-mobile-tools-toggle" title="Toggle Tools">🛠️ Tools</button>
 			<div class="edit-top-bar" id="edit-top-bar" hidden>
 				<div class="edit-top-scroll">
 					<div class="edit-top-options">
@@ -233,6 +235,10 @@ export class EditModeUI {
 
 		document.body.appendChild(this.root);
 		this.editBtn = this.root.querySelector("#edit-mode-toggle")!;
+		this.toolsToggleBtn = this.root.querySelector("#edit-mobile-tools-toggle")!;
+		this.toolsToggleBtn.addEventListener("click", () => {
+			this.root.classList.toggle("is-tools-hidden");
+		});
 		this.topBar = this.root.querySelector("#edit-top-bar")!;
 		this.leftBar = this.root.querySelector("#edit-left-bar")!;
 		this.meshPanel = this.root.querySelector("#edit-mesh-panel")!;
