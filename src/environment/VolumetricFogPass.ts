@@ -1,5 +1,5 @@
 import * as THREE from "three";
-import type { GraphicsQuality } from "../ui/GameSettings";
+import type { QualityLevel } from "../ui/GameSettings";
 import type { WorldDefinition } from "../worlds/worldTypes";
 import { BloomChain } from "./BloomChain";
 
@@ -477,7 +477,7 @@ export class VolumetricFogPass {
 		if (this.bloomEnabled) await this.bloom.warmup(renderer);
 	}
 
-	setQuality(quality: GraphicsQuality) {
+	setQuality(quality: QualityLevel) {
 		this.steps = quality === "High" ? 24 : quality === "Medium" ? 12 : 8;
 		this.material.uniforms.uSteps.value = this.steps;
 		// Fewer, wider mips on lower tiers — the glow stays broad, taps drop.

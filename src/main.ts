@@ -131,7 +131,7 @@ import { LoadingScreenController } from "./ui/LoadingScreenController";
 import {
 	GameSettings,
 	type GameWorldId,
-	type GraphicsQuality,
+	type QualityLevel,
 } from "./ui/GameSettings";
 import { WorldLoadingOverlay } from "./ui/WorldLoadingOverlay";
 import { HealthHud } from "./ui/HealthHud";
@@ -262,7 +262,9 @@ export class FluffyGrass {
 	private customWorldDefs: WorldDefinition[] = [];
 	/** Last GET /api/worlds?mine=1 result — the source of truth for the picker. */
 	private savedWorldList: WorldListItem[] = [];
-	private graphicsQuality: GraphicsQuality = "High";
+	private shadowQuality: QualityLevel = "High";
+	private resolutionQuality: QualityLevel = "High";
+	private waterQuality: QualityLevel = "High";
 	private waterUpdateInterval = 1;
 	private waterFrameCounter = 0;
 	private waterDeltaAccumulator = 0;
@@ -3184,7 +3186,7 @@ export class FluffyGrass {
 		const dt = Math.min(Math.max(frameDt, 0.001), 0.033);
 		this.renderFrameCounter++;
 		if (
-			this.graphicsQuality === "Medium" &&
+			this.resolutionQuality === "Medium" &&
 			this.renderFrameCounter % 6 === 0
 		) {
 			this.renderer.shadowMap.needsUpdate = true;
@@ -3196,7 +3198,7 @@ export class FluffyGrass {
 			const fogCenter = this.fogFollowPlayer
 				? this.car.mesh.position
 				: undefined;
-			const fogUpdateInterval = this.graphicsQuality === "High" ? 2 : 3;
+			const fogUpdateInterval = this.resolutionQuality === "High" ? 2 : 3;
 			if (
 				this.volumetricFog?.group.visible &&
 				this.renderFrameCounter % fogUpdateInterval === 0
@@ -3908,7 +3910,11 @@ export class FluffyGrass {
 		// Skipped only while the toggle swaps targets — the overlay covers the
 		// held frame, and rendering against a half-built chain would flash.
 		if (!this.postFxTransitioning) {
-			this.composer?.render(dt);
+			if (this.postFxEnabled && this.composer) {
+				this.composer.render(dt);
+			} else {
+				this.renderer.render(this.scene, this.camera);
+			}
 
 			if (this.editMode?.isEnabled && this.editMode.isDigging) {
 				const pr = this.renderer.getPixelRatio();
@@ -3959,7 +3965,9 @@ export class FluffyGrass {
 
 	private setupSettings() {
 		this.settings = new GameSettings({
-			quality: "High",
+			shadowQuality: this.shadowQuality,
+			resolutionQuality: this.resolutionQuality,
+			waterQuality: this.waterQuality,
 			postFx: this.postFxEnabled,
 			period: this.dayNightGui.period,
 			autoDayNight: this.dayNightGui.auto,
@@ -3969,7 +3977,9 @@ export class FluffyGrass {
 			carPower: CAR_CONFIG.drive.engineForce,
 			world: this.currentWorld,
 			worldOptions: this.getWorldSelectOptions(),
-			onQualityChange: (quality) => this.applyGraphicsQuality(quality),
+			onShadowQualityChange: (quality) => this.applyShadowQuality(quality),
+			onResolutionQualityChange: (quality) => this.applyResolutionQuality(quality),
+			onWaterQualityChange: (quality) => this.applyWaterQuality(quality),
 			onPostFxChange: (enabled) => void this.setPostFxEnabled(enabled),
 			onPeriodChange: (period) => {
 				this.dayNight?.setPeriod(period);
@@ -3995,34 +4005,39 @@ export class FluffyGrass {
 			},
 			onWorldChange: (world) => this.switchWorld(world),
 		});
-		this.applyGraphicsQuality(this.graphicsQuality);
+		this.applyShadowQuality(this.shadowQuality);
+		this.applyResolutionQuality(this.resolutionQuality);
+		this.applyWaterQuality(this.waterQuality);
 	}
 
-	private applyGraphicsQuality(quality: GraphicsQuality) {
-		this.graphicsQuality = quality;
-		const pixelRatio =
-			quality === "Low" ? 0.75 : quality === "Medium" ? 1 : 2;
+		private applyShadowQuality(quality: QualityLevel) {
+		this.shadowQuality = quality;
 		const shadowsEnabled = quality !== "Low";
-		this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, pixelRatio));
 		this.renderer.shadowMap.enabled = shadowsEnabled;
 		this.renderer.shadowMap.autoUpdate = quality === "High";
 		if (shadowsEnabled) this.renderer.shadowMap.needsUpdate = true;
-		// The shadow box has to span the visible range (200 m) to avoid a moving
-		// cutoff, so resolution carries the crispness: 4096 over 400 m gives
-		// ~0.098 m texels, about what 2048 over 180 m used to.
 		this.dayNight?.setShadowQuality(quality === "High" ? 4096 : 2048, 200);
 		this.grassMaterial.updateGrassGraphicsChange(quality === "High");
+	}
+
+	private applyResolutionQuality(quality: QualityLevel) {
+		this.resolutionQuality = quality;
+		const pixelRatio =
+			quality === "Low" ? 0.75 : quality === "Medium" ? 1 : 2;
+		this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, pixelRatio));
+		this.resizePondTargets();
+		this.composer?.setSize(window.innerWidth, window.innerHeight);
+		this.syncVolumetricFogQuality();
+	}
+
+	private applyWaterQuality(quality: QualityLevel) {
+		this.waterQuality = quality;
 		this.waterUpdateInterval =
 			quality === "Low" ? 4 : quality === "Medium" ? 3 : 2;
 		this.waterFrameCounter = 0;
 		this.waterDeltaAccumulator = 0;
 		this.editorWaterFrameCounter = 0;
 		this.editorWaterDeltaAccumulator = 0;
-		this.resizePondTargets();
-		const pr = this.renderer.getPixelRatio();
-		this.composer?.setSize(window.innerWidth, window.innerHeight);
-		this.syncVolumetricFogQuality();
-		
 	}
 
 	/**
@@ -4033,6 +4048,12 @@ export class FluffyGrass {
 	 */
 	private async setPostFxEnabled(enabled: boolean) {
 		this.postFxEnabled = enabled;
+		if (enabled) {
+			this.renderer.toneMapping = THREE.NoToneMapping;
+		} else {
+			this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+			this.renderer.toneMappingExposure = 1.0;
+		}
 	}
 
 	
@@ -4092,16 +4113,16 @@ export class FluffyGrass {
 
 	private resizePondTargets() {
 		const targetScale =
-			this.graphicsQuality === "Low"
+			this.resolutionQuality === "Low"
 				? 0.4
-				: this.graphicsQuality === "Medium"
+				: this.resolutionQuality === "Medium"
 					? 0.7
 					: 1;
 		const pixelRatio = this.renderer.getPixelRatio();
 		const maxDimension =
-			this.graphicsQuality === "Low"
+			this.resolutionQuality === "Low"
 				? 512
-				: this.graphicsQuality === "Medium"
+				: this.resolutionQuality === "Medium"
 					? 768
 					: 1024;
 		const w = Math.min(
