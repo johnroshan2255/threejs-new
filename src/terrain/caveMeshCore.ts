@@ -6,7 +6,9 @@ import {
 	isMouthColumn,
 	maxCaveRadius,
 	mouthClearance,
-	PUNCH_DILATE,
+	punchDilate,
+	punchOvershoot,
+	terrainCellSize,
 	rockDensity,
 	type CaveBounds,
 	type CaveNode,
@@ -24,8 +26,6 @@ import {
 const TARGET_VOXEL = 0.25;
 /** ~3M samples ≈ 12MB of float scratch and a few hundred ms to mesh. */
 const MAX_SAMPLES = 3_000_000;
-/** How far past the void the mouth region extends, for both punch and shell. */
-export const MOUTH_DILATE = 0.6;
 /**
  * The shell's ground apron sits a hair below the terrain plane.
  *
@@ -33,11 +33,18 @@ export const MOUTH_DILATE = 0.6;
  * boundaries cannot line up exactly. The shell therefore keeps slightly more
  * apron than the terrain gives up (any-vertex vs all-vertices below) which
  * guarantees no crack — and this 2mm sink stops the resulting overlap ring from
- * z-fighting against the coplanar terrain.
+ * z-fighting against the coplanar terrain. Sunk, not raised: a positive offset
+ * turns the overlap into a rock shelf standing proud of the ground.
  */
-const SURFACE_SINK = -0.05;
-/** How far past the void the high-res rock apron extends to cover the terrain hole. */
-const APRON_DILATE = 6.0;
+const SURFACE_SINK = 0.002;
+/**
+ * How far past the void the shell's high-res rock apron extends. It must strictly
+ * contain the terrain hole, so it starts at PUNCH_DILATE and adds a voxel-scale
+ * margin for the two meshes' differing tessellation. Any wider and the apron just
+ * buries hidden triangles under intact terrain.
+ */
+const apronDilate = (punch: number, overshoot: number, voxel: number) =>
+	punch + overshoot + Math.max(2 * voxel, 0.5);
 /**
  * Depth over which the shell fades from terrain colour to rock.
  *
@@ -118,12 +125,18 @@ export function buildCaveMeshData(req: CaveMeshRequest): CaveMeshData | null {
 
 	const maxSamples = req.maxSamples ?? MAX_SAMPLES;
 	let voxel = req.targetVoxel ?? TARGET_VOXEL;
-	let bounds = caveBounds(nodes, cavePadding(nodes, voxel));
+	// The region must reach far enough to emit the apron that covers the terrain
+	// hole; on coarse worlds that apron is much wider than the tunnel itself.
+	const cell = terrainCellSize(req.size, req.nrows, req.ncols);
+	const punch = punchDilate(cell);
+	const overshoot = punchOvershoot(cell);
+	const reach = () => apronDilate(punch, overshoot, voxel);
+	let bounds = caveBounds(nodes, cavePadding(nodes, voxel, reach()));
 	let nx = 0;
 
 	// Coarsen until the region fits the sample budget (huge authored chambers).
 	for (let guard = 0; guard < 24; guard++) {
-		bounds = caveBounds(nodes, cavePadding(nodes, voxel));
+		bounds = caveBounds(nodes, cavePadding(nodes, voxel, reach()));
 		nx = Math.floor((bounds.maxX - bounds.minX) / voxel) + 1;
 		const ny = Math.floor((bounds.maxY - bounds.minY) / voxel) + 1;
 		const nz = Math.floor((bounds.maxZ - bounds.minZ) / voxel) + 1;
@@ -183,6 +196,7 @@ export function buildCaveMeshData(req: CaveMeshRequest): CaveMeshData | null {
 	const corner = new Float64Array(8);
 	const grad = voxel * 0.4;
 	const fadeDepth = blendDepth(nodes);
+	const apron = apronDilate(punch, overshoot, voxel);
 
 	for (let k = 0; k < cnz; k++) {
 		for (let j = 0; j < cny; j++) {
@@ -257,16 +271,16 @@ export function buildCaveMeshData(req: CaveMeshRequest): CaveMeshData | null {
 				onSurface.push(isSurface ? 1 : 0);
 
 				const clearance = mouthClearance(nodes, sampleHeight, wx, wz);
-				inMouth.push(clearance < APRON_DILATE ? 1 : 0);
+				inMouth.push(clearance < apron ? 1 : 0);
 				// Two fades, whichever is weaker: how far below the surface this vertex
-					// sits, and how open its column is. The second is what keeps a tunnel
-					// running shallow under a hillside from greening its ceiling — only rock
-					// near an actual opening picks up ground colour. Taking the min rather
-					// than the product keeps the walk-in gradient gradual instead of
-					// collapsing back to rock within a few centimetres.
-					const depthFade = smoothFade(1 - (surfaceH - wy) / fadeDepth);
-					const openFade = smoothFade((PUNCH_DILATE - clearance) / fadeDepth);
-					terrainBlend.push(isSurface ? 1 : Math.min(depthFade, openFade));
+				// sits, and how open its column is. The second is what keeps a tunnel
+				// running shallow under a hillside from greening its ceiling — only rock
+				// near an actual opening picks up ground colour. Taking the min rather
+				// than the product keeps the walk-in gradient gradual instead of
+				// collapsing back to rock within a few centimetres.
+				const depthFade = smoothFade(1 - (surfaceH - wy) / fadeDepth);
+				const openFade = smoothFade((punch - clearance) / fadeDepth);
+				terrainBlend.push(isSurface ? 1 : Math.min(depthFade, openFade));
 			}
 		}
 	}

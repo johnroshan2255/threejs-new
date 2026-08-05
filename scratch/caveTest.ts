@@ -5,7 +5,12 @@ import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from "three-
 (THREE.Mesh.prototype as any).raycast = acceleratedRaycast;
 
 import { buildCaveGeometry, punchTerrainHoles } from "../src/terrain/caveMesh";
-import { caveDistance, createHeightSampler } from "../src/terrain/caveShape";
+import {
+	caveDistance,
+	createHeightSampler,
+	punchDilate,
+	punchOvershoot,
+} from "../src/terrain/caveShape";
 
 /** Zero-height grid for the flat-ground cases. */
 function flatHeights(segments: number) {
@@ -117,10 +122,14 @@ if (mouthHits.length) {
 const offMouth = new THREE.Vector3(0, 20, 14);
 const offHits = cast(offMouth, new THREE.Vector3(0, -1, 0));
 const nearGround = offHits.filter((h) => Math.abs(h.point.y) < 0.4);
+// The apron reaches under intact terrain by design — it has to, to guarantee it
+// covers whatever the punch removes. It must stay strictly *below* the terrain
+// plane, so the terrain wins the depth test and nothing z-fights.
+const above = nearGround.filter((h) => h.point.y > -0.0005);
 check(
-	"no duplicate terrain surface away from the mouth",
-	nearGround.length === 0,
-	`${nearGround.length} hits near y=0`
+	"no shell surface pokes above the terrain away from the mouth",
+	above.length === 0,
+	`${nearGround.length} hidden apron hits, ${above.length} above the plane`
 );
 
 // ------------------------------------------------------------ lip is welded
@@ -150,11 +159,46 @@ check(
 const terrain = new THREE.PlaneGeometry(100, 100, 200, 200);
 terrain.rotateX(-Math.PI / 2);
 const baseTris = terrain.getIndex()!.count / 3;
-const removed = punchTerrainHoles(terrain, [{ nodes }], flat);
+const removed = punchTerrainHoles(terrain, [{ nodes }], flat, 100 / 200);
 check("punch removed triangles", removed > 0, `${removed} of ${baseTris}`);
 check("punch left the rest intact", terrain.getIndex()!.count / 3 === baseTris - removed);
-// Only the mouth (a ~2m disc near origin) should go, not the whole tunnel run.
-check("punch is tight around the mouth", removed < baseTris * 0.01, `${removed} tris`);
+// The punch must stay proportionate: this spine runs within the mouth dilate of
+// the surface for its first ~8m, so a strip of that length is correct — but it
+// must not spill into the rest of the 100x100 world. The bound has loosened twice
+// on purpose: the region's bounding box no longer clips the hole, and triangles
+// now go on an any-corner rule plus a 0.5m setback so nothing juts into the mouth.
+check("punch is tight around the mouth", removed < baseTris * 0.025, `${removed} tris`);
+
+// The invariant the shell's apron depends on: every removed triangle sat wholly
+// inside the mouth region. If one reaches past it, the apron cannot cover the
+// hole and you see daylight through the ground.
+{
+	const base = terrain.userData.caveBaseIndex as Uint32Array;
+	const live = terrain.getIndex()!;
+	const p = terrain.attributes.position as THREE.BufferAttribute;
+	const kept = new Set<string>();
+	for (let t = 0; t < live.count; t += 3) {
+		kept.add(`${live.getX(t)},${live.getX(t + 1)},${live.getX(t + 2)}`);
+	}
+	const dilate = punchDilate(100 / 200);
+	let worst = 0;
+	for (let t = 0; t < base.length; t += 3) {
+		if (kept.has(`${base[t]},${base[t + 1]},${base[t + 2]}`)) continue;
+		for (const vi of [base[t]!, base[t + 1]!, base[t + 2]!]) {
+			const d = caveDistance(nodes, p.getX(vi), flat() - 0.15, p.getZ(vi));
+			worst = Math.max(worst, d);
+		}
+	}
+	// Triangles go on an any-corner rule (so no shard is left across the opening),
+	// so corners may sit outside the region — but never further out than the apron
+	// is built to cover, or that overhang is a hole with nothing behind it.
+	const covered = dilate + punchOvershoot(100 / 200);
+	check(
+		"punched terrain never reaches past the apron's cover",
+		worst <= covered,
+		`worst corner ${worst.toFixed(2)}m vs covered to ${covered.toFixed(2)}m`
+	);
+}
 
 // ------------------------------------------- no daylight gap at the seam
 // The strongest seam test: over the whole mouth neighbourhood, punched terrain
@@ -228,7 +272,7 @@ for (const [label, worldSize, segments] of [
 	];
 	const plane = new THREE.PlaneGeometry(worldSize, worldSize, segments, segments);
 	plane.rotateX(-Math.PI / 2);
-	const cut = punchTerrainHoles(plane, [{ nodes: spine }], flat);
+	const cut = punchTerrainHoles(plane, [{ nodes: spine }], flat, cell);
 	check(`${label}: mouth opens (cell ${cell.toFixed(1)}m, r ${r.toFixed(1)}m)`, cut > 0, `${cut} tris`);
 
 	const shell = buildCaveGeometry({

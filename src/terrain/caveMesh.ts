@@ -2,13 +2,12 @@ import * as THREE from "three";
 import {
 	isMouthColumn,
 	maxCaveRadius,
-	PUNCH_DILATE,
+	punchDilate,
 	type CaveSpec,
 	type HeightSampler,
 } from "./caveShape";
 import {
 	buildCaveMeshData,
-	MOUTH_DILATE,
 	type CaveMeshData,
 	type CaveMeshRequest,
 } from "./caveMeshCore";
@@ -62,7 +61,9 @@ export function buildCaveGeometry(req: CaveMeshRequest): CaveGeometryResult | nu
 export function punchTerrainHoles(
 	geometry: THREE.BufferGeometry,
 	caves: CaveSpec[],
-	sampleHeight: HeightSampler
+	sampleHeight: HeightSampler,
+	/** Terrain cell size — sets how wide a mouth must be to clear a whole triangle. */
+	cellSize = 0
 ): number {
 	const base = ensureBaseIndex(geometry);
 	if (!base) return 0;
@@ -78,8 +79,11 @@ export function punchTerrainHoles(
 
 	// Terrain has ~129k triangles at stock resolution, so reject on a flat XZ box
 	// before evaluating any SDF — otherwise every re-punch walks the whole spine.
+	const dilate = punchDilate(cellSize);
 	const regions = active.map((cave) => {
-		const pad = maxCaveRadius(cave.nodes) + 1.5;
+		// Pad to the region the SDF test actually accepts (plus the noise amplitude),
+		// or the box quietly clips the hole before the test ever runs.
+		const pad = maxCaveRadius(cave.nodes) + dilate + 1.1;
 		let minX = Infinity;
 		let maxX = -Infinity;
 		let minZ = Infinity;
@@ -105,12 +109,14 @@ export function punchTerrainHoles(
 		const i0 = base[t]!;
 		const i1 = base[t + 1]!;
 		const i2 = base[t + 2]!;
-		// Remove a triangle only when ALL THREE corners lie in the mouth region. The
-		// shell keeps apron on an any-corner rule, so its coverage strictly contains
-		// this hole and the seam cannot open a gap.
+		// Remove a triangle when ANY corner is in the mouth region, so no shard of
+		// terrain is left jutting across the opening. That lets a triangle reach up to
+		// a cell diagonal past the region, which is exactly what the shell's apron is
+		// sized to cover (see punchOvershoot) — without that pairing this rule is what
+		// shows daylight through the ground beside a cave.
 		let punch = false;
 		for (const region of regions) {
-			let anyInside = false;
+			let hit = false;
 			for (const vi of [i0, i1, i2]) {
 				const vx = position.getX(vi);
 				const vz = position.getZ(vi);
@@ -119,26 +125,25 @@ export function punchTerrainHoles(
 					vx <= region.maxX &&
 					vz >= region.minZ &&
 					vz <= region.maxZ &&
-					isMouthColumn(region.nodes, sampleHeight, vx, vz, PUNCH_DILATE)
+					isMouthColumn(region.nodes, sampleHeight, vx, vz, dilate)
 				) {
-					anyInside = true;
+					hit = true;
 					break;
 				}
 			}
-			if (!anyInside) {
+			if (!hit) {
+				// A coarse grid can span the whole mouth with one triangle, every corner
+				// of it outside the region. Without this the mouth stays capped.
 				const cx = (position.getX(i0) + position.getX(i1) + position.getX(i2)) / 3;
 				const cz = (position.getZ(i0) + position.getZ(i1) + position.getZ(i2)) / 3;
-				if (
+				hit =
 					cx >= region.minX &&
 					cx <= region.maxX &&
 					cz >= region.minZ &&
 					cz <= region.maxZ &&
-					isMouthColumn(region.nodes, sampleHeight, cx, cz, PUNCH_DILATE)
-				) {
-					anyInside = true;
-				}
+					isMouthColumn(region.nodes, sampleHeight, cx, cz, dilate);
 			}
-			if (anyInside) {
+			if (hit) {
 				punch = true;
 				break;
 			}

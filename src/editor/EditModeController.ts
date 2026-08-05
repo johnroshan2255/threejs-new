@@ -21,6 +21,7 @@ import type { TerrainColliderHandle } from "../physics/terrainCollider";
 import {
 	caveMouthMaskCircles,
 	createHeightSampler,
+	terrainCellSize,
 	type CaveNode,
 } from "../terrain/caveShape";
 import { createTerrainCollider } from "../physics/terrainCollider";
@@ -1408,7 +1409,13 @@ export class EditModeController {
 				// Same spine-wide mouth region the carve path clears. Anything narrower
 				// here quietly re-covers far-side exits every time grass is rebuilt.
 				if (sampleHeight) {
-					grass.maskCircles(caveMouthMaskCircles(op.nodes, sampleHeight));
+					grass.maskCircles(
+						caveMouthMaskCircles(
+							op.nodes,
+							sampleHeight,
+							terrainCellSize(target!.size, target!.nrows, target!.ncols)
+						)
+					);
 				}
 			} else if (op.type === "paint-water" && op.createSurface) {
 				const r =

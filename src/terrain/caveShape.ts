@@ -154,8 +154,12 @@ export function maxCaveRadius(nodes: CaveNode[]): number {
  * the shell fully caps tunnel ends — an unsealed end would let players fall out
  * of the mesh into empty space.
  */
-export function cavePadding(nodes: CaveNode[], voxel: number): number {
-	return maxCaveRadius(nodes) + voxel * 4 + 0.6 + 1.1;
+export function cavePadding(
+	nodes: CaveNode[],
+	voxel: number,
+	reach = 0
+): number {
+	return maxCaveRadius(nodes) + voxel * 4 + 0.6 + 1.1 + reach;
 }
 
 export type CaveBounds = {
@@ -217,6 +221,53 @@ export function rockDensity(
  * and a ramp cut where no hole was punched is a sinkhole to nowhere.
  */
 export const PUNCH_DILATE = 3.0;
+
+/** Widest terrain cell in a heightfield grid. */
+export function terrainCellSize(size: number, nrows: number, ncols: number) {
+	return Math.max(size / Math.max(1, nrows), size / Math.max(1, ncols));
+}
+
+/**
+ * Effective mouth width for a given terrain resolution.
+ *
+ * The punch drops whole triangles, so on a coarse grid the region has to be wide
+ * enough to contain one outright or the mouth never opens — a 1km world has ~4m
+ * cells, wider than a typical tunnel. Scaling here rather than loosening the
+ * all-corners rule keeps the hole inside the region, which is what the shell's
+ * apron relies on to cover it.
+ */
+export function punchDilate(cell: number) {
+	return Math.max(PUNCH_DILATE, cell * 1.2) + MOUTH_SETBACK;
+}
+
+/**
+ * Extra clearance so no terrain triangle juts across the opening.
+ *
+ * The punch drops whole triangles, so the terrain edge lands wherever the grid
+ * falls — routinely with a corner poking into the mouth, which reads as a shard
+ * of ground floating in front of the entrance. Half a metre of setback keeps the
+ * opening clear. The shell's apron widens with it, so the extra ground is
+ * covered by rock rather than opened up.
+ */
+export const MOUTH_SETBACK = 0.5;
+
+/**
+ * How far a removed triangle can reach beyond the mouth region.
+ *
+ * Triangles go when any corner (or the centroid) is inside, so the far corners
+ * can sit up to a cell diagonal outside it. The apron must cover at least this
+ * much past the region or that overhang is a hole with nothing behind it.
+ */
+export function punchOvershoot(cell: number) {
+	return cell * Math.SQRT2 + CAVE_NOISE_AMPLITUDE;
+}
+
+/**
+ * Peak swing of {@link caveNoise}. The mouth region is thresholded on a noised
+ * distance, so its boundary wiggles by this much in world space — margins derived
+ * from the region have to allow for it or they come up short in the troughs.
+ */
+export const CAVE_NOISE_AMPLITUDE = 0.6 + 0.3 + 0.15;
 
 /**
  * True where the cave void breaks (or nearly breaks) the terrain surface.
@@ -345,11 +396,13 @@ export function caveMouthRuns(
  */
 export function caveMouthMaskCircles(
 	nodes: CaveNode[],
-	sampleHeight: HeightSampler
+	sampleHeight: HeightSampler,
+	cellSize = 0
 ): { x: number; z: number; radius: number }[] {
-	return caveMouthRuns(sampleCaveSpine(nodes, sampleHeight), PUNCH_DILATE)
+	const dilate = punchDilate(cellSize);
+	return caveMouthRuns(sampleCaveSpine(nodes, sampleHeight), dilate)
 		.flat()
-		.map((m) => ({ x: m.x, z: m.z, radius: m.r + PUNCH_DILATE }));
+		.map((m) => ({ x: m.x, z: m.z, radius: m.r + dilate }));
 }
 
 /** The most open point of a run — where an entrance ramp belongs. */

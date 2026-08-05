@@ -37,7 +37,11 @@ import type { WorldEditOp } from "./types";
 import { resolveEditMesh } from "./meshCatalog";
 import { createCave, type CaveHandle } from "../entities/cave/createCave";
 import { punchTerrainHoles, restoreTerrainHoles } from "../terrain/caveMesh";
-import { caveMouthMaskCircles, createHeightSampler } from "../terrain/caveShape";
+import {
+	caveMouthMaskCircles,
+	createHeightSampler,
+	terrainCellSize,
+} from "../terrain/caveShape";
 import { getCaveSpecs, hasCaves } from "../terrain/caveRegistry";
 
 /** Default dig radius when placing water on flat ground. */
@@ -363,7 +367,8 @@ export class EditApplier {
 								target.nrows,
 								target.ncols,
 								target.size
-							)
+							),
+							terrainCellSize(target.size, target.nrows, target.ncols)
 						)
 					);
 				}
@@ -777,7 +782,8 @@ export class EditApplier {
 					target.nrows,
 					target.ncols,
 					target.size
-				)
+				),
+				terrainCellSize(target.size, target.nrows, target.ncols)
 			);
 		}
 		setIslandTerrain(mesh);

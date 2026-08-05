@@ -3,8 +3,9 @@ import {
 	caveMouthRuns,
 	createHeightSampler,
 	mouthAnchor,
-	PUNCH_DILATE,
+	punchDilate,
 	sampleCaveSpine,
+	terrainCellSize,
 	type CaveNode,
 } from "../terrain/caveShape";
 
@@ -351,7 +352,10 @@ export function sculptCaveMouths(target: TerrainSculptTarget, nodes: CaveNode[])
 	// Measured against the pre-sculpt heightfield, so a ramp cut at one mouth
 	// cannot drag a neighbouring column into looking like a mouth of its own.
 	const sampleHeight = createHeightSampler(heights, nrows, ncols, size);
-	const runs = caveMouthRuns(sampleCaveSpine(nodes, sampleHeight), PUNCH_DILATE);
+	const runs = caveMouthRuns(
+		sampleCaveSpine(nodes, sampleHeight),
+		punchDilate(terrainCellSize(size, nrows, ncols))
+	);
 	for (const run of runs) processMouth(mouthAnchor(run));
 
 	positions.needsUpdate = true;
