@@ -108,7 +108,7 @@ import { setCharacterAlbedo } from "./entities/human/toonCharacter";
 import { SmokeTrailSystem } from "./environment/smokeTrail";
 import { ExplosionSystem } from "./environment/ExplosionSystem";
 import { NitroSystem } from "./environment/NitroSystem";
-import { createFireflies, type Fireflies } from "./environment/fireflies";
+
 import { BombSound } from "./audio/BombSound";
 import { HornSound } from "./audio/HornSound";
 import { NitroSound } from "./audio/NitroSound";

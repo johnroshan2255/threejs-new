@@ -22,6 +22,8 @@ export type CarEntity = {
 	grappleMountLocal: THREE.Vector3;
 	fpvInterior?: THREE.Group;
 	health: number;
+	maxHealth?: number;
+	isDestroyed?: boolean;
 	timeSinceDestroyed: number;
 	hasExploded: boolean;
 	leftExhaust: THREE.Object3D;
