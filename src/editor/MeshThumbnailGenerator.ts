@@ -1,10 +1,11 @@
 import * as THREE from "three";
+import { WebGPURenderer } from "three/webgpu";
 import { createTree } from "../entities/tree";
 import { placeStone } from "../entities/stone/placeStone";
 import { resolveEditMesh } from "./meshCatalog";
 
 const thumbnailCache = new Map<string, string>();
-let generatorRenderer: THREE.WebGLRenderer | null = null;
+let generatorRenderer: WebGPURenderer | null = null;
 let generatorScene: THREE.Scene | null = null;
 let generatorCamera: THREE.PerspectiveCamera | null = null;
 
@@ -17,11 +18,10 @@ export async function generateMeshThumbnail(meshId: string): Promise<string> {
 		const canvas = document.createElement("canvas");
 		canvas.width = 128;
 		canvas.height = 128;
-		generatorRenderer = new THREE.WebGLRenderer({
+		generatorRenderer = new WebGPURenderer({
 			canvas,
 			alpha: true,
 			antialias: true,
-			preserveDrawingBuffer: true,
 		});
 		generatorRenderer.outputColorSpace = THREE.SRGBColorSpace;
 		generatorRenderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -81,7 +81,7 @@ export async function generateMeshThumbnail(meshId: string): Promise<string> {
 	generatorCamera!.position.set(center.x + cameraZ * 0.6, center.y + cameraZ * 0.4, center.z + cameraZ);
 	generatorCamera!.lookAt(center);
 
-	generatorRenderer!.render(generatorScene!, generatorCamera!);
+	await generatorRenderer!.renderAsync(generatorScene!, generatorCamera!);
 	const dataUrl = generatorRenderer!.domElement.toDataURL("image/png");
 
 	generatorScene!.remove(meshObj);

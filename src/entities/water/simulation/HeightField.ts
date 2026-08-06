@@ -6,8 +6,7 @@ import {
   NoColorSpace,
   RGBAFormat,
   type Texture,
-  type WebGLRenderTarget,
-  type WebGLRenderer,
+  type RenderTarget,
 } from 'three';
 import { RenderTargets } from '../core/RenderTargets';
 
@@ -21,8 +20,8 @@ export class HeightField {
   readonly resolution: number;
 
   private readonly renderTargets: RenderTargets;
-  private readTarget: WebGLRenderTarget | null = null;
-  private writeTarget: WebGLRenderTarget | null = null;
+  private readTarget: RenderTarget | null = null;
+  private writeTarget: RenderTarget | null = null;
   private readonly _clearColor = new Color();
 
   constructor(resolution: number, renderTargets: RenderTargets = new RenderTargets()) {
@@ -57,7 +56,7 @@ export class HeightField {
   }
 
   /** Clear both buffers to a flat surface. */
-  clear(renderer: WebGLRenderer): void {
+  clear(renderer: any): void {
     if (!this.readTarget || !this.writeTarget) {
       return;
     }
@@ -81,12 +80,12 @@ export class HeightField {
     return this.readTarget ? RenderTargets.texture(this.readTarget) : null;
   }
 
-  get read(): WebGLRenderTarget | null {
+  get read(): RenderTarget | null {
     return this.readTarget;
   }
 
   /** Target that the next simulation pass should write into. */
-  get write(): WebGLRenderTarget | null {
+  get write(): RenderTarget | null {
     return this.writeTarget;
   }
 

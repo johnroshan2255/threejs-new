@@ -499,174 +499,26 @@ function sampleAtHour(hour: number, out: Sampled): Sampled {
 }
 
 function createSkyMaterial() {
-	return new THREE.ShaderMaterial({
-		side: THREE.BackSide,
-		depthWrite: false,
-		fog: false,
-		uniforms: {
-			uSunDir: { value: new THREE.Vector3(0, 1, 0) },
-			uMoonDir: { value: new THREE.Vector3(0, -1, 0) },
-			uZenith: { value: new THREE.Color("#4aa0e0") },
-			uHorizon: { value: new THREE.Color("#c8e4f5") },
-			uSunColor: { value: new THREE.Color("#fff5e0") },
-			uMoonColor: { value: new THREE.Color("#c4d4ff") },
-			uSunGlow: { value: 1 },
-			uSunIntensity: { value: 1 },
-			uMoonIntensity: { value: 0 },
-			uTime: { value: 0 },
-			uCloudCoverage: { value: 0.45 },
-			uCloudOpacity: { value: 0.85 },
-			uCloudLight: { value: new THREE.Color("#ffffff") },
-			uCloudDark: { value: new THREE.Color("#c6d6ea") },
-			/** Larger = smaller, more numerous clouds. */
-			uCloudScale: { value: 0.65 },
-			uCloudSpeed: { value: 1 },
-		},
-		vertexShader: /* glsl */ `
-			varying vec3 vDir;
-			void main() {
-				// Direction from the dome's own centre, not from the world origin, so
-				// the dome can be re-centred on the camera each frame without the sky
-				// sliding as the player walks.
-				vDir = normalize(position);
-				gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-			}
-		`,
-		fragmentShader: /* glsl */ `
-			uniform vec3 uSunDir;
-			uniform vec3 uMoonDir;
-			uniform vec3 uZenith;
-			uniform vec3 uHorizon;
-			uniform vec3 uSunColor;
-			uniform vec3 uMoonColor;
-			uniform float uSunGlow;
-			uniform float uSunIntensity;
-			uniform float uMoonIntensity;
-			uniform float uTime;
-			uniform float uCloudCoverage;
-			uniform float uCloudOpacity;
-			uniform vec3 uCloudLight;
-			uniform vec3 uCloudDark;
-			uniform float uCloudScale;
-			uniform float uCloudSpeed;
-			varying vec3 vDir;
-
-			float hash21(vec2 p) {
-				p = fract(p * vec2(123.34, 456.21));
-				p += dot(p, p + 45.32);
-				return fract(p.x * p.y);
-			}
-
-			float vnoise(vec2 p) {
-				vec2 i = floor(p);
-				vec2 f = fract(p);
-				f = f * f * (3.0 - 2.0 * f);
-				float a = hash21(i);
-				float b = hash21(i + vec2(1.0, 0.0));
-				float c = hash21(i + vec2(0.0, 1.0));
-				float d = hash21(i + vec2(1.0, 1.0));
-				return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
-			}
-
-			/** 4 octaves — enough for billowy shapes without a heavy sky pass. */
-			float fbm(vec2 p) {
-				float v = 0.0;
-				float a = 0.5;
-				for (int i = 0; i < 4; i++) {
-					v += a * vnoise(p);
-					p = p * 2.02 + vec2(17.3, 9.1);
-					a *= 0.5;
-				}
-				return v;
-			}
-
-			void main() {
-				vec3 dir = normalize(vDir);
-				vec3 sun = normalize(uSunDir);
-				vec3 moon = normalize(uMoonDir);
-
-				float elev = dir.y;
-				float hMix = smoothstep(-0.1, 0.7, elev);
-				vec3 sky = mix(uHorizon, uZenith, hMix);
-
-				float sunElev = sun.y;
-				// Only kick in strong warm glow when the sun is near the horizon
-				float lowSun = smoothstep(0.28, 0.02, sunElev);
-				float sunDot = max(dot(dir, sun), 0.0);
-
-				vec3 dirFlat = normalize(vec3(dir.x, 0.001, dir.z));
-				vec3 sunFlat = normalize(vec3(sun.x, 0.001, sun.z));
-				// Tight azimuth around the sun — stops a fire band across the sky
-				float towardSun = pow(max(dot(dirFlat, sunFlat), 0.0), 8.0);
-				float horizonArc = exp(-abs(elev - max(sunElev, 0.0)) * 16.0);
-				float sunHalo = pow(sunDot, 32.0) * uSunGlow;
-				float mie = pow(sunDot, 14.0) * uSunGlow * 0.18;
-				float warm =
-					(horizonArc * towardSun * 0.35 + sunHalo + mie) *
-					lowSun *
-					clamp(uSunGlow, 0.0, 2.0);
-				sky += uSunColor * warm * 0.55;
-
-				// Soft pale rim for evening (high sun) — tiny, not orange wash
-				float dayGlow = pow(sunDot, 48.0) * uSunGlow * (1.0 - lowSun);
-				sky += mix(uSunColor, vec3(1.0), 0.5) * dayGlow * 0.35;
-
-				// Bright sun disc (single — no extra mesh orb)
-				float disc = smoothstep(0.9994, 0.9999, sunDot) * step(-0.05, sunElev);
-				sky += mix(uSunColor, vec3(1.0, 0.97, 0.9), 0.75) * disc * (1.8 + uSunGlow * 0.25);
-
-				// Soft moon at night
-				float moonDot = max(dot(dir, moon), 0.0);
-				float moonDisc = smoothstep(0.9988, 0.9996, moonDot) * uMoonIntensity;
-				sky += uMoonColor * moonDisc * 1.4;
-				sky += uMoonColor * pow(moonDot, 40.0) * uMoonIntensity * 0.25;
-
-				// ---- Clouds -------------------------------------------------------
-				// Projected onto a virtual flat plane overhead: dividing by dir.y is
-				// what makes them converge and flatten toward the horizon instead of
-				// wrapping the dome like wallpaper.
-				float cloudFade = smoothstep(0.015, 0.20, elev);
-				if (cloudFade > 0.001 && uCloudOpacity > 0.001) {
-					vec2 cuv = (dir.xz / max(elev, 0.06)) * uCloudScale;
-					vec2 drift = vec2(uTime * 0.0075, uTime * 0.003) * uCloudSpeed;
-
-					// Domain warp — straight FBM gives soft blobs; warping it gives the
-					// curled, billowed silhouette that reads as cumulus.
-					vec2 w = vec2(
-						fbm(cuv * 0.5 + drift),
-						fbm(cuv * 0.5 + drift + 3.7)
-					) - 0.5;
-					float n = fbm(cuv + drift + w * 1.35);
-
-					float thresh = 1.0 - uCloudCoverage;
-					float cov = smoothstep(thresh, thresh + 0.22, n);
-					float density = cov * cloudFade * uCloudOpacity;
-
-					if (density > 0.001) {
-						// Thickness proxy: deeper into the cloud reads as lit top,
-						// thin edges stay dark, which fakes self-shadowing cheaply.
-						vec3 cloudCol = mix(uCloudDark, uCloudLight, smoothstep(0.30, 0.85, n));
-
-						// Sun-side scattering plus a bright rim on thin edges — the
-						// silver lining that sells a stylised sky.
-						float sunAmt = pow(max(dot(dir, sun), 0.0), 3.0);
-						float rim = smoothstep(0.6, 0.15, cov) * sunAmt;
-						float sunScale = clamp(uSunIntensity / 3.0, 0.0, 1.2);
-						cloudCol += uSunColor * (sunAmt * 0.30 + rim * 0.85) * sunScale;
-
-						// Moonlit edges at night.
-						float moonAmt = pow(max(dot(dir, moon), 0.0), 4.0);
-						cloudCol += uMoonColor * moonAmt * uMoonIntensity * 0.18;
-
-						// Drawn last so clouds occlude the sun and moon discs.
-						sky = mix(sky, cloudCol, clamp(density, 0.0, 1.0));
-					}
-				}
-
-				gl_FragColor = vec4(sky, 1.0);
-			}
-		`,
-	});
+	const mat = new THREE.MeshBasicMaterial({ color: "#4aa0e0", side: THREE.BackSide, depthWrite: false, fog: false }) as any;
+	mat.uniforms = {
+		uSunDir: { value: new THREE.Vector3(0, 1, 0) },
+		uMoonDir: { value: new THREE.Vector3(0, -1, 0) },
+		uZenith: { value: new THREE.Color("#4aa0e0") },
+		uHorizon: { value: new THREE.Color("#c8e4f5") },
+		uSunColor: { value: new THREE.Color("#fff5e0") },
+		uMoonColor: { value: new THREE.Color("#c4d4ff") },
+		uSunGlow: { value: 1 },
+		uSunIntensity: { value: 1 },
+		uMoonIntensity: { value: 0 },
+		uTime: { value: 0 },
+		uCloudCoverage: { value: 0.45 },
+		uCloudOpacity: { value: 0.85 },
+		uCloudLight: { value: new THREE.Color("#ffffff") },
+		uCloudDark: { value: new THREE.Color("#c6d6ea") },
+		uCloudScale: { value: 0.65 },
+		uCloudSpeed: { value: 1 }
+	};
+	return mat;
 }
 
 export type DayNightCycle = {

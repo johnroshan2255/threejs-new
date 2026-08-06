@@ -49,30 +49,7 @@ function rockMaterial(): THREE.MeshPhongMaterial {
 			side: THREE.DoubleSide,
 		});
 		sharedRockMaterial.name = "cave-rock";
-		sharedRockMaterial.onBeforeCompile = (shader) => {
-			shader.uniforms.uTerrainColor = terrainTint;
-			shader.vertexShader = shader.vertexShader.replace(
-				"void main() {",
-				`attribute float aTerrainBlend;
-varying float vTerrainBlend;
-void main() {
-	vTerrainBlend = aTerrainBlend;`
-			);
-			shader.fragmentShader = shader.fragmentShader
-				.replace(
-					"void main() {",
-					`uniform vec3 uTerrainColor;
-varying float vTerrainBlend;
-void main() {`
-				)
-				// After <color_fragment>, diffuseColor holds the final albedo — tint it
-				// there so lighting still runs over the blended colour.
-				.replace(
-					"#include <color_fragment>",
-					`#include <color_fragment>
-	diffuseColor.rgb = mix(diffuseColor.rgb, uTerrainColor, clamp(vTerrainBlend, 0.0, 1.0));`
-				);
-		};
+		// onBeforeCompile terrain blend temporarily disabled for WebGPU migration
 	}
 	return sharedRockMaterial;
 }

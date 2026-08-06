@@ -13,7 +13,7 @@ import * as THREE from "three";
  */
 export class BloomChain {
 	/** Half-res and down. Index 0 is the largest, and holds the final result. */
-	private mips: THREE.WebGLRenderTarget[] = [];
+	private mips: THREE.RenderTarget[] = [];
 	private levels = 5;
 	private width = 1;
 	private height = 1;
@@ -215,7 +215,7 @@ export class BloomChain {
 	 * material is swapped per stage, so each one has to be compiled separately —
 	 * `compileAsync` only sees what is currently assigned.
 	 */
-	async warmup(renderer: THREE.WebGLRenderer) {
+	async warmup(renderer: any) {
 		if (this.mips.length === 0) this.rebuild();
 		const previous = this.quad.material;
 		for (const mat of [this.prefilterMat, this.downMat, this.upMat]) {
@@ -233,7 +233,7 @@ export class BloomChain {
 			const div = 2 ** (i + 1);
 			const w = Math.max(1, Math.floor(this.width / div));
 			const h = Math.max(1, Math.floor(this.height / div));
-			const rt = new THREE.WebGLRenderTarget(w, h, {
+			const rt = new THREE.RenderTarget(w, h, {
 				format: THREE.RGBAFormat,
 				type: THREE.HalfFloatType,
 				minFilter: THREE.LinearFilter,
@@ -254,7 +254,7 @@ export class BloomChain {
 	 * Leaves the renderer's target/autoClear as it found them.
 	 */
 	render(
-		renderer: THREE.WebGLRenderer,
+		renderer: any,
 		source: THREE.Texture,
 		threshold: number,
 		softKnee = 0.6

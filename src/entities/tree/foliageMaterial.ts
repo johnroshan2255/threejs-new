@@ -1,10 +1,5 @@
 import * as THREE from "three";
-import CustomShaderMaterial from "three-custom-shader-material/vanilla";
-import {
-	FOLIAGE_FRAGMENT_SHADER,
-	FOLIAGE_VERTEX_SHADER,
-} from "./foliageShader";
-import { SNOW_GLSL, snowShaderUniforms } from "../../terrain/snowShading";
+import { snowShaderUniforms } from "../../terrain/snowShading";
 
 /** Shared wind clock — call updateFoliageWind(dt) once per frame. */
 export const foliageWind = {
@@ -25,7 +20,7 @@ export type FoliageMaterialOptions = {
 	windSpeed?: number;
 };
 
-export type FoliageMaterial = CustomShaderMaterial & {
+export type FoliageMaterial = THREE.MeshStandardMaterial & {
 	color: THREE.Color;
 };
 
@@ -97,11 +92,7 @@ export function createFoliageMaterial(
 	// Match demo: Color('#3f6d21').convertLinearToSRGB()
 	const color = new THREE.Color(leafColor).convertLinearToSRGB();
 
-	const material = new CustomShaderMaterial({
-		baseMaterial: THREE.MeshStandardMaterial,
-		vertexShader: FOLIAGE_VERTEX_SHADER,
-		fragmentShader: SNOW_GLSL + FOLIAGE_FRAGMENT_SHADER,
-		uniforms,
+	const material = new THREE.MeshStandardMaterial({
 		alphaMap,
 		alphaTest: 0.35,
 		alphaToCoverage: foliageAlphaToCoverage,
@@ -110,7 +101,7 @@ export function createFoliageMaterial(
 		shadowSide: THREE.FrontSide,
 		roughness: 1,
 		metalness: 0,
-	}) as FoliageMaterial;
+	}) as unknown as FoliageMaterial;
 
 	material.userData.foliageUniforms = uniforms;
 	return material;

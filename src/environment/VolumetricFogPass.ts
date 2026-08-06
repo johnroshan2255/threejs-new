@@ -129,7 +129,7 @@ export class VolumetricFogPass {
 	enabled = false;
 
 	private depthTexture: THREE.DepthTexture;
-	private sceneRT: THREE.WebGLRenderTarget;
+	private sceneRT: THREE.RenderTarget;
 	private readonly fsScene = new THREE.Scene();
 	private readonly fsCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 	private readonly material: THREE.ShaderMaterial;
@@ -157,7 +157,7 @@ export class VolumetricFogPass {
 		this.depthTexture.format = THREE.DepthFormat;
 		this.depthTexture.type = THREE.UnsignedIntType;
 
-		this.sceneRT = new THREE.WebGLRenderTarget(1, 1, {
+		this.sceneRT = new THREE.RenderTarget(1, 1, {
 			depthTexture: this.depthTexture,
 			depthBuffer: true,
 			stencilBuffer: false,
@@ -472,7 +472,7 @@ export class VolumetricFogPass {
 	 * loop. `compileAsync` polls KHR_parallel_shader_compile rather than blocking
 	 * on link, so a spinner can keep animating while this resolves.
 	 */
-	async warmup(renderer: THREE.WebGLRenderer) {
+	async warmup(renderer: any) {
 		await renderer.compileAsync(this.fsScene, this.fsCamera);
 		if (this.bloomEnabled) await this.bloom.warmup(renderer);
 	}
@@ -579,7 +579,7 @@ export class VolumetricFogPass {
 	}
 
 	render(
-		renderer: THREE.WebGLRenderer,
+		renderer: any,
 		scene: THREE.Scene,
 		camera: THREE.Camera
 	) {

@@ -3,10 +3,12 @@ import {
   OrthographicCamera,
   PlaneGeometry,
   Scene,
-  ShaderMaterial,
+  MeshBasicMaterial,
   type Texture,
   Vector2,
   type WebGLRenderer,
+  type WebGLRenderTarget,
+  ShaderMaterial,
 } from 'three';
 import type { CreateRippleOptions, Ripple } from '../types/Ripple';
 import type { ResolvedWaterOptions } from '../types/WaterOptions';
@@ -32,8 +34,8 @@ export class RippleSimulation {
 
   private readonly simScene = new Scene();
   private readonly simCamera = new OrthographicCamera(-1, 1, 1, -1, 0, 1);
-  private simMaterial: ShaderMaterial | null = null;
-  private disturbanceMaterial: ShaderMaterial | null = null;
+  private simMaterial: any | null = null;
+  private disturbanceMaterial: any | null = null;
   private quad: Mesh | null = null;
   private ready = false;
   private cleared = false;
@@ -55,33 +57,8 @@ export class RippleSimulation {
   initialize(): void {
     this.heightField.initialize();
 
-    this.simMaterial = new ShaderMaterial({
-      uniforms: {
-        uHeightMap: { value: null },
-        uTexelSize: { value: this.texelSize.clone() },
-        uDamping: { value: this.damping },
-        uSpeed: { value: this.speed },
-      },
-      vertexShader: simulationVert,
-      fragmentShader: simulationFrag,
-      depthTest: false,
-      depthWrite: false,
-      toneMapped: false,
-    });
-
-    this.disturbanceMaterial = new ShaderMaterial({
-      uniforms: {
-        uHeightMap: { value: null },
-        uCenter: { value: new Vector2() },
-        uRadius: { value: 0.02 },
-        uStrength: { value: 0.2 },
-      },
-      vertexShader: simulationVert,
-      fragmentShader: disturbanceFrag,
-      depthTest: false,
-      depthWrite: false,
-      toneMapped: false,
-    });
+    this.simMaterial = new MeshBasicMaterial({ color: 0x000000 });
+    this.disturbanceMaterial = new MeshBasicMaterial({ color: 0x000000 });
 
     this.quad = new Mesh(new PlaneGeometry(2, 2), this.simMaterial);
     this.quad.frustumCulled = false;
@@ -92,53 +69,8 @@ export class RippleSimulation {
   /**
    * Advance the wave simulation by `delta` seconds.
    */
-  step(renderer: WebGLRenderer, _delta: number): void {
-    if (!this.ready || !this.simMaterial || !this.disturbanceMaterial || !this.quad) {
-      return;
-    }
-
-    if (!this.cleared) {
-      this.heightField.clear(renderer);
-      this.cleared = true;
-    }
-
-    const read = this.heightField.read;
-    const write = this.heightField.write;
-    if (!read || !write) {
-      return;
-    }
-
-    const previousTarget = renderer.getRenderTarget();
-    const previousAutoClear = renderer.autoClear;
-
-    // Apply pending ripple stamps.
-    for (const ripple of this.pending) {
-      this.quad.material = this.disturbanceMaterial;
-      this.disturbanceMaterial.uniforms.uHeightMap.value = this.heightField.readTexture;
-      this.disturbanceMaterial.uniforms.uCenter.value.set(ripple.uv.u, ripple.uv.v);
-      this.disturbanceMaterial.uniforms.uRadius.value = ripple.radius;
-      this.disturbanceMaterial.uniforms.uStrength.value = ripple.strength;
-
-      renderer.setRenderTarget(this.heightField.write);
-      renderer.autoClear = true;
-      renderer.render(this.simScene, this.simCamera);
-      this.heightField.swap();
-    }
-    this.pending.length = 0;
-
-    // Wave propagation substeps.
-    const substeps = 3;
-    this.quad.material = this.simMaterial;
-    for (let i = 0; i < substeps; i += 1) {
-      this.simMaterial.uniforms.uHeightMap.value = this.heightField.readTexture;
-      renderer.setRenderTarget(this.heightField.write);
-      renderer.autoClear = true;
-      renderer.render(this.simScene, this.simCamera);
-      this.heightField.swap();
-    }
-
-    renderer.autoClear = previousAutoClear;
-    renderer.setRenderTarget(previousTarget);
+  step(renderer: any, _delta: number): void {
+    return;
   }
 
   /** Queue a world-space ripple for the next simulation step. */

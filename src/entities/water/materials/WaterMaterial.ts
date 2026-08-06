@@ -3,11 +3,11 @@ import {
   type ColorRepresentation,
   DoubleSide,
   Matrix4,
-  ShaderMaterial,
   type Texture,
   Vector2,
   Vector3,
 } from 'three';
+import { MeshStandardNodeMaterial } from 'three/webgpu';
 import { UniformManager } from '../core/UniformManager';
 import {
   DEFAULT_BRIGHTNESS,
@@ -48,7 +48,7 @@ export interface WaterMaterialOptions {
  * Does not run simulation steps or reflection passes — only binds their outputs.
  */
 export class WaterMaterial {
-  private material: ShaderMaterial | null = null;
+  private material: MeshStandardNodeMaterial | null = null;
   private readonly uniforms = new UniformManager();
   private readonly simResolution: number;
   private readonly baseAbsorption = new Vector3(0.045, 0.016, 0.01);
@@ -123,18 +123,18 @@ export class WaterMaterial {
       return;
     }
 
-    this.material = new ShaderMaterial({
-      uniforms: this.uniforms.getAll(),
-      vertexShader: waterVert,
-      fragmentShader: `${commonGlsl}\n${waterFrag}`,
+    this.material = new MeshStandardNodeMaterial({
+      color: this.uniforms.get<Color>('uColor'),
       transparent: true,
+      opacity: this.uniforms.get<number>('uOpacity'),
       depthWrite: false,
       side: DoubleSide,
-      toneMapped: true,
+      roughness: 0.1,
+      metalness: 0.8,
     });
   }
 
-  get threeMaterial(): ShaderMaterial | null {
+  get threeMaterial(): MeshStandardNodeMaterial | null {
     return this.material;
   }
 

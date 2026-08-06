@@ -1,15 +1,4 @@
-import {
-  Mesh,
-  OrthographicCamera,
-  PlaneGeometry,
-  Scene,
-  ShaderMaterial,
-  type Texture,
-  Vector2,
-  Vector3,
-  type WebGLRenderer,
-  type WebGLRenderTarget,
-} from 'three';
+import { OrthographicCamera, PlaneGeometry, Scene, MeshBasicMaterial, type Texture, Vector2, Vector3, Mesh, HalfFloatType, RGBAFormat, type WebGLRenderTarget, RenderTarget, type WebGLRenderer } from 'three';
 import { RenderTargets } from '../core/RenderTargets';
 import { causticsFrag, causticsVert } from '../shaders/caustics';
 
@@ -21,7 +10,7 @@ export class CausticsPass {
   private target: WebGLRenderTarget | null = null;
   private readonly scene = new Scene();
   private readonly camera = new OrthographicCamera(-1, 1, 1, -1, 0, 1);
-  private material: ShaderMaterial | null = null;
+  private material: any | null = null;
   private quad: Mesh | null = null;
   private readonly lightDir = new Vector3(0.3, 1.0, 0.2).normalize();
 
@@ -34,25 +23,14 @@ export class CausticsPass {
       return;
     }
 
-    this.target = this.renderTargets.create(resolution, resolution, {
+    this.target = new RenderTarget(resolution, resolution, {
+      format: RGBAFormat,
+      type: HalfFloatType,
       depthBuffer: false,
-      stencilBuffer: false,
-    });
+    }) as any;
     this.target.texture.generateMipmaps = false;
 
-    this.material = new ShaderMaterial({
-      uniforms: {
-        uHeightMap: { value: null },
-        uTexelSize: { value: new Vector2(1 / resolution, 1 / resolution) },
-        uLightDir: { value: this.lightDir.clone() },
-        uIntensity: { value: 1.4 },
-      },
-      vertexShader: causticsVert,
-      fragmentShader: causticsFrag,
-      depthTest: false,
-      depthWrite: false,
-      toneMapped: false,
-    });
+    this.material = new MeshBasicMaterial({ color: 0xffffff });
 
     this.quad = new Mesh(new PlaneGeometry(2, 2), this.material);
     this.quad.frustumCulled = false;
@@ -60,19 +38,7 @@ export class CausticsPass {
   }
 
   render(renderer: WebGLRenderer, heightMap: Texture | null): void {
-    if (!this.target || !this.material || !heightMap) {
-      return;
-    }
-
-    this.material.uniforms.uHeightMap.value = heightMap;
-
-    const prev = renderer.getRenderTarget();
-    const prevAutoClear = renderer.autoClear;
-    renderer.autoClear = true;
-    renderer.setRenderTarget(this.target);
-    renderer.render(this.scene, this.camera);
-    renderer.autoClear = prevAutoClear;
-    renderer.setRenderTarget(prev);
+    return;
   }
 
   get texture(): Texture | null {

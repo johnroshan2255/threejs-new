@@ -1,4 +1,4 @@
-import type { Camera, Mesh, PerspectiveCamera, Scene, Texture, WebGLRenderer } from 'three';
+import type { Camera, Mesh, PerspectiveCamera, Scene, Texture } from 'three';
 import type { WaterMaterial } from '../materials/WaterMaterial';
 import { CausticsPass } from './CausticsPass';
 import { ReflectionPass } from './ReflectionPass';
@@ -38,7 +38,7 @@ export class WaterRenderer {
    * Run reflection / refraction / caustics and bind results on the water material.
    */
   render(
-    renderer: WebGLRenderer,
+    renderer: any,
     scene: Scene,
     camera: Camera,
     waterMesh: Mesh,

@@ -1,7 +1,7 @@
 import {
   type RenderTargetOptions,
   type Texture,
-  WebGLRenderTarget,
+  RenderTarget,
 } from 'three';
 
 /**
@@ -11,26 +11,26 @@ import {
  * Does not know about ponds or ripple math.
  */
 export class RenderTargets {
-  private readonly targets = new Set<WebGLRenderTarget>();
+  private readonly targets = new Set<RenderTarget>();
 
   /** Create and track a render target. */
   create(
     width: number,
     height: number,
     options?: RenderTargetOptions,
-  ): WebGLRenderTarget {
-    const target = new WebGLRenderTarget(width, height, options);
+  ): RenderTarget {
+    const target = new RenderTarget(width, height, options);
     this.targets.add(target);
     return target;
   }
 
   /** Resize a tracked target. */
-  resize(target: WebGLRenderTarget, width: number, height: number): void {
+  resize(target: RenderTarget, width: number, height: number): void {
     target.setSize(width, height);
   }
 
   /** Dispose a single target and stop tracking it. */
-  disposeOne(target: WebGLRenderTarget): void {
+  disposeOne(target: RenderTarget): void {
     target.dispose();
     this.targets.delete(target);
   }
@@ -44,7 +44,7 @@ export class RenderTargets {
   }
 
   /** Convenience accessor for a target's colour texture. */
-  static texture(target: WebGLRenderTarget): Texture {
+  static texture(target: RenderTarget): Texture {
     return target.texture;
   }
 }

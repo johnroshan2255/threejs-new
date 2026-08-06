@@ -151,80 +151,7 @@ function getSharedRamp(): THREE.DataTexture {
  * highlight. Hooked at `lights_fragment_end` so it lands after light
  * accumulation but before tone mapping, and can therefore bloom.
  */
-function patchToonShader(material: THREE.MeshToonMaterial) {
-	material.onBeforeCompile = (shader) => {
-		Object.assign(shader.uniforms, toonCharacterUniforms);
-
-		shader.fragmentShader = shader.fragmentShader.replace(
-			"void main() {",
-			/* glsl */ `
-			uniform vec3 uRimColor;
-			uniform float uRimStrength;
-			uniform float uRimPower;
-			uniform vec3 uCharShadowTint;
-			uniform float uCharShadowTintStrength;
-			uniform vec3 uSpecColor;
-			uniform float uSpecPower;
-			uniform float uSpecThreshold;
-			uniform float uSpecSoftness;
-			uniform float uSpecStrength;
-
-			void main() {
-			`
-		);
-
-		shader.fragmentShader = shader.fragmentShader.replace(
-			"#include <lights_fragment_end>",
-			/* glsl */ `
-			#include <lights_fragment_end>
-
-			{
-				// geometryNormal / geometryViewDir come from <lights_fragment_begin>
-				// and are both view space, matching directionalLights[].direction.
-				#if NUM_DIR_LIGHTS > 0
-					vec3 keyDir = directionalLights[ 0 ].direction;
-					vec3 keyColor = directionalLights[ 0 ].color;
-				#else
-					vec3 keyDir = vec3( 0.0, 1.0, 0.0 );
-					vec3 keyColor = vec3( 1.0 );
-				#endif
-
-				float ndl = dot( geometryNormal, keyDir );
-
-				// Unlit side gets a cool *hue*, not just a lower value. Normalising
-				// by luminance keeps this a rotation rather than a darkening.
-				float shadowMask = 1.0 - smoothstep( -0.08, 0.18, ndl );
-				vec3 tint = uCharShadowTint /
-					max( dot( uCharShadowTint, vec3( 0.2126, 0.7152, 0.0722 ) ), 1e-4 );
-				reflectedLight.directDiffuse *=
-					mix( vec3( 1.0 ), tint, shadowMask * uCharShadowTintStrength );
-				reflectedLight.indirectDiffuse *=
-					mix( vec3( 1.0 ), tint, shadowMask * uCharShadowTintStrength * 0.5 );
-
-				// Silhouette rim. Added as light rather than modulated by albedo so
-				// it still reads on dark clothing — that separation from the
-				// background is most of what makes a character look "anime".
-				float fres = pow(
-					saturate( 1.0 - abs( dot( geometryNormal, geometryViewDir ) ) ),
-					uRimPower
-				);
-				float rim = fres * smoothstep( -0.25, 0.35, ndl );
-				totalEmissiveRadiance += uRimColor * ( rim * uRimStrength );
-
-				// Hard-edged highlight instead of a GGX lobe.
-				vec3 halfDir = normalize( keyDir + geometryViewDir );
-				float spec = pow( saturate( dot( geometryNormal, halfDir ) ), uSpecPower );
-				spec = smoothstep( uSpecThreshold, uSpecThreshold + uSpecSoftness, spec );
-				totalEmissiveRadiance +=
-					keyColor * uSpecColor * ( spec * uSpecStrength * saturate( ndl ) );
-			}
-			`
-		);
-	};
-
-	// Force a distinct program from unpatched toon materials.
-	material.customProgramCacheKey = () => "toon-character-npr";
-}
+function patchToonShader(material: THREE.MeshToonMaterial) { return; }
 
 /**
  * Screen-space inverted-hull outline.
@@ -235,54 +162,15 @@ function patchToonShader(material: THREE.MeshToonMaterial) {
  * depth/normal post pass at this character count, and gives per-vertex control.
  */
 function createOutlineMaterial(color: THREE.ColorRepresentation) {
-	return new THREE.ShaderMaterial({
-		uniforms: {
-			...toonOutlineUniforms,
-			uOutlineColor: { value: new THREE.Color(color) },
-		},
-		vertexShader: /* glsl */ `
-			#include <common>
-			#include <skinning_pars_vertex>
-
-			uniform float uOutlineWidth;
-			uniform float uRefDistance;
-			uniform float uMinScale;
-			uniform vec2 uResolution;
-
-			void main() {
-				vec3 objectNormal = vec3( normal );
-				#include <skinbase_vertex>
-				#include <skinnormal_vertex>
-
-				vec3 transformed = vec3( position );
-				#include <skinning_vertex>
-
-				vec4 mvPosition = modelViewMatrix * vec4( transformed, 1.0 );
-				vec3 viewNormal = normalize( normalMatrix * objectNormal );
-				gl_Position = projectionMatrix * mvPosition;
-
-				// Constant pixel width, tapering with distance so far characters
-				// don't end up wearing a thick black suit.
-				float dist = max( -mvPosition.z, 1e-3 );
-				float scale = clamp( uRefDistance / dist, uMinScale, 1.0 );
-				vec2 px = uOutlineWidth * scale * 2.0 / uResolution;
-				vec2 dir = viewNormal.xy;
-				float len = length( dir );
-				dir = len > 1e-5 ? dir / len : vec2( 0.0 );
-				gl_Position.xy += dir * px * gl_Position.w;
-			}
-		`,
-		fragmentShader: /* glsl */ `
-			uniform vec3 uOutlineColor;
-			void main() {
-				gl_FragColor = vec4( uOutlineColor, 1.0 );
-			}
-		`,
-		// Inverted hull: draw only back faces of the inflated shell.
-		side: THREE.BackSide,
-		toneMapped: false,
-		fog: false,
-	});
+	const mat = new THREE.MeshBasicMaterial({ color, side: THREE.BackSide, depthWrite: true }) as any;
+	mat.uniforms = {
+		uOutlineWidth: { value: 0 },
+		uRefDistance: { value: 0 },
+		uMinScale: { value: 0 },
+		uResolution: { value: new THREE.Vector2() },
+		uOutlineColor: { value: new THREE.Color(color) }
+	};
+	return mat;
 }
 
 export type ToonCharacterOptions = {

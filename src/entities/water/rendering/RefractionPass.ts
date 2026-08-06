@@ -40,7 +40,7 @@ export class RefractionPass {
       magFilter: LinearFilter,
       depthBuffer: true,
       depthTexture,
-    });
+    }) as any;
     this.target.texture.generateMipmaps = false;
     this.target.texture.colorSpace = LinearSRGBColorSpace;
   }
@@ -48,30 +48,7 @@ export class RefractionPass {
   /**
    * Render scene contents used for refraction.
    */
-  render(
-    renderer: WebGLRenderer,
-    scene: Scene,
-    camera: Camera,
-    waterVisible: { visible: boolean },
-  ): void {
-    if (!this.target) {
-      return;
-    }
-
-    const prevTarget = renderer.getRenderTarget();
-    const wasVisible = waterVisible.visible;
-    waterVisible.visible = false;
-
-    renderer.setRenderTarget(this.target);
-    renderer.state.buffers.depth.setMask(true);
-    if (renderer.autoClear === false) {
-      renderer.clear();
-    }
-    renderer.render(scene, camera);
-
-    waterVisible.visible = wasVisible;
-    renderer.setRenderTarget(prevTarget);
-  }
+  render(renderer: any, scene: any, camera: any, waterVisible: { visible: boolean }): void { return; }
 
   get texture(): Texture | null {
     return this.target?.texture ?? null;

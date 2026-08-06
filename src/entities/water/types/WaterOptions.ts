@@ -1,4 +1,4 @@
-import type { Camera, ColorRepresentation, Scene, Vector3, WebGLRenderer } from 'three';
+import type { Camera, ColorRepresentation, Scene, Vector3 } from 'three';
 
 /**
  * Construction options for {@link Pond}.
@@ -68,7 +68,7 @@ export interface WaterOptions {
   /**
    * Host WebGL renderer. Required for reflection / refraction / GPU simulation.
    */
-  renderer?: WebGLRenderer;
+  renderer?: any;
 
   /** Scene used by reflection / refraction passes. */
   scene?: Scene;

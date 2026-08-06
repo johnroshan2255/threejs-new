@@ -38,7 +38,7 @@ import { debugLine } from "../ui/debugOverlay";
 
 export type EditModeHost = {
 	scene: THREE.Scene;
-	renderer: THREE.WebGLRenderer;
+	renderer: any;
 	playCamera: THREE.PerspectiveCamera;
 	canvas: HTMLCanvasElement;
 	getEditWorldGroup: () => THREE.Group;

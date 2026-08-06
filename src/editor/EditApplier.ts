@@ -56,7 +56,7 @@ type TrackedEntity =
 
 export type EditApplierHost = {
 	worldGroup: THREE.Group;
-	renderer: THREE.WebGLRenderer;
+	renderer: any;
 	scene: THREE.Scene;
 	playCamera: THREE.PerspectiveCamera;
 	getSculptTarget: () => TerrainSculptTarget | null;

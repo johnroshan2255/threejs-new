@@ -105,7 +105,8 @@ import {
 	fogFollowsPlayer,
 	fogRadiusForWorld,
 } from "./environment/VolumetricFogPass";
-import { EffectComposer, RenderPass, EffectPass, GodRaysEffect, BloomEffect, VignetteEffect, ToneMappingEffect, ToneMappingMode, BlendFunction } from "postprocessing";
+import { WebGPURenderer, PostProcessing } from "three/webgpu";
+import { pass } from "three/tsl";
 import { setCharacterAlbedo } from "./entities/human/toonCharacter";
 import { SmokeTrailSystem } from "./environment/smokeTrail";
 import { ExplosionSystem } from "./environment/ExplosionSystem";
@@ -218,7 +219,7 @@ export class FluffyGrass {
 	private gltfLoader: GLTFLoader;
 
 	private camera: THREE.PerspectiveCamera;
-	private renderer: THREE.WebGLRenderer;
+	private renderer: WebGPURenderer;
 	private scene: THREE.Scene;
 	private canvas: HTMLCanvasElement;
 	private stats: Stats;
@@ -434,11 +435,8 @@ export class FluffyGrass {
 
 	private fogFollowPlayer = false;
 	private volumetricFog: VolumetricFogSystem | null = null;
-	private composer: EffectComposer | null = null;
-	private godRaysEffect: GodRaysEffect | null = null;
-	private bloomEffect: BloomEffect | null = null;
-	private vignetteEffect: VignetteEffect | null = null;
-	private toneMappingEffect: ToneMappingEffect | null = null;
+	private postProcessing: PostProcessing | null = null;
+
 	private sunMesh: THREE.Mesh | null = null;
 	/** User-facing master switch for the fog raymarch + bloom. */
 	private postFxEnabled = true;
@@ -518,7 +516,7 @@ export class FluffyGrass {
 			this.sceneProps.fogDensity
 		);
 
-		this.renderer = new THREE.WebGLRenderer({
+		this.renderer = new WebGPURenderer({
 			canvas: this.canvas,
 			// Does nothing for the scene: that renders into VolumetricFogPass's
 			// multisampled target, and the only thing drawn to the default
@@ -526,10 +524,9 @@ export class FluffyGrass {
 			// edit-mode dig PIP, which does render the scene straight to the canvas.
 			antialias: true,
 			alpha: true,
-			precision: "highp",
 		});
 		this.renderer.shadowMap.enabled = true;
-		this.renderer.shadowMap.autoUpdate = true;
+
 		this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 		this.renderer.outputColorSpace = THREE.SRGBColorSpace;
 		// Tone mapping lives in VolumetricFogPass's composite, not per-material.
@@ -547,48 +544,8 @@ export class FluffyGrass {
 		this.sunMesh.frustumCulled = false;
 		this.scene.add(this.sunMesh);
 
-		this.composer = new EffectComposer(this.renderer, {
-			multisampling: Math.min(4, this.renderer.capabilities.maxSamples)
-		});
-		
-		const renderPass = new RenderPass(this.scene, this.camera);
-		
-		this.godRaysEffect = new GodRaysEffect(this.camera, this.sunMesh, {
-			resolutionScale: 0.5,
-			density: 0.96,
-			decay: 0.95,
-			weight: 0.3,
-			exposure: 0.6,
-			samples: 60,
-			clampMax: 1.0,
-			blendFunction: BlendFunction.SCREEN
-		});
-
-		this.bloomEffect = new BloomEffect({
-			blendFunction: BlendFunction.ADD,
-			luminanceThreshold: 0.7,
-			luminanceSmoothing: 0.2,
-			intensity: 1.0
-		});
-
-		this.vignetteEffect = new VignetteEffect({
-			eskil: false,
-			offset: 0.1,
-			darkness: 0.5
-		});
-
-		this.toneMappingEffect = new ToneMappingEffect({
-			mode: ToneMappingMode.ACES_FILMIC,
-			resolution: 256,
-			whitePoint: 4.0,
-			middleGrey: 0.6,
-			minLuminance: 0.01,
-			averageLuminance: 0.01
-		});
-
-		const effectPass = new EffectPass(this.camera, this.godRaysEffect, this.bloomEffect, this.vignetteEffect, this.toneMappingEffect);
-		this.composer.addPass(renderPass);
-		this.composer.addPass(effectPass);
+		this.postProcessing = new PostProcessing(this.renderer);
+		this.postProcessing.outputNode = pass(this.scene, this.camera);
 
 		this.grassMaterial = new GrassMaterial();
 		this.terrainMat = new THREE.MeshPhongMaterial({
@@ -596,7 +553,7 @@ export class FluffyGrass {
 			shininess: 0,
 			flatShading: true,
 			vertexColors: false,
-			// Dug basin cliffs face inward — DoubleSide keeps walls solid from outside.
+	
 			side: THREE.DoubleSide,
 		});
 		// Snow patching lives in the terrain builders (createLargeTerrain /
@@ -636,7 +593,7 @@ export class FluffyGrass {
 						if (m.isMesh && !m.userData.isToonOutline) m.castShadow = on;
 					});
 				}
-				this.renderer.shadowMap.needsUpdate = true;
+
 				console.log(`[char] cast shadows -> ${on}`);
 			},
 		};
@@ -698,6 +655,7 @@ export class FluffyGrass {
 
 		try {
 			mark("loading");
+			await this.renderer.init();
 			this.render();
 			await this.initializationPromise;
 			mark("ready");
@@ -1925,7 +1883,7 @@ export class FluffyGrass {
 			resolution: 256,
 			circular: true,
 			...REFERENCE_WATER_LOOK,
-			renderer: this.renderer,
+			renderer: this.renderer as any,
 			scene: this.scene,
 			camera: this.camera,
 			sunDirection: { x: 12, y: 22, z: 8 },
@@ -3201,7 +3159,7 @@ export class FluffyGrass {
 		}
 	}
 
-	private render = () => {
+	private render = async () => {
 		requestAnimationFrame(this.render);
 
 		const now = performance.now();
@@ -3214,7 +3172,7 @@ export class FluffyGrass {
 			this.resolutionQuality === "Medium" &&
 			this.renderFrameCounter % 6 === 0
 		) {
-			this.renderer.shadowMap.needsUpdate = true;
+
 		}
 
 		this.Uniforms.uTime.value += this.clock.getDelta();
@@ -3409,9 +3367,7 @@ export class FluffyGrass {
 			// every frame leaves the map's contents describing a stale frustum —
 			// which reads as shadows blinking at ~10 Hz.
 			const shadowsWillRedraw =
-				this.renderer.shadowMap.enabled &&
-				(this.renderer.shadowMap.autoUpdate ||
-					this.renderer.shadowMap.needsUpdate);
+				this.renderer.shadowMap.enabled;
 			if (shadowsWillRedraw) {
 				const shadowFocus =
 					this.activePlayer === "human" && this.human?.mesh
@@ -3970,16 +3926,10 @@ export class FluffyGrass {
 		// held frame, and rendering against a half-built chain would flash.
 		if (!this.postFxTransitioning) {
 			const renderCam = this.editMode?.isEnabled ? this.editMode.activeCamera : this.camera;
-			if (this.postFxEnabled && this.composer) {
-				if (this.composer.passes[0] && (this.composer.passes[0] as any).camera !== renderCam) {
-					(this.composer.passes[0] as any).camera = renderCam;
-				}
-				if (this.composer.passes[1] && (this.composer.passes[1] as any).camera !== renderCam) {
-					(this.composer.passes[1] as any).camera = renderCam;
-				}
-				this.composer.render(dt);
+			if (this.postFxEnabled && this.postProcessing) {
+				await this.postProcessing.renderAsync();
 			} else {
-				this.renderer.render(this.scene, renderCam);
+				await this.renderer.renderAsync(this.scene, renderCam);
 			}
 
 			if (this.editMode?.isEnabled && this.editMode.isDigging) {
@@ -3994,7 +3944,7 @@ export class FluffyGrass {
 				this.renderer.setScissorTest(true);
 				this.renderer.clearDepth();
 				
-				this.renderer.render(this.scene, this.editMode.pipCamera);
+				await this.renderer.renderAsync(this.scene, this.editMode.pipCamera);
 				
 				this.renderer.setViewport(0, 0, w, h);
 				this.renderer.setScissorTest(false);
@@ -4139,8 +4089,6 @@ export class FluffyGrass {
 		this.shadowQuality = quality;
 		const shadowsEnabled = quality !== "Low";
 		this.renderer.shadowMap.enabled = shadowsEnabled;
-		this.renderer.shadowMap.autoUpdate = quality === "High";
-		if (shadowsEnabled) this.renderer.shadowMap.needsUpdate = true;
 		this.dayNight?.setShadowQuality(quality === "High" ? 4096 : 2048, 200);
 		this.grassMaterial.updateGrassGraphicsChange(quality === "High");
 	}
@@ -4151,7 +4099,7 @@ export class FluffyGrass {
 			quality === "Low" ? 0.75 : quality === "Medium" ? 1 : 2;
 		this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, pixelRatio));
 		this.resizePondTargets();
-		this.composer?.setSize(window.innerWidth, window.innerHeight);
+
 		this.syncVolumetricFogQuality();
 	}
 
@@ -4184,7 +4132,7 @@ export class FluffyGrass {
 	
 	
 	private syncVolumetricFogQuality() {
-		const multisampled = (this.composer?.multisampling ?? 0) > 1;
+		const multisampled = false;
 		this.grassMaterial.setAlphaToCoverage(multisampled);
 		setFoliageAlphaToCoverage(multisampled, this.scene);
 	}
@@ -4583,6 +4531,7 @@ export class FluffyGrass {
 	}
 
 	private setupStats() {
+		// @ts-ignore
 		this.stats.init(this.renderer);
 		const statsDom = (this.stats as unknown as { dom: HTMLElement }).dom;
 
@@ -5269,7 +5218,7 @@ export class FluffyGrass {
 			else if (previousDef.kind === "custom" && targetDef.kind !== "custom") {
 				this.disposeCustomWorld();
 			}
-			this.renderer.renderLists.dispose();
+
 
 			this.worldLoading.setProgress(82, "Restoring world edits...");
 			this.editMode?.onGameActiveChanged(this.isGameActive);
@@ -5859,7 +5808,7 @@ export class FluffyGrass {
 		this.renderer.setSize(window.innerWidth, window.innerHeight);
 		this.resizePondTargets();
 		const pr = this.renderer.getPixelRatio();
-		this.composer?.setSize(window.innerWidth, window.innerHeight);
+
 		// A resize can move the target across the MSAA budget in either direction.
 		
 	}
