@@ -444,6 +444,7 @@ export class FluffyGrass {
 	private postFxEnabled = true;
 	/** Parks the composite while targets are reallocated mid-toggle. */
 	private postFxTransitioning = false;
+	private showStatsEnabled = false;
 	/** Residual FogExp2 while the screen-space pass does the heavy lifting. */
 	private residualFogDensity = 0.0008;
 	/** Full FogExp2 density to restore when the volumetric pass is off. */
@@ -651,6 +652,7 @@ export class FluffyGrass {
 		this.worldLoading = new WorldLoadingOverlay();
 		this.setupSettings();
 		this.setupEditMode();
+		this.settings?.attachSystemButtons();
 
 		this.dayNight.speed = this.dayNightGui.speed;
 
@@ -760,7 +762,10 @@ export class FluffyGrass {
 				},
 				onHost: () => this.connectSocket("host"),
 				onJoin: () => this.fetchRooms(),
-				onLogout: () => this.disconnectMultiplayer(),
+				onLogout: () => {
+					localStorage.removeItem('game_settings');
+					this.disconnectMultiplayer();
+				},
 			});
 			this.gameNavigation.initialize();
 
@@ -2188,6 +2193,7 @@ export class FluffyGrass {
 				resetCarUpright(this.car, this.carController);
 			}
 		});
+		this.mobileControls.setMode(this.activePlayer);
 		this.carInput.setMobileControls(this.mobileControls);
 
 		this.chaseCameraInput = new ChaseCameraInput(this.canvas, {
@@ -2282,8 +2288,18 @@ export class FluffyGrass {
 
 		this.humanInput.onWeaponEquip = () => {
 			if (!this.gunMesh || !this.humanInput) return;
-			this.gunMesh.visible = this.humanInput.shouldShowGun();
+			const hasGun = this.humanInput.shouldShowGun();
+			this.gunMesh.visible = hasGun;
+			
+			if (this.mobileControls) {
+				this.mobileControls.setButtonText("mouse-2", hasGun ? "AIM" : "KICK");
+			}
 		};
+		// Initialize the UI text immediately
+		if (this.mobileControls) {
+			const hasGun = this.humanInput.shouldShowGun();
+			this.mobileControls.setButtonText("mouse-2", hasGun ? "AIM" : "KICK");
+		}
 
 		this.humanInput.onWeaponWheelToggle = (open) => {
 			this.chaseCameraInput?.setUiCapture(open);
@@ -3664,10 +3680,24 @@ export class FluffyGrass {
 
 			// Update car entry/exit UI prompt
 			if (this.interactionPrompt) {
+				const isMobile = !!this.mobileControls;
+				
 				if (this.activePlayer === "car") {
 					// Hide while in car
 					this.interactionPrompt.style.display = "none";
+					if (isMobile) {
+						this.mobileControls!.setButtonVisible("KeyU", true);
+						this.mobileControls!.setButtonText("key-KeyU", "EXIT");
+					}
 				} else {
+					if (isMobile) {
+						this.mobileControls!.setButtonText("key-KeyU", "U");
+						this.mobileControls!.setButtonVisible("KeyU", false);
+						this.mobileControls!.setButtonVisible("KeyE", false);
+						this.mobileControls!.setButtonVisible("KeyT", false);
+						this.mobileControls!.setButtonVisible("KeyH", false);
+					}
+					
 					const distToCar = this.human.mesh.position.distanceTo(this.car.mesh.position);
 
 					let nearestBombDist = Infinity;
@@ -3692,29 +3722,49 @@ export class FluffyGrass {
 					}
 
 					if (distToCar < 3.0) {
-						this.interactionPrompt.style.display = "flex";
-						this.interactionPrompt.style.alignItems = "center";
-						this.interactionPrompt.style.justifyContent = "center";
-						this.interactionPrompt.textContent = "U";
+						if (isMobile) {
+							this.mobileControls!.setButtonVisible("KeyU", true);
+							this.interactionPrompt.style.display = "none";
+						} else {
+							this.interactionPrompt.style.display = "flex";
+							this.interactionPrompt.style.alignItems = "center";
+							this.interactionPrompt.style.justifyContent = "center";
+							this.interactionPrompt.textContent = "U";
+						}
 					} else if (
 						this.sitState === "sitting" ||
 						this.sitState === "entering" ||
 						(this.isNearBench() && this.getFreeBenchSeat() != null)
 					) {
-						this.interactionPrompt.style.display = "flex";
-						this.interactionPrompt.style.alignItems = "center";
-						this.interactionPrompt.style.justifyContent = "center";
-						this.interactionPrompt.textContent = "E";
+						if (isMobile) {
+							this.mobileControls!.setButtonVisible("KeyE", true);
+							this.interactionPrompt.style.display = "none";
+						} else {
+							this.interactionPrompt.style.display = "flex";
+							this.interactionPrompt.style.alignItems = "center";
+							this.interactionPrompt.style.justifyContent = "center";
+							this.interactionPrompt.textContent = "E";
+						}
 					} else if (holdingBomb || nearestBombDist < 3.0) {
-						this.interactionPrompt.style.display = "flex";
-						this.interactionPrompt.style.alignItems = "center";
-						this.interactionPrompt.style.justifyContent = "center";
-						this.interactionPrompt.textContent = "T";
+						if (isMobile) {
+							this.mobileControls!.setButtonVisible("KeyT", true);
+							this.interactionPrompt.style.display = "none";
+						} else {
+							this.interactionPrompt.style.display = "flex";
+							this.interactionPrompt.style.alignItems = "center";
+							this.interactionPrompt.style.justifyContent = "center";
+							this.interactionPrompt.textContent = "T";
+						}
 					} else if (this.humanInput.isCarryingPlayer || nearestPlayerDist < 2.5) {
-						this.interactionPrompt.style.display = "flex";
-						this.interactionPrompt.style.alignItems = "center";
-						this.interactionPrompt.style.justifyContent = "center";
-						this.interactionPrompt.textContent = "H";
+						if (isMobile) {
+							this.mobileControls!.setButtonVisible("KeyH", true);
+							this.interactionPrompt.style.display = "none";
+						} else {
+							this.interactionPrompt.style.display = "flex";
+							this.interactionPrompt.style.alignItems = "center";
+							this.interactionPrompt.style.justifyContent = "center";
+							this.interactionPrompt.textContent = "H";
+						}
 					} else {
 						this.interactionPrompt.style.display = "none";
 					}
@@ -3979,12 +4029,65 @@ export class FluffyGrass {
 		);
 	}
 
+	private loadSettings() {
+		try {
+			const saved = localStorage.getItem('game_settings');
+			if (saved) {
+				const parsed = JSON.parse(saved);
+				if (parsed.shadowQuality) this.shadowQuality = parsed.shadowQuality;
+				if (parsed.resolutionQuality) this.resolutionQuality = parsed.resolutionQuality;
+				if (parsed.waterQuality) this.waterQuality = parsed.waterQuality;
+				if (parsed.postFxEnabled !== undefined) this.postFxEnabled = parsed.postFxEnabled;
+				if (parsed.showStatsEnabled !== undefined) this.showStatsEnabled = parsed.showStatsEnabled;
+				if (parsed.period) this.dayNightGui.period = parsed.period;
+				if (parsed.autoDayNight !== undefined) this.dayNightGui.auto = parsed.autoDayNight;
+				if (parsed.hour !== undefined) this.dayNightGui.hour = parsed.hour;
+				if (parsed.grassDensity !== undefined) this.grassDensity = parsed.grassDensity;
+				if (parsed.grassCullDistance !== undefined) this.grassCullDistance = parsed.grassCullDistance;
+				if (parsed.carPower !== undefined) CAR_CONFIG.drive.engineForce = parsed.carPower;
+			}
+		} catch (e) {
+			console.warn("Failed to load settings from localStorage", e);
+		}
+	}
+
+	private saveSettings() {
+		try {
+			const toSave = {
+				shadowQuality: this.shadowQuality,
+				resolutionQuality: this.resolutionQuality,
+				waterQuality: this.waterQuality,
+				postFxEnabled: this.postFxEnabled,
+				showStatsEnabled: this.showStatsEnabled,
+				period: this.dayNightGui.period,
+				autoDayNight: this.dayNightGui.auto,
+				hour: this.dayNightGui.hour,
+				grassDensity: this.grassDensity,
+				grassCullDistance: this.grassCullDistance,
+				carPower: CAR_CONFIG.drive.engineForce
+			};
+			localStorage.setItem('game_settings', JSON.stringify(toSave));
+		} catch (e) {
+			console.warn("Failed to save settings to localStorage", e);
+		}
+	}
+
+	private setShowStatsEnabled(enabled: boolean) {
+		this.showStatsEnabled = enabled;
+		const statsDom = (this.stats as unknown as { dom: HTMLElement }).dom;
+		if (statsDom) {
+			statsDom.style.display = enabled ? "flex" : "none";
+		}
+	}
+
 	private setupSettings() {
+		this.loadSettings();
 		this.settings = new GameSettings({
 			shadowQuality: this.shadowQuality,
 			resolutionQuality: this.resolutionQuality,
 			waterQuality: this.waterQuality,
 			postFx: this.postFxEnabled,
+			showStats: this.showStatsEnabled,
 			period: this.dayNightGui.period,
 			autoDayNight: this.dayNightGui.auto,
 			hour: this.dayNightGui.hour,
@@ -3993,19 +4096,22 @@ export class FluffyGrass {
 			carPower: CAR_CONFIG.drive.engineForce,
 			world: this.currentWorld,
 			worldOptions: this.getWorldSelectOptions(),
-			onShadowQualityChange: (quality) => this.applyShadowQuality(quality),
-			onResolutionQualityChange: (quality) => this.applyResolutionQuality(quality),
-			onWaterQualityChange: (quality) => this.applyWaterQuality(quality),
-			onPostFxChange: (enabled) => void this.setPostFxEnabled(enabled),
+			onShadowQualityChange: (quality) => { this.applyShadowQuality(quality); this.saveSettings(); },
+			onResolutionQualityChange: (quality) => { this.applyResolutionQuality(quality); this.saveSettings(); },
+			onWaterQualityChange: (quality) => { this.applyWaterQuality(quality); this.saveSettings(); },
+			onPostFxChange: (enabled) => { this.setPostFxEnabled(enabled); this.saveSettings(); },
+			onShowStatsChange: (enabled) => { this.setShowStatsEnabled(enabled); this.saveSettings(); },
 			onPeriodChange: (period) => {
 				this.dayNight?.setPeriod(period);
 				this.dayNightGui.period = period;
 				this.dayNightGui.auto = false;
 				this.settings.setAutoDayNight(false);
+				this.saveSettings();
 			},
 			onAutoDayNightChange: (enabled) => {
 				this.dayNightGui.auto = enabled;
 				if (this.dayNight) this.dayNight.auto = enabled;
+				this.saveSettings();
 			},
 			onHourChange: (hour) => {
 				this.dayNightGui.hour = hour;
@@ -4013,17 +4119,20 @@ export class FluffyGrass {
 				this.dayNight?.setHour(hour);
 				if (this.dayNight) this.dayNight.auto = false;
 				this.settings.setAutoDayNight(false);
+				this.saveSettings();
 			},
-			onGrassDensityChange: (percent) => this.setGrassDensity(percent),
-			onGrassCullDistanceChange: (meters) => this.setGrassCullDistance(meters),
+			onGrassDensityChange: (percent) => { this.setGrassDensity(percent); this.saveSettings(); },
+			onGrassCullDistanceChange: (meters) => { this.setGrassCullDistance(meters); this.saveSettings(); },
 			onCarPowerChange: (power) => {
 				CAR_CONFIG.drive.engineForce = power;
+				this.saveSettings();
 			},
 			onWorldChange: (world) => this.switchWorld(world),
 		});
 		this.applyShadowQuality(this.shadowQuality);
 		this.applyResolutionQuality(this.resolutionQuality);
 		this.applyWaterQuality(this.waterQuality);
+		this.setPostFxEnabled(this.postFxEnabled);
 	}
 
 		private applyShadowQuality(quality: QualityLevel) {
@@ -4515,6 +4624,7 @@ export class FluffyGrass {
 		}, 100); // small delay to ensure stats-gl has created the children
 
 		document.body.appendChild(statsDom);
+		this.setShowStatsEnabled(this.showStatsEnabled);
 	}
 
 	private setupEditMode() {
@@ -5037,6 +5147,7 @@ export class FluffyGrass {
 		if (this.activePlayer === "car") {
 			// Switch to human (can exit car anytime)
 			this.activePlayer = "human";
+			this.mobileControls?.setMode(this.activePlayer);
 			this.vehicleGrapple?.release();
 			if (this.carInput) {
 				this.carInput.isEnabled = false;
@@ -5063,6 +5174,7 @@ export class FluffyGrass {
 			if (this.humanInput) this.humanInput.isEnabled = false;
 
 			this.activePlayer = "car";
+			this.mobileControls?.setMode(this.activePlayer);
 			if (this.carInput) this.carInput.isEnabled = true;
 			this.human.body.setTranslation(new THREE.Vector3(0, -100, 0), true);
 			this.human.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
@@ -5708,9 +5820,12 @@ export class FluffyGrass {
 		// Physics Heightfield
 		const heights = new Float32Array((resolution + 1) * (resolution + 1));
 		for (let i = 0; i < posAttr.count; i++) {
-			const col = i % (resolution + 1);
-			const row = Math.floor(i / (resolution + 1));
-			heights[col * (resolution + 1) + row] = posAttr.getY(i);
+			const ix = i % (resolution + 1);
+			const iy = Math.floor(i / (resolution + 1));
+			// Three.js PlaneGeometry (after rotateX(-PI/2)) Z goes from +half to -half.
+			// Rapier expects Z to go from -half to +half. So we invert the Z index (iy).
+			const j = resolution - iy;
+			heights[ix + j * (resolution + 1)] = posAttr.getY(i);
 		}
 		this.valleyHeights = heights;
 

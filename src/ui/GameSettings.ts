@@ -8,6 +8,7 @@ type GameSettingsOptions = {
 	resolutionQuality: QualityLevel;
 	waterQuality: QualityLevel;
 	postFx: boolean;
+	showStats: boolean;
 	period: DayPeriod;
 	autoDayNight: boolean;
 	hour: number;
@@ -20,6 +21,7 @@ type GameSettingsOptions = {
 	onResolutionQualityChange: (quality: QualityLevel) => void;
 	onWaterQualityChange: (quality: QualityLevel) => void;
 	onPostFxChange: (enabled: boolean) => void;
+	onShowStatsChange: (enabled: boolean) => void;
 	onPeriodChange: (period: DayPeriod) => void;
 	onAutoDayNightChange: (enabled: boolean) => void;
 	onHourChange: (hour: number) => void;
@@ -40,6 +42,7 @@ export class GameSettings {
 			resolutionQuality: options.resolutionQuality,
 			waterQuality: options.waterQuality,
 			postFx: options.postFx,
+			showStats: options.showStats,
 			period: options.period,
 			autoDayNight: options.autoDayNight,
 			hour: options.hour,
@@ -51,6 +54,7 @@ export class GameSettings {
 
 		this.overlay = this.buildDOM();
 		document.body.appendChild(this.overlay);
+
 		this.bindToggle();
 	}
 
@@ -135,6 +139,29 @@ export class GameSettings {
 		});
 	}
 
+	public attachSystemButtons() {
+		const container = document.getElementById("system-actions-container");
+		if (container) {
+			const topNav = document.getElementById("game-top-nav");
+			const editBtn = document.getElementById("edit-mode-toggle");
+			
+			if (topNav) {
+				topNav.style.position = "static";
+				topNav.style.flexDirection = "column";
+				topNav.style.alignItems = "stretch";
+				topNav.style.width = "100%";
+				topNav.style.display = topNav.style.display === "none" ? "none" : "flex"; 
+				container.appendChild(topNav);
+			}
+			if (editBtn) {
+				editBtn.style.position = "static";
+				editBtn.style.width = "100%";
+				editBtn.style.marginBottom = "0";
+				container.appendChild(editBtn);
+			}
+		}
+	}
+
 	private buildDOM(): HTMLElement {
 		const overlay = document.createElement("div");
 		overlay.id = "custom-settings-overlay";
@@ -154,6 +181,7 @@ export class GameSettings {
 						<button data-target="settings-grass">GRASS</button>
 						<button data-target="settings-car">CAR</button>
 						<button data-target="settings-world">WORLD</button>
+						<button data-target="settings-system">SYSTEM</button>
 					</div>
 					<div class="custom-settings-content">
 						<!-- GRAPHICS -->
@@ -187,6 +215,13 @@ export class GameSettings {
 								<label for="set-postfx">Atmospheric FX</label>
 								<label class="toggle-switch">
 									<input type="checkbox" id="set-postfx" />
+									<span class="toggle-slider"></span>
+								</label>
+							</div>
+							<div class="setting-row">
+								<label for="set-showstats">Show Stats (FPS)</label>
+								<label class="toggle-switch">
+									<input type="checkbox" id="set-showstats" />
 									<span class="toggle-slider"></span>
 								</label>
 							</div>
@@ -260,6 +295,16 @@ export class GameSettings {
 								<select id="set-world"></select>
 							</div>
 						</div>
+
+						<!-- SYSTEM -->
+						<div id="settings-system" class="settings-pane">
+							<h3>SYSTEM & MULTIPLAYER</h3>
+							<div class="setting-row" style="flex-direction: column; align-items: stretch; gap: 10px;">
+								<div id="system-actions-container" style="display: flex; flex-direction: column; gap: 10px;">
+									<!-- Buttons will be moved here by JS -->
+								</div>
+							</div>
+						</div>
 					</div>
 				</div>
 			</div>
@@ -297,6 +342,10 @@ export class GameSettings {
 		const fxChk = overlay.querySelector("#set-postfx") as HTMLInputElement;
 		fxChk.checked = this.state.postFx;
 		fxChk.addEventListener("change", (e) => this.options.onPostFxChange((e.target as HTMLInputElement).checked));
+
+		const statsChk = overlay.querySelector("#set-showstats") as HTMLInputElement;
+		statsChk.checked = this.state.showStats;
+		statsChk.addEventListener("change", (e) => this.options.onShowStatsChange((e.target as HTMLInputElement).checked));
 
 		const pSel = overlay.querySelector("#set-period") as HTMLSelectElement;
 		pSel.value = this.state.period;

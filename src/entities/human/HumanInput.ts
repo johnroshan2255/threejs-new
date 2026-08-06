@@ -186,7 +186,10 @@ export class HumanInput {
 
         this.weaponWheel = new WeaponWheel({
             getEquipped: () => this.inventory.equipped,
-            onSelect: (id) => this.equipWeapon(id),
+            onSelect: (id) => {
+                this.equipWeapon(id);
+                if (this.mobileControls) this.closeWeaponWheel(true);
+            },
         });
 
         this.crosshairEl = document.createElement("div");
@@ -337,7 +340,15 @@ export class HumanInput {
         if (k === "h") this.triggerCarryPlayer();
         if (k === "q" && !e.repeat) {
             e.preventDefault();
-            this.openWeaponWheel();
+            if (this.mobileControls) {
+                if (this.weaponWheel?.isOpen()) {
+                    this.closeWeaponWheel(false);
+                } else {
+                    this.openWeaponWheel();
+                }
+            } else {
+                this.openWeaponWheel();
+            }
         }
     };
 
@@ -346,7 +357,9 @@ export class HumanInput {
         const k = e.key.toLowerCase();
         this.keys[k] = false;
         if (k === "q") {
-            this.closeWeaponWheel(true);
+            if (!this.mobileControls) {
+                this.closeWeaponWheel(true);
+            }
         }
     };
 
@@ -821,7 +834,7 @@ export class HumanInput {
                 const state = this.mobileControls.getState();
                 forward += state.throttle; // Throttle is 0 to 1
                 if (state.braking) forward -= 1; // Brake/Reverse
-                right += state.steer;      // Steer is -1 to 1
+                right -= state.steer;      // Steer is 1 to -1 (Left to Right)
             }
         }
 

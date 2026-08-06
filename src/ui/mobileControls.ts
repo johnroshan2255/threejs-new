@@ -8,6 +8,8 @@ export type MobileControls = {
 	root: HTMLElement;
 	getState: () => MobileDriveState;
 	isActive: () => boolean;
+	setButtonVisible: (key: string, visible: boolean) => void;
+	setButtonText: (key: string, text: string) => void;
 	dispose: () => void;
 };
 
@@ -40,7 +42,7 @@ function softenAxis(v: number, deadzone = 0.14, power = 1.35): number {
 	return Math.sign(v) * Math.pow(Math.min(1, t), power);
 }
 
-type TouchKind = "steer" | "gas" | "reverse" | "brake" | "reset";
+type TouchKind = "steer" | "gas" | "reverse" | "brake" | "reset" | string;
 
 /**
  * On-screen drive pads for Android + iPhone/iPad.
@@ -51,15 +53,24 @@ export function createMobileControls(onReset: () => void): MobileControls {
 	root.className = "mobile-controls";
 	root.id = "mobile-controls";
 	root.innerHTML = `
-		<div class="mc-steer" id="mc-steer" data-mc="steer" aria-label="Steer">
-			<div class="mc-steer-ring"></div>
-			<div class="mc-steer-knob" id="mc-steer-knob"></div>
+		<div class="mc-steer-arrows">
+			<div class="mc-btn mc-steer-btn mc-left-arrow" data-mc="steer-left" role="button" tabindex="0">◀</div>
+			<div class="mc-btn mc-steer-btn mc-right-arrow" data-mc="steer-right" role="button" tabindex="0">▶</div>
 		</div>
 		<div class="mc-actions">
-			<div class="mc-btn mc-gas" id="mc-gas" data-mc="gas" role="button" tabindex="0" aria-label="Accelerate">▲</div>
-			<div class="mc-btn mc-brake" id="mc-brake" data-mc="reverse" role="button" tabindex="0" aria-label="Reverse">▼</div>
-			<div class="mc-btn mc-handbrake" id="mc-handbrake" data-mc="brake" role="button" tabindex="0" aria-label="Brake">BRAKE</div>
-			<div class="mc-btn mc-reset" id="mc-reset" data-mc="reset" role="button" tabindex="0" aria-label="Reset">R</div>
+			<div class="mc-btn mc-gas" id="mc-gas" data-mc="gas" role="button" tabindex="0">▲</div>
+			<div class="mc-btn mc-brake" id="mc-brake" data-mc="reverse" role="button" tabindex="0">▼</div>
+			<div class="mc-btn mc-handbrake mc-car-only" id="mc-handbrake" data-mc="brake" role="button" tabindex="0">BRK</div>
+			<div class="mc-btn mc-jump mc-human-only" data-mc="key-Space" role="button" tabindex="0">JMP</div>
+			<div class="mc-btn mc-attack mc-human-only" data-mc="mouse-0" role="button" tabindex="0">ATK</div>
+			<div class="mc-btn mc-aim mc-human-only" data-mc="mouse-2" role="button" tabindex="0">KICK</div>
+			<div class="mc-btn mc-key mc-car-only" data-mc="key-ShiftLeft" role="button" tabindex="0">NIT</div>
+			<div class="mc-btn mc-key" data-mc="key-KeyT" role="button" tabindex="0">T</div>
+			<div class="mc-btn mc-key" data-mc="key-KeyH" role="button" tabindex="0">H</div>
+			<div class="mc-btn mc-key mc-human-only" data-mc="key-KeyQ" role="button" tabindex="0">Q</div>
+			<div class="mc-btn mc-key mc-car-only" data-mc="key-KeyE" role="button" tabindex="0">E</div>
+			<div class="mc-btn mc-key" data-mc="key-KeyF" role="button" tabindex="0">F</div>
+			<div class="mc-btn mc-key" data-mc="key-KeyU" role="button" tabindex="0">U</div>
 		</div>
 	`;
 	document.body.appendChild(root);
@@ -67,13 +78,10 @@ export function createMobileControls(onReset: () => void): MobileControls {
 	let gas = false;
 	let reverse = false;
 	let braking = false;
-	let steer = 0;
-
-	const steerPad = root.querySelector("#mc-steer") as HTMLElement;
-	const knob = root.querySelector("#mc-steer-knob") as HTMLElement;
+	let steerLeft = false;
+	let steerRight = false;
 
 	const active = new Map<number, TouchKind>();
-	let steerOriginX = 0;
 
 	const syncVisibility = () => {
 		const show = isMobileDevice();
@@ -91,44 +99,40 @@ export function createMobileControls(onReset: () => void): MobileControls {
 	window.addEventListener("resize", delayedSync);
 	window.addEventListener("orientationchange", delayedSync);
 
-	const setKnob = (visualX: number) => {
-		const x = Math.max(-42, Math.min(42, visualX * 42));
-		knob.style.transform = `translate(calc(-50% + ${x}px), -50%)`;
-	};
 
-	const updateSteer = (clientX: number) => {
-		const rect = steerPad.getBoundingClientRect();
-		const travel = Math.max(28, rect.width * 0.45);
-		let raw = (clientX - steerOriginX) / travel;
-		raw = Math.max(-1, Math.min(1, raw));
-		const soft = softenAxis(raw);
-		steer = -soft * 0.9;
-		setKnob(soft);
-	};
-
-	const clearSteer = () => {
-		steer = 0;
-		setKnob(0);
-		steerPad.classList.remove("is-active");
-	};
 
 	const applyKind = (kind: TouchKind, down: boolean) => {
-		switch (kind) {
-			case "gas":
-				gas = down;
-				break;
-			case "reverse":
-				reverse = down;
-				break;
-			case "brake":
-				braking = down;
-				break;
-			case "steer":
-				if (!down) clearSteer();
-				break;
-			case "reset":
-				if (down) onReset();
-				break;
+		if (kind.startsWith("key-")) {
+			const code = kind.replace("key-", "");
+			let key = code.replace("Key", "");
+			if (code === "Space") key = " ";
+			const evt = new KeyboardEvent(down ? "keydown" : "keyup", { code, key });
+			window.dispatchEvent(evt);
+		} else if (kind.startsWith("mouse-")) {
+			const button = parseInt(kind.replace("mouse-", ""), 10);
+			const evt = new MouseEvent(down ? "mousedown" : "mouseup", { button });
+			window.dispatchEvent(evt);
+		} else {
+			switch (kind) {
+				case "gas":
+					gas = down;
+					break;
+				case "reverse":
+					reverse = down;
+					break;
+				case "brake":
+					braking = down;
+					break;
+				case "steer-left":
+					steerLeft = down;
+					break;
+				case "steer-right":
+					steerRight = down;
+					break;
+				case "reset":
+					if (down) onReset();
+					break;
+			}
 		}
 		const el = root.querySelector(`[data-mc="${kind}"]`);
 		el?.classList.toggle("is-active", down && kind !== "reset");
@@ -139,15 +143,7 @@ export function createMobileControls(onReset: () => void): MobileControls {
 		const el = hit?.closest?.("[data-mc]") as HTMLElement | null;
 		if (!el || !root.contains(el)) return null;
 		const v = el.dataset.mc;
-		if (
-			v === "steer" ||
-			v === "gas" ||
-			v === "reverse" ||
-			v === "brake" ||
-			v === "reset"
-		) {
-			return v;
-		}
+		if (v) return v;
 		return null;
 	};
 
@@ -158,35 +154,20 @@ export function createMobileControls(onReset: () => void): MobileControls {
 			| undefined;
 		if (!el || !root.contains(el)) return null;
 		const v = el.dataset.mc;
-		if (
-			v === "steer" ||
-			v === "gas" ||
-			v === "reverse" ||
-			v === "brake" ||
-			v === "reset"
-		) {
-			return v;
-		}
+		if (v) return v;
 		return null;
 	};
 
 	const startControl = (id: number, kind: TouchKind, clientX: number) => {
 		active.set(id, kind);
-		if (kind === "steer") {
-			steerOriginX = clientX;
-			steerPad.classList.add("is-active");
-			updateSteer(clientX);
-		} else {
-			applyKind(kind, true);
-		}
+		applyKind(kind, true);
 	};
 
 	const endControl = (id: number) => {
 		const kind = active.get(id);
 		if (!kind) return;
 		active.delete(id);
-		if (kind === "steer") clearSteer();
-		else if (kind !== "reset") applyKind(kind, false);
+		if (kind !== "reset") applyKind(kind, false);
 	};
 
 	const onTouchStart = (e: TouchEvent) => {
@@ -207,7 +188,7 @@ export function createMobileControls(onReset: () => void): MobileControls {
 			const kind = active.get(t.identifier);
 			if (!kind) continue;
 			used = true;
-			if (kind === "steer") updateSteer(t.clientX);
+		// Arrows don't need continuous clientX updates like the joystick did.
 		}
 		if (used) e.preventDefault();
 	};
@@ -237,7 +218,7 @@ export function createMobileControls(onReset: () => void): MobileControls {
 	const onPointerMove = (e: PointerEvent) => {
 		if (e.pointerType === "touch") return;
 		const kind = active.get(e.pointerId);
-		if (kind === "steer") updateSteer(e.clientX);
+		// No pointer move updates needed for simple buttons
 	};
 	const onPointerUp = (e: PointerEvent) => {
 		if (e.pointerType === "touch") return;
@@ -256,9 +237,24 @@ export function createMobileControls(onReset: () => void): MobileControls {
 			!document.body.classList.contains("orientation-portrait-lock"),
 		getState: () => ({
 			throttle: gas ? 1 : reverse ? -1 : 0,
-			steer,
+			steer: (steerLeft ? 1 : 0) + (steerRight ? -1 : 0),
 			braking,
 		}),
+		setButtonVisible: (key: string, visible: boolean) => {
+			const btn = root.querySelector(`[data-mc="key-${key}"]`) as HTMLElement;
+			if (btn) {
+				btn.style.display = visible ? "flex" : "none";
+			}
+		},
+		setButtonText: (key: string, text: string) => {
+			const btn = root.querySelector(`[data-mc="${key}"]`) as HTMLElement;
+			if (btn) btn.textContent = text;
+		},
+		setMode: (mode: "car" | "human") => {
+			const isCar = mode === "car";
+			root.classList.toggle("mode-car", isCar);
+			root.classList.toggle("mode-human", !isCar);
+		},
 		dispose() {
 			window.removeEventListener("resize", delayedSync);
 			window.removeEventListener("orientationchange", delayedSync);

@@ -382,50 +382,22 @@ body.has-mobile-controls .controls-hint {
 	display: none;
 }
 
-.mc-steer {
+.mc-steer-arrows {
 	pointer-events: auto;
 	position: absolute;
 	left: max(16px, env(safe-area-inset-left));
 	bottom: max(18px, env(safe-area-inset-bottom));
-	width: 148px;
-	height: 148px;
-	border-radius: 50%;
+	display: flex;
+	gap: 15px;
 	touch-action: none;
 	-webkit-user-select: none;
 }
 
-.mc-steer-ring {
-	position: absolute;
-	inset: 0;
-	border-radius: 50%;
-	border: 1px solid rgba(210, 230, 190, 0.28);
-	background: rgba(10, 16, 12, 0.4);
-	backdrop-filter: blur(10px);
-	-webkit-backdrop-filter: blur(10px);
-	box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
-}
-
-.mc-steer.is-active .mc-steer-ring {
-	border-color: rgba(210, 230, 190, 0.5);
-	background: rgba(14, 22, 16, 0.5);
-}
-
-.mc-steer-knob {
-	position: absolute;
-	top: 50%;
-	left: 50%;
-	width: 58px;
-	height: 58px;
-	border-radius: 50%;
-	transform: translate(-50%, -50%);
-	background: rgba(210, 230, 190, 0.35);
-	border: 1px solid rgba(230, 245, 215, 0.4);
-	box-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
-	pointer-events: none;
-}
-
-.mc-steer.is-active .mc-steer-knob {
-	background: rgba(210, 230, 190, 0.55);
+.mc-steer-btn {
+	position: relative !important; /* override absolute from mc-btn */
+	width: 54px !important;
+	height: 54px !important;
+	font-size: 20px !important;
 }
 
 .mc-actions {
@@ -433,27 +405,26 @@ body.has-mobile-controls .controls-hint {
 	position: absolute;
 	right: max(16px, env(safe-area-inset-right));
 	bottom: max(18px, env(safe-area-inset-bottom));
-	display: grid;
-	grid-template-columns: 78px 78px;
-	grid-template-rows: 78px 60px;
-	gap: 12px;
+	width: 250px;
+	height: 220px;
 	touch-action: none;
 }
 
 .mc-btn {
 	appearance: none;
 	-webkit-appearance: none;
-	display: grid;
-	place-items: center;
+	display: flex;
+	justify-content: center;
+	align-items: center;
 	border: 1px solid rgba(210, 230, 190, 0.28);
-	border-radius: 20px;
+	border-radius: 50%;
 	background: rgba(10, 16, 12, 0.55);
 	backdrop-filter: blur(10px);
 	-webkit-backdrop-filter: blur(10px);
 	color: rgba(240, 248, 232, 0.95);
 	font-family: "Sora", system-ui, sans-serif;
 	font-weight: 600;
-	font-size: 20px;
+	font-size: 13px;
 	letter-spacing: 0.02em;
 	box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
 	touch-action: none;
@@ -461,6 +432,9 @@ body.has-mobile-controls .controls-hint {
 	user-select: none;
 	-webkit-tap-highlight-color: transparent;
 	cursor: pointer;
+	position: absolute;
+	width: 46px;
+	height: 46px;
 }
 
 .mc-btn.is-active {
@@ -469,43 +443,58 @@ body.has-mobile-controls .controls-hint {
 	color: #fff;
 }
 
-.mc-gas {
-	grid-column: 2;
-	grid-row: 1;
-	font-size: 24px;
+.mc-jump {
+	width: 42px;
+	height: 42px;
+	bottom: 20px;
+	right: 90px;
+	font-size: 15px;
+	background: rgba(163, 217, 119, 0.3);
 }
 
-.mc-brake {
-	grid-column: 2;
-	grid-row: 2;
-	font-size: 24px;
-	border-radius: 18px;
+.mc-attack {
+	width: 42px;
+	height: 42px;
+	bottom: 74px;
+	right: 90px;
+	background: rgba(217, 119, 119, 0.3);
 }
 
-.mc-handbrake {
-	grid-column: 1;
-	grid-row: 1;
-	font-size: 12px;
-	letter-spacing: 0.06em;
+.mc-gas { bottom: 84px; right: 20px; width: 50px; height: 50px; }
+.mc-brake { bottom: 20px; right: 20px; width: 50px; height: 50px; }
+
+.mc-aim { bottom: 128px; right: 90px; width: 42px; height: 42px; }
+.mc-handbrake { bottom: 74px; right: 90px; width: 42px; height: 42px; }
+
+.mc-btn[data-mc="key-ShiftLeft"] { bottom: 20px; right: 90px; width: 42px; height: 42px; } /* NIT */
+.mc-btn[data-mc="key-KeyF"] { bottom: 196px; right: 24px; width: 42px; height: 42px; } /* F */
+.mc-btn[data-mc="key-KeyE"] { bottom: 128px; right: 144px; width: 42px; height: 42px; } /* E */
+.mc-btn[data-mc="key-KeyQ"] { bottom: 74px; right: 144px; width: 42px; height: 42px; } /* Q */
+.mc-btn[data-mc="key-KeyT"] { bottom: 196px; right: 78px; width: 42px; height: 42px; } /* T */
+.mc-btn[data-mc="key-KeyH"] { bottom: 196px; right: 132px; width: 42px; height: 42px; } /* H */
+.mc-btn[data-mc="key-KeyU"] { bottom: 144px; right: 24px; width: 42px; height: 42px; } /* U */
+
+.mobile-controls.mode-car .mc-human-only {
+	display: none !important;
+}
+.mobile-controls.mode-human .mc-car-only {
+	display: none !important;
 }
 
 .mc-reset {
-	grid-column: 1;
-	grid-row: 2;
-	font-size: 17px;
-	border-radius: 18px;
+	font-size: 14px;
 }
 
 @media (max-width: 420px) {
 	.mc-steer {
-		width: 128px;
-		height: 128px;
+		width: 100px;
+		height: 100px;
 	}
 
 	.mc-actions {
-		grid-template-columns: 70px 70px;
-		grid-template-rows: 70px 56px;
-		gap: 10px;
+		grid-template-columns: repeat(4, 45px);
+		grid-template-rows: repeat(3, 45px);
+		gap: 5px;
 	}
 }
 
@@ -993,10 +982,10 @@ body.orientation-portrait-lock .dg.ac {
   background: #a3d977;
   color: #1a2614;
   border: none;
-  padding: 12px 32px;
-  font-size: 1.1rem;
+  padding: 10px 24px;
+  font-size: 0.95rem;
   font-weight: 600;
-  border-radius: 24px;
+  border-radius: 20px;
   cursor: pointer;
   transition: all 0.2s ease;
   opacity: 0;
@@ -1020,10 +1009,10 @@ body.orientation-portrait-lock .dg.ac {
   background: transparent;
   color: #a3d977;
   border: 1px solid #a3d977;
-  padding: 8px 16px;
-  font-size: 0.9rem;
+  padding: 6px 14px;
+  font-size: 0.8rem;
   font-weight: 600;
-  border-radius: 20px;
+  border-radius: 16px;
   cursor: pointer;
   transition: all 0.2s ease;
   position: absolute;
@@ -2317,15 +2306,16 @@ body.ui-cursor-capture .weapon-wheel .ww-slot {
 	background: #ff6060;
 }
 
-/* GTA V–style health bar (bottom-right) */
+/* GTA V–style health bar (Top Center) */
 .health-hud {
 	position: fixed;
-	right: max(18px, env(safe-area-inset-right));
-	bottom: max(22px, env(safe-area-inset-bottom));
+	top: max(20px, env(safe-area-inset-top));
+	left: 50%;
+	transform: translateX(-50%);
 	z-index: 40;
 	display: none;
 	flex-direction: column;
-	align-items: flex-end;
+	align-items: center;
 	gap: 5px;
 	pointer-events: none;
 	user-select: none;
@@ -2380,10 +2370,6 @@ body.ui-cursor-capture .weapon-wheel .ww-slot {
 }
 
 @media (max-width: 700px) {
-	.health-hud {
-		bottom: max(88px, env(safe-area-inset-bottom));
-	}
-
 	.health-hud-bar {
 		width: min(160px, 48vw);
 		height: 8px;
@@ -2440,6 +2426,22 @@ button:active:not(:disabled) {
     flex-direction: column;
     padding: 20px;
     overflow-y: auto;
+  }
+  .loading-content h1 {
+    font-size: 1.8rem;
+  }
+  .account-panel-content h2 {
+    font-size: 1.6rem;
+    margin-bottom: 1.5rem;
+  }
+  .account-panel-content input {
+    padding: 10px 12px;
+    margin-bottom: 12px;
+    font-size: 0.9rem;
+  }
+  .create-account-btn {
+    padding: 6px 12px;
+    font-size: 0.8rem;
   }
   .loading-panel {
     width: 100% !important;
@@ -2707,24 +2709,24 @@ button {
 
 .custom-settings-modal {
   width: 90%;
-  max-width: 800px;
+  max-width: 700px;
   background: rgba(18, 26, 20, 0.85);
   border: 1px solid rgba(163, 217, 119, 0.2);
-  border-radius: 24px;
+  border-radius: 16px;
   box-shadow: 0 24px 50px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.05);
   display: flex;
   flex-direction: column;
   overflow: hidden;
   color: #eaf6df;
   font-family: "Sora", sans-serif;
-  max-height: 90vh;
+  max-height: 85vh;
 }
 
 .custom-settings-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 20px 30px;
+  padding: 15px 20px;
   border-bottom: 1px solid rgba(255,255,255,0.05);
   background: linear-gradient(180deg, rgba(255,255,255,0.05) 0%, transparent 100%);
 }
@@ -2761,21 +2763,22 @@ button {
 }
 
 .custom-settings-sidebar {
-  width: 220px;
+  width: 180px;
   background: rgba(0,0,0,0.2);
   border-right: 1px solid rgba(255,255,255,0.05);
   display: flex;
   flex-direction: column;
-  padding: 20px 0;
+  padding: 10px 0;
+  overflow-y: auto;
 }
 
 .custom-settings-sidebar button {
   background: transparent !important;
   border: none !important;
   color: rgba(255,255,255,0.6) !important;
-  padding: 15px 30px;
+  padding: 12px 20px;
   text-align: left;
-  font-size: 0.9rem;
+  font-size: 0.85rem;
   font-weight: 600;
   letter-spacing: 0.05em;
   cursor: pointer;
@@ -2797,7 +2800,7 @@ button {
 
 .custom-settings-content {
   flex: 1;
-  padding: 30px;
+  padding: 20px 25px;
   overflow-y: auto;
 }
 
@@ -2957,7 +2960,15 @@ input:checked + .toggle-slider:before {
     padding: 15px 20px;
   }
   .custom-settings-header h2 {
-    font-size: 1.2rem;
+    font-size: 1.0rem;
+  }
+  .play-button, .start-game-btn, .submit-btn, .confirm-btn, .cancel-btn {
+    padding: 10px 20px;
+    font-size: 0.9rem;
+  }
+  .settings-pane h3 {
+    font-size: 0.95rem;
+    margin-bottom: 15px;
   }
   .custom-settings-content {
     padding: 15px 20px;
@@ -2972,12 +2983,17 @@ input:checked + .toggle-slider:before {
     border-right: none;
     border-bottom: 1px solid rgba(255,255,255,0.05);
     padding: 0;
-    /* Hide scrollbar for a cleaner premium look */
-    -ms-overflow-style: none;
-    scrollbar-width: none;
+    /* Restore scrollbar */
+    -ms-overflow-style: auto;
+    scrollbar-width: auto;
   }
   .custom-settings-sidebar::-webkit-scrollbar {
-    display: none;
+    display: block;
+    height: 4px;
+  }
+  .custom-settings-sidebar::-webkit-scrollbar-thumb {
+    background: rgba(180, 210, 160, 0.4);
+    border-radius: 4px;
   }
   .custom-settings-sidebar button {
     padding: 12px 15px;
@@ -3002,7 +3018,12 @@ input:checked + .toggle-slider:before {
     padding-bottom: 15px;
     margin-bottom: 15px;
   }
+  .setting-row label {
+    font-size: 0.85rem;
+  }
   .setting-row select {
     width: 100%;
+    font-size: 0.85rem;
+    padding: 8px 12px !important;
   }
 }
