@@ -13,6 +13,7 @@ export type EditTool =
 	| "place-mesh"
 	| "paint-water"
 	| "paint-cave"
+	| "paint-snow"
 	| "select";
 
 export type SculptType = "raise" | "lower" | "smooth" | "flatten";
@@ -155,6 +156,7 @@ export class EditModeUI {
 						<button type="button" data-tool="place-mesh" class="edit-asset"><span>Meshes</span></button>
 						<button type="button" data-tool="paint-water" class="edit-asset"><span>Water</span></button>
 						<button type="button" data-tool="paint-cave" class="edit-asset"><span>Cave</span></button>
+						<button type="button" data-tool="paint-snow" class="edit-asset"><span>Snow</span></button>
 						<button type="button" data-tool="select" class="edit-asset"><span>Select</span></button>
 					</div>
 				</div>
@@ -594,7 +596,8 @@ export class EditModeUI {
 			(this.tool === "sculpt" ||
 				this.tool === "paint-road" ||
 				this.tool === "paint-water" ||
-				this.tool === "paint-cave");
+				this.tool === "paint-cave" ||
+				this.tool === "paint-snow");
 		const showOptions =
 			showMeshes || showRoad || showCamera || showSelect || showCave;
 
@@ -623,9 +626,11 @@ export class EditModeUI {
 					? "Size"
 					: this.tool === "paint-cave"
 						? "Tunnel"
-						: showSculpt
-							? "Radius"
-							: "Pencil";
+						: this.tool === "paint-snow"
+							? "Drift"
+							: showSculpt
+								? "Radius"
+								: "Pencil";
 		}
 	}
 

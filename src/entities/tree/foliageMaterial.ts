@@ -1,6 +1,10 @@
 import * as THREE from "three";
 import CustomShaderMaterial from "three-custom-shader-material/vanilla";
-import { FOLIAGE_VERTEX_SHADER } from "./foliageShader";
+import {
+	FOLIAGE_FRAGMENT_SHADER,
+	FOLIAGE_VERTEX_SHADER,
+} from "./foliageShader";
+import { SNOW_GLSL, snowShaderUniforms } from "../../terrain/snowShading";
 
 /** Shared wind clock — call updateFoliageWind(dt) once per frame. */
 export const foliageWind = {
@@ -85,6 +89,9 @@ export function createFoliageMaterial(
 		u_scale: { value: foliageScale },
 		u_windSpeed: { value: windSpeed },
 		u_windTime: foliageWind.u_windTime,
+		// Shared by reference with every other snow-aware material, so painting
+		// snow reaches foliage without touching trees individually.
+		...snowShaderUniforms(),
 	};
 
 	// Match demo: Color('#3f6d21').convertLinearToSRGB()
@@ -93,6 +100,7 @@ export function createFoliageMaterial(
 	const material = new CustomShaderMaterial({
 		baseMaterial: THREE.MeshStandardMaterial,
 		vertexShader: FOLIAGE_VERTEX_SHADER,
+		fragmentShader: SNOW_GLSL + FOLIAGE_FRAGMENT_SHADER,
 		uniforms,
 		alphaMap,
 		alphaTest: 0.35,

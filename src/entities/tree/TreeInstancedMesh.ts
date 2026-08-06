@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { createFoliageMaterial, setFoliageLeafColor, type FoliageMaterial } from "./foliageMaterial";
+import { applySnowToMaterial } from "../../terrain/snowShading";
 
 const TREE_URL = "/models/tree/tree.glb";
 const FOLIAGE_ALPHA_URL = "/models/tree/foliage_alpha3.png";
@@ -109,7 +110,11 @@ export class TreeInstancedMesh {
 			roughness: 0.92,
 			metalness: 0,
 		});
-		
+		// Trunks are instanced; the patch reads instanceMatrix so each tree samples
+		// the mask at its own position. Snow lands on upward-facing bark only, so
+		// the trunk silhouette stays dark instead of turning into a white post.
+		applySnowToMaterial(trunkMaterial);
+
 		this.trunkMesh = new THREE.InstancedMesh(template.trunk.geometry, trunkMaterial, this.capacity);
 		this.trunkMesh.castShadow = true;
 		this.trunkMesh.receiveShadow = true;

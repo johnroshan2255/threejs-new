@@ -34,6 +34,23 @@ export class HumanInput {
     private lastJumpTime = 0;
     private jumpDuration = 0.8;
 
+    /**
+     * Horizontal-only braking, replacing the body's old isotropic linearDamping
+     * of 4.0 (which also capped fall speed at ~2.45 m/s). Same 4.0 rate, so
+     * ground feel is unchanged; Y is now left to gravity.
+     */
+    private static readonly HORIZONTAL_BRAKE = 4.0;
+    /** Limp on the ground during recovery — stop sliding fast. */
+    private static readonly RECOVERY_BRAKE = 8.0;
+    /** Knockback should carry, so bleed it off gently. */
+    private static readonly KNOCKBACK_BRAKE = 1.5;
+    /**
+     * Fall velocity that switches to the airborne animation. Must stay well
+     * inside real terminal velocity — the old -4.0 was unreachable when damping
+     * capped falls at 2.45 m/s, so the fall anim never played.
+     */
+    private static readonly FALL_ANIM_VY = -6.0;
+
     /** Fists vs free gun — bomb is a temporary world pickup. */
     public readonly inventory = new WeaponInventory();
     private weaponWheel: WeaponWheel | null = null;
@@ -510,6 +527,20 @@ export class HumanInput {
         }
     }
 
+    /**
+     * Exponential decay on x/z only, leaving y to gravity. Used by the update
+     * paths that return before the movement setLinvel and so would otherwise
+     * slide forever now that linearDamping is ~0.
+     */
+    private brakeHorizontal(rate: number, dt: number) {
+        const vel = this.human.body.linvel();
+        const keep = 1 / (1 + rate * dt);
+        this.human.body.setLinvel(
+            { x: vel.x * keep, y: vel.y, z: vel.z * keep },
+            true
+        );
+    }
+
     public applyKnockback(impulse: THREE.Vector3) {
         this.human.body.applyImpulse(impulse, true);
         this.knockbackTimer = 0.5; // Stunned for 0.5 seconds while flying
@@ -843,6 +874,8 @@ export class HumanInput {
 
         if (this.recoveryState !== "none") {
             this.recoveryTimer -= dt;
+            // This path returns before the movement setLinvel below, so brake here.
+            this.brakeHorizontal(HumanInput.RECOVERY_BRAKE, dt);
             if (this.recoveryState === "fall") {
                 this.human.playAnimation("fall down");
                 if (this.recoveryTimer <= 0) {
@@ -872,7 +905,9 @@ export class HumanInput {
         }
 
         if (this.knockbackTimer > 0) {
-            if (currentVel.y < -4.0 || now - this.lastJumpTime < this.jumpDuration * 1000) {
+            // Also returns early — bleed the impulse off gently instead of via damping.
+            this.brakeHorizontal(HumanInput.KNOCKBACK_BRAKE, dt);
+            if (currentVel.y < HumanInput.FALL_ANIM_VY || now - this.lastJumpTime < this.jumpDuration * 1000) {
                 if (isRunning && (forward !== 0 || right !== 0) && this.human.animations.has("running jumb")) {
                     this.human.playAnimation("running jumb");
                 } else if (this.human.animations.has("jumbing")) {
@@ -1014,6 +1049,9 @@ export class HumanInput {
             this.isSwimming = false;
         }
 
+        // Gravity off while submerged so the buoyancy lerp below isn't fighting it.
+        this.human.setBuoyant(this.isSwimming);
+
         if (this.isSwimming) {
             // Target meshY is waterSurfaceY - 1.5 so the body is fully submerged for underwater swimming
             const targetMeshY = waterSurfaceY - 1.5;
@@ -1065,7 +1103,7 @@ export class HumanInput {
             this.tryPunchHits();
         } else if (this.isSwimming) {
             this.human.playAnimation("swim");
-        } else if (currentVel.y < -4.0 || performance.now() - this.lastJumpTime < this.jumpDuration * 1000) {
+        } else if (currentVel.y < HumanInput.FALL_ANIM_VY || performance.now() - this.lastJumpTime < this.jumpDuration * 1000) {
             if (isRunning && this.moveDir.lengthSq() > 0.01 && this.human.animations.has("running jumb")) {
                 this.human.playAnimation("running jumb");
             } else if (this.human.animations.has("jumbing")) {

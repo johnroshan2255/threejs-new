@@ -9,6 +9,10 @@ uniform float u_scale;
 uniform float u_windSpeed;
 uniform float u_windTime;
 
+/** Snow lookup data — see terrain/snowShading.ts for the matching fragment side. */
+varying vec3 vSnowWorldPos;
+varying float vSnowUpness;
+
 float inverseLerp(float v, float minValue, float maxValue) {
   return (v - minValue) / (maxValue - minValue);
 }
@@ -73,9 +77,18 @@ void main() {
 
 #ifdef USE_INSTANCING
   mat4 mVM = viewMatrix * modelMatrix * instanceMatrix;
+  // Whole-tree mask lookup: one sample per instance, not per leaf card. Foliage
+  // cards are billboarded and wind-rotated, so a per-vertex world position would
+  // make coverage crawl across the canopy as it sways.
+  vSnowWorldPos = (modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
 #else
   mat4 mVM = modelViewMatrix;
+  vSnowWorldPos = (modelMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
 #endif
+
+  // Trees only ever rotate about Y and scale uniformly, so the object-space
+  // normal's Y already is the world upness — no normal matrix needed.
+  vSnowUpness = normal.y;
 
   vec4 worldViewPosition = mVM * vec4(position, 1.0);
 
@@ -84,6 +97,21 @@ void main() {
   worldViewPosition = applyWind(worldViewPosition);
 
   csm_PositionRaw = projectionMatrix * worldViewPosition;
+}
+`;
+
+/**
+ * Snow on the canopy. Uses the full upness term (unlike grass), because foliage
+ * normals point outward from the blob — so snow lands on top and the underside
+ * stays dark, which is what keeps the tree reading as a tree.
+ */
+export const FOLIAGE_FRAGMENT_SHADER = /* glsl */ `
+varying vec3 vSnowWorldPos;
+varying float vSnowUpness;
+
+void main() {
+  float snow = snowAt(vSnowWorldPos, vSnowUpness);
+  csm_DiffuseColor.rgb = mix(csm_DiffuseColor.rgb, uSnowColor, snow);
 }
 `;
 

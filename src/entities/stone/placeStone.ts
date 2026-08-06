@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { getWorldTerrainY } from "../../terrain/islandHeight";
+import { applySnowToMaterial } from "../../terrain/snowShading";
 
 const DEFAULT_STONE_URL = "/stone/stone_smallC.glb";
 
@@ -28,6 +29,15 @@ function loadStoneTemplate(
 						if (!(child instanceof THREE.Mesh)) return;
 						child.castShadow = true;
 						child.receiveShadow = true;
+						// Patched on the template, which every placed stone shares
+						// by reference (clone(true) does not clone materials). One
+						// patch covers all of them, and the world-space mask still
+						// decides snow per fragment, so bare and snowy stones can
+						// coexist without per-instance data.
+						const mats = Array.isArray(child.material)
+							? child.material
+							: [child.material];
+						for (const mat of mats) if (mat) applySnowToMaterial(mat);
 					});
 					resolve(root);
 				},

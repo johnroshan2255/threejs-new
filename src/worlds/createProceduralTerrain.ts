@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import type { WorldDefinition } from "./worldTypes";
+import { applySnowToMaterial } from "../terrain/snowShading";
 
 function fade(t: number) {
 	return t * t * t * (t * (t * 6 - 15) + 10);
@@ -67,6 +68,10 @@ export function createProceduralTerrain(
 	material: THREE.Material,
 	definition: WorldDefinition
 ): ProceduralTerrainResult {
+	// See createLargeTerrain: snow is patched onto whatever material builds
+	// terrain, so a new caller can't silently ship green ground under snow.
+	applySnowToMaterial(material);
+
 	const { size, segments } = definition;
 	const seed = definition.seed ?? 42;
 	const half = size * 0.5;

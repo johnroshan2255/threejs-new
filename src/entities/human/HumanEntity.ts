@@ -107,6 +107,21 @@ export class HumanEntity {
 	static readonly MESH_Y_OFFSET =
 		HumanEntity.CAPSULE_HALF_HEIGHT + HumanEntity.CAPSULE_RADIUS;
 
+	/**
+	 * The capsule is ~3.9 m tall (~2x human scale), so world gravity of 9.81
+	 * reads as Moon-slow against a body that size. Scale it per-body instead of
+	 * touching world gravity, which the car's mass / suspension is tuned to.
+	 */
+	static readonly GRAVITY_SCALE = 2.0;
+	/**
+	 * Near-zero, NOT the old 4.0. Damping is isotropic in Rapier, so 4.0 capped
+	 * fall speed at g/4 ≈ 2.45 m/s. Horizontal braking is done explicitly in
+	 * HumanInput (which overwrites x/z every frame anyway).
+	 */
+	static readonly LINEAR_DAMPING = 0.05;
+
+	private isBuoyant = false;
+
 	private static readonly ONE_SHOT_ANIMS = [
 		"being carried",
 		"fall down",
@@ -176,8 +191,9 @@ export class HumanEntity {
 				initialPosition.y + halfHeight + radius + 0.15,
 				initialPosition.z
 			)
-			.setLinearDamping(4.0) // High damping to stop instantly when no input
+			.setLinearDamping(HumanEntity.LINEAR_DAMPING)
 			.setAngularDamping(1.0)
+			.setGravityScale(HumanEntity.GRAVITY_SCALE)
 			.lockRotations(); // Keep character upright
 
 		this.body = world.createRigidBody(rigidBodyDesc);
@@ -189,6 +205,16 @@ export class HumanEntity {
 		this.collider = world.createCollider(colliderDesc, this.body);
 
 		this.playAnimation("idle");
+	}
+
+	/**
+	 * Swimming drives Y explicitly, so gravity is switched off while submerged —
+	 * otherwise the scripted buoyancy lerp fights it and the body settles low.
+	 */
+	public setBuoyant(buoyant: boolean) {
+		if (this.isBuoyant === buoyant) return;
+		this.isBuoyant = buoyant;
+		this.body.setGravityScale(buoyant ? 0 : HumanEntity.GRAVITY_SCALE, true);
 	}
 
 	public update(dt: number) {

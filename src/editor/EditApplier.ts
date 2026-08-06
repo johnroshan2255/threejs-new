@@ -43,6 +43,7 @@ import {
 	terrainCellSize,
 } from "../terrain/caveShape";
 import { getCaveSpecs, hasCaves } from "../terrain/caveRegistry";
+import { paintSnowCircle } from "../terrain/snowMask";
 
 /** Default dig radius when placing water on flat ground. */
 export const DEFAULT_WATER_RADIUS = 10;
@@ -323,6 +324,13 @@ export class EditApplier {
 						basin: op.basin,
 					});
 				}
+				return true;
+			}
+			case "paint-snow": {
+				// No mesh, no collider, no grass mask — snow is a shading term that
+				// terrain / grass / foliage / stones all read from one world-space
+				// mask. Painting the mask is the whole operation.
+				paintSnowCircle(op.x, op.z, op.radius, op.strength ?? 1);
 				return true;
 			}
 			case "paint-cave": {

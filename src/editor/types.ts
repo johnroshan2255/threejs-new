@@ -47,6 +47,23 @@ export type PaintRoadOp = WorldEditOpBase & {
 	radius: number;
 };
 
+/**
+ * Paint snow coverage.
+ *
+ * Only the brush stamp is stored. The world-space snow mask texture that every
+ * material samples is re-rendered from these ops on load / undo, the same way a
+ * cave shell rebuilds from its spine — so the op log stays the single source of
+ * truth and saves don't carry a 4 MB texture.
+ */
+export type PaintSnowOp = WorldEditOpBase & {
+	type: "paint-snow";
+	x: number;
+	z: number;
+	radius: number;
+	/** Coverage 0..1 at the brush centre. Defaults to full. */
+	strength?: number;
+};
+
 /** Paint / place water. createSurface + basin cells rebuild the water mesh exactly. */
 export type PaintWaterOp = WorldEditOpBase & {
 	type: "paint-water";
@@ -137,6 +154,7 @@ export type WorldEditOp =
 	| PaintRoadOp
 	| PaintWaterOp
 	| PaintCaveOp
+	| PaintSnowOp
 	| PaintForestOp
 	| RebuildColliderOp
 	| DeleteEntityOp

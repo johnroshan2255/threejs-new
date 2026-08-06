@@ -1,5 +1,6 @@
 import { GUI } from "dat.gui";
 import * as THREE from "three";
+import { SNOW_GLSL, snowShaderUniforms } from "./terrain/snowShading";
 
 interface GrassUniformsInterface {
 	uTime?: { value: number };
@@ -152,6 +153,7 @@ export class GrassMaterial {
 				uGrassAlphaTexture: this.uniforms.grassAlphaTexture,
 				fogColor2: this.uniforms.fogColor2,
 				fogColor3: this.uniforms.fogColor3,
+				...snowShaderUniforms(),
 			};
 
 			shader.vertexShader = `
@@ -172,6 +174,7 @@ export class GrassMaterial {
       varying vec3 vNormal;
       varying vec3 vViewPosition;
       varying vec2 vWindColor;
+      varying vec3 vSnowWorldPos;
       void main() {
         #include <color_vertex>
         
@@ -201,6 +204,12 @@ export class GrassMaterial {
 
         float terrainSize = uTerrainSize;
         vGlobalUV = (terrainSize-vec2(modelPosition.xz))/terrainSize;
+
+        // Captured BEFORE the wind displacement below: sampling the swayed
+        // position would make snow coverage shimmer as the blade moves.
+        // vGlobalUV can't stand in for this — it maps to 0.5..1.5, not 0..1,
+        // which is harmless for tiling noise but wrong for a mask lookup.
+        vSnowWorldPos = modelPosition.xyz;
 
         vec4 noise = texture2D(uNoiseTexture,vGlobalUV+uTime*uNoiseSpeed);
 
@@ -264,14 +273,26 @@ export class GrassMaterial {
       varying vec3 vNormal;
       varying vec3 vViewPosition;
       varying vec2 vWindColor;
-      
+      varying vec3 vSnowWorldPos;
+
+      ${SNOW_GLSL}
+
       void main() {
         vec4 grassAlpha = texture2D(uGrassAlphaTexture,vUv);
 
         vec4 grassVariation = texture2D(uNoiseTexture, vGlobalUV * uNoiseScale);
         vec3 tipColor = mix(uTipColor1,uTipColor2,grassVariation.r);
-        
+
         vec4 diffuseColor = vec4( mix(uBaseColor,tipColor,vUv.y), step(0.1,grassAlpha.r) );
+
+        // Grass deliberately skips the upness term in snowAt(): blades are
+        // near-vertical, so their normal.y is ~0 and it would cancel snow out
+        // completely. Weight by height along the blade instead — tips catch the
+        // most, bases stay greener, which is what a dusted field looks like.
+        {
+          float snow = snowMaskAt(vSnowWorldPos) * mix(0.4, 1.0, vUv.y);
+          diffuseColor.rgb = mix(diffuseColor.rgb, uSnowColor, snow);
+        }
 
         // Warm key + cool fill. Blades are near-vertical so NdotL reads badly on
         // them; the base->tip gradient stands in for it and doubles as cheap AO.

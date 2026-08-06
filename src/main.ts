@@ -19,6 +19,8 @@ import {
 import { setIslandTerrain, getWorldTerrainY, findSafeTerrainSpawn, isOutsideTerrain } from "./terrain/islandHeight";
 import { createLargeTerrain, TERRAIN_CONFIG } from "./terrain/createLargeTerrain";
 import { clearCaves } from "./terrain/caveRegistry";
+import { configureSnowMask } from "./terrain/snowMask";
+import { applySnowToMaterial } from "./terrain/snowShading";
 import { setCaveTerrainColor } from "./entities/cave/createCave";
 import { Pond, REFERENCE_WATER_LOOK } from "./entities/water";
 import { createCar, type CarEntity } from "./entities/car/createCar";
@@ -596,6 +598,13 @@ export class FluffyGrass {
 			// Dug basin cliffs face inward — DoubleSide keeps walls solid from outside.
 			side: THREE.DoubleSide,
 		});
+		// Snow patching lives in the terrain builders (createLargeTerrain /
+		// createProceduralTerrain), so terrainMat picks it up when the island is
+		// built and no call site here has to remember.
+		//
+		// switchWorld configures this per world; the startup world never goes
+		// through it, so size the mask for it explicitly.
+		configureSnowMask(this.activeWorldDef.size);
 
 		// Live look tuning from the browser console, e.g.
 		//   __look.tuning.splitTone = 0.3
@@ -5124,6 +5133,10 @@ export class FluffyGrass {
 			await this.nextFrame();
 
 			this.activeWorldDef = targetDef;
+			// Mask spans the world on XZ, so its extent is per-world. Also clears
+			// coverage, which is correct: snow belongs to the world it was painted
+			// in and edit ops replay right after this.
+			configureSnowMask(targetDef.size);
 			this.currentWorld = target;
 			this.worldGroup.visible = target === "island";
 			this.newWorldGroup.visible = target === "valley";
@@ -5671,6 +5684,7 @@ export class FluffyGrass {
 			flatShading: true,
 			side: THREE.DoubleSide
 		});
+		applySnowToMaterial(material);
 
 		const newTerrain = new THREE.Mesh(geometry, material);
 		newTerrain.position.set(centerX, 0, centerZ);

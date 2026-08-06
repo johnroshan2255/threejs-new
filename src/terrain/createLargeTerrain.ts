@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { applySnowToMaterial } from "./snowShading";
 
 export const TERRAIN_CONFIG = {
 	/** World size on X/Z (units). */
@@ -126,6 +127,12 @@ export function createLargeTerrain(material: THREE.Material): {
 	nrows: number;
 	ncols: number;
 } {
+	// Patched here rather than at the caller: terrain materials are built in
+	// several places (island, custom worlds, valley) and a missed one shows up as
+	// snow that covers grass and rocks but leaves the ground green — which is
+	// exactly what you see from a distance, where grass has faded out.
+	applySnowToMaterial(material);
+
 	const { size, segments } = TERRAIN_CONFIG;
 	const geometry = new THREE.PlaneGeometry(size, size, segments, segments);
 	// Bake flat → ground orientation into the geometry (identity mesh transform).

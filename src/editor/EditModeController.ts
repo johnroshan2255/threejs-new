@@ -25,6 +25,7 @@ import {
 	type CaveNode,
 } from "../terrain/caveShape";
 import { createTerrainCollider } from "../physics/terrainCollider";
+import { clearSnowMask } from "../terrain/snowMask";
 import { WorldEditStore } from "./WorldEditStore";
 import { WorldEditPersistence } from "./WorldEditPersistence";
 import { WorldEditApi } from "./WorldEditApi";
@@ -676,6 +677,12 @@ export class EditModeController {
 			);
 			return;
 		}
+		if (this.tool === "paint-snow") {
+			this.ui.setHint(
+				"Snow: drag to paint drifts · terrain, grass, trees and rocks all pick it up · settles on flat ground, not cliffs"
+			);
+			return;
+		}
 		this.ui.setHint(
 			"Top view: drag / WASD pan · Scroll zoom · switch to Orbit to look around hills"
 		);
@@ -944,7 +951,8 @@ export class EditModeController {
 			tool === "sculpt" ||
 			tool === "paint-road" ||
 			tool === "paint-water" ||
-			tool === "paint-cave"
+			tool === "paint-cave" ||
+			tool === "paint-snow"
 		);
 	}
 
@@ -953,6 +961,7 @@ export class EditModeController {
 		if (this.tool === "paint-road") mat.color.setHex(0xa8906e);
 		else if (this.tool === "paint-water") mat.color.setHex(0x7eb8e8);
 		else if (this.tool === "paint-cave") mat.color.setHex(0xd9a066);
+		else if (this.tool === "paint-snow") mat.color.setHex(0xeef4ff);
 		else mat.color.setHex(0xc8e6a0);
 	}
 
@@ -1053,6 +1062,10 @@ export class EditModeController {
 		this.applier.clearApplied();
 		const generation = ++this.terrainApplyGeneration;
 		this.restoreTerrainBaseline();
+		// The snow mask is derived state, not saved state — undo / redo and remote
+		// snapshots all land here, and coverage has to be rebuilt from the op list
+		// rather than carried over, or erased snow would linger on screen.
+		clearSnowMask();
 		const ops = this.store.toJSON().ops;
 		if (ops.length) {
 			this.applyingRemote = true;
@@ -1639,7 +1652,8 @@ export class EditModeController {
 				if (
 					this.tool === "sculpt" ||
 					this.tool === "paint-road" ||
-					this.tool === "paint-water"
+					this.tool === "paint-water" ||
+					this.tool === "paint-snow"
 				) {
 					const hit = this.pickTerrain(event.clientX, event.clientY);
 					if (hit) {
@@ -1713,7 +1727,8 @@ export class EditModeController {
 					this.painting &&
 					(this.tool === "sculpt" ||
 						this.tool === "paint-road" ||
-						this.tool === "paint-water")
+						this.tool === "paint-water" ||
+						this.tool === "paint-snow")
 				) {
 					void this.brushAt(hit);
 				}
@@ -2018,6 +2033,17 @@ export class EditModeController {
 					z: point.z,
 					radius: this.brushRadius,
 					createSurface: false,
+				})
+			);
+		}
+
+		if (this.tool === "paint-snow") {
+			await this.commitOp(
+				this.store.createOp({
+					type: "paint-snow",
+					x: point.x,
+					z: point.z,
+					radius: this.brushRadius,
 				})
 			);
 		}
