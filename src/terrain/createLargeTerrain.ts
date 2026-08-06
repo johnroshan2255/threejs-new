@@ -161,13 +161,13 @@ export function createLargeTerrain(material: THREE.Material): {
 	const half = size / 2;
 	const heights = new Float32Array((nrows + 1) * (ncols + 1));
 
-	// Rapier column-major: i + j * (nrows + 1) where i is X, j is Z.
-	// So X must vary fastest (inner loop).
+	// Rapier column-major: j + i * (ncols + 1) where j is Z, i is X.
+	// This means Z varies fastest in memory.
 	for (let j = 0; j <= ncols; j++) {
 		for (let i = 0; i <= nrows; i++) {
 			const x = -half + (i / nrows) * size;
 			const z = -half + (j / ncols) * size;
-			const index = i + j * (nrows + 1);
+			const index = j + i * (ncols + 1);
 			heights[index] = sampleTerrainHeight(x, z);
 		}
 	}

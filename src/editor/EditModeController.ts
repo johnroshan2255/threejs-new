@@ -256,7 +256,7 @@ export class EditModeController {
 			this.ortho,
 			this.host.canvas
 		);
-		this.transformControls.visible = false;
+		this.transformControls.getHelper().visible = false;
 		this.transformControls.enabled = false;
 		this.transformControls.setSize(0.9);
 		this.transformControls.addEventListener("dragging-changed", (event) => {
@@ -267,7 +267,7 @@ export class EditModeController {
 				void this.commitSelectionTransform();
 			}
 		});
-		this.host.scene.add(this.transformControls);
+		this.host.scene.add(this.transformControls.getHelper());
 
 		this.ui = new EditModeUI({
 			onRequestEnterEdit: () => {
@@ -585,7 +585,7 @@ export class EditModeController {
 			this.transformControls.enabled = enabled && this.tool === "select";
 			if (!enabled) {
 				this.transformControls.detach();
-				this.transformControls.visible = false;
+				this.transformControls.getHelper().visible = false;
 			}
 		}
 
@@ -2095,10 +2095,10 @@ export class EditModeController {
 			this.transformControls.setMode(this.transformMode);
 			this.transformControls.attach(obj);
 			this.transformControls.enabled = this.tool === "select";
-			this.transformControls.visible = true;
+			this.transformControls.getHelper().visible = true;
 		} else {
 			this.transformControls?.detach();
-			if (this.transformControls) this.transformControls.visible = false;
+			if (this.transformControls) this.transformControls.getHelper().visible = false;
 		}
 		this.refreshHint();
 	}
@@ -2108,7 +2108,7 @@ export class EditModeController {
 		this.transformDragging = false;
 		if (this.transformControls) {
 			this.transformControls.detach();
-			this.transformControls.visible = false;
+			this.transformControls.getHelper().visible = false;
 			this.transformControls.enabled = false;
 		}
 		if (this.selectionHelper) {

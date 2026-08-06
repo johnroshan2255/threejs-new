@@ -10,6 +10,7 @@ export type MobileControls = {
 	isActive: () => boolean;
 	setButtonVisible: (key: string, visible: boolean) => void;
 	setButtonText: (key: string, text: string) => void;
+	setMode: (mode: "car" | "human") => void;
 	dispose: () => void;
 };
 

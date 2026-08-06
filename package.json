@@ -10,7 +10,7 @@
   },
   "devDependencies": {
     "@types/dat.gui": "^0.7.12",
-    "@types/three": "^0.159.0",
+    "@types/three": "^0.185.4",
     "typescript": "^5.2.2",
     "vite": "^5.0.8"
   },
@@ -20,8 +20,8 @@
     "postprocessing": "^6.39.4",
     "socket.io-client": "^4.8.3",
     "stats-gl": "^2.0.1",
-    "three": "^0.159.0",
-    "three-custom-shader-material": "^4.0.0",
-    "three-mesh-bvh": "^0.9.13"
+    "three": "^0.185.1",
+    "three-custom-shader-material": "^6.4.0",
+    "three-mesh-bvh": "^0.9.14"
   }
 }

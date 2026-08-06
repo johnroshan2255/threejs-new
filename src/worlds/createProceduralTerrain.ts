@@ -124,8 +124,9 @@ export function createProceduralTerrain(
 	const nrows = segments;
 	const ncols = segments;
 	const heights = new Float32Array((nrows + 1) * (ncols + 1));
-	for (let col = 0; col <= ncols; col++) {
-		for (let row = 0; row <= nrows; row++) {
+	// Rapier expects Z to vary fastest
+	for (let col = 0; col <= ncols; col++) { // col is X
+		for (let row = 0; row <= nrows; row++) { // row is Z
 			const x = -half + (col / ncols) * size;
 			const z = -half + (row / nrows) * size;
 			heights[row + col * (nrows + 1)] = sample(x, z);

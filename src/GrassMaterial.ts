@@ -324,6 +324,7 @@ export class GrassMaterial {
                 directionalLightShadow = directionalLightShadows[ i ];
                 currentShadow = getShadow( directionalShadowMap[ i ], 
                   directionalLightShadow.shadowMapSize, 
+                  directionalLightShadow.shadowIntensity,
                   directionalLightShadow.shadowBias, 
                   directionalLightShadow.shadowRadius, 
                   vDirectionalShadowCoord[ i ] );
