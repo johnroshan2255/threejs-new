@@ -221,7 +221,19 @@ export function createCarHeadlights(
 			mat.opacity = a * 0.95;
 			lens.visible = a > 0.02;
 		}
-		group.visible = a > 0.02 || config.showMarkers;
+		// The group deliberately stays visible even at zero intensity.
+		//
+		// Hiding it takes the two SpotLights out of the scene's light list, and a
+		// changed light list forces every lit material in the world to rebuild its
+		// node graph. On WebGPU that rebuild re-registers the instanced attribute
+		// buffers for the grass and trees — ~49 MB that is not handed back — so
+		// each dusk and dawn cost both a compile hitch and a step up in GPU memory.
+		// Two spot lights at intensity 0 contribute nothing to the image and only a
+		// few ALU ops per fragment, which is much the cheaper trade.
+		//
+		// Every child manages its own visibility above, so nothing is drawn that
+		// should not be.
+		group.visible = true;
 		for (const marker of markers) {
 			marker.visible = config.showMarkers;
 		}

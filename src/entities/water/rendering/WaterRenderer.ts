@@ -24,11 +24,24 @@ export class WaterRenderer {
     this.causticsPass = new CausticsPass();
   }
 
+  /**
+   * Reflections are resampled through the wave normals, which smears away most
+   * of their detail before it reaches the screen — half resolution is free.
+   */
+  private static readonly REFLECTION_SCALE = 0.5;
+
+  private static scaled(v: number): number {
+    return Math.max(1, Math.floor(v * WaterRenderer.REFLECTION_SCALE));
+  }
+
   /** Allocate pass targets. */
   initialize(width: number, height: number): void {
     this.width = width;
     this.height = height;
-    this.reflectionPass.initialize(width, height);
+    this.reflectionPass.initialize(
+      WaterRenderer.scaled(width),
+      WaterRenderer.scaled(height),
+    );
     this.refractionPass.initialize(width, height);
     this.causticsPass.initialize(this.causticsResolution);
     this.material.setResolution(width, height);
@@ -47,10 +60,17 @@ export class WaterRenderer {
     this.reflectionPass.setWaterLevel(waterMesh.position.y);
 
     if (this.isPerspectiveCamera(camera)) {
-      const grass = scene.getObjectByName('Grass');
-      if (grass) grass.visible = false;
+      // Every grass field is hidden for the mirror pass, not just the first one
+      // getObjectByName happens to return. A world carries one "Grass" group per
+      // field — island, pond surround, each custom-world patch — and together
+      // they are ~196 chunks and ~900k triangles, by far the heaviest thing in
+      // the scene. Reflected grass at water level is a few smeared pixels behind
+      // the wave distortion, so re-rendering all of it was the single most
+      // expensive thing the water did.
+      const grass = scene.getObjectsByProperty('name', 'Grass');
+      for (const g of grass) g.visible = false;
       this.reflectionPass.render(renderer, scene, camera, waterMesh);
-      if (grass) grass.visible = true;
+      for (const g of grass) g.visible = true;
     }
 
     this.refractionPass.render(renderer, scene, camera, waterMesh);
@@ -74,7 +94,10 @@ export class WaterRenderer {
   setSize(width: number, height: number): void {
     this.width = width;
     this.height = height;
-    this.reflectionPass.setSize(width, height);
+    this.reflectionPass.setSize(
+      WaterRenderer.scaled(width),
+      WaterRenderer.scaled(height),
+    );
     this.refractionPass.setSize(width, height);
     this.material.setResolution(width, height);
   }

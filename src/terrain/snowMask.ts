@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { texture as textureNode, uniform } from "three/tsl";
 
 /**
  * World-space snow coverage mask.
@@ -52,17 +53,22 @@ texture.needsUpdate = true;
 let extent = 200;
 
 /**
- * Uniform objects shared by every snow-aware material.
+ * Uniform nodes shared by every snow-aware material.
  *
  * Handed out by reference so a world switch or a colour tweak reaches all of
  * them at once — the same pattern foliageWind uses for the wind clock.
+ *
+ * These are TSL nodes rather than plain `{ value }` bags, but they keep the same
+ * `.value` surface, so `configureSnowMask` and friends read unchanged. Being
+ * nodes is what lets one shared uniform feed every snow-aware node material
+ * without a per-material copy.
  */
 export const snowUniforms = {
-	uSnowMask: { value: texture },
-	uSnowExtent: { value: extent },
-	uSnowColor: { value: SNOW_COLOR.clone() },
+	uSnowMask: textureNode(texture),
+	uSnowExtent: uniform(extent),
+	uSnowColor: uniform(SNOW_COLOR.clone()),
 	/** Global multiplier — 0 disables snow shading entirely. */
-	uSnowStrength: { value: 1 },
+	uSnowStrength: uniform(1),
 };
 
 export function getSnowMaskTexture() {

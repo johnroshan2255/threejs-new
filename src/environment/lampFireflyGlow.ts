@@ -1,8 +1,9 @@
 import * as THREE from "three";
+import { createGlowSprites } from "./glowSprites";
 import { getWorldTerrainY } from "../terrain/islandHeight";
 
 export type LampFireflyGlow = {
-	points: THREE.Points;
+	points: THREE.Object3D;
 	/** World position of the glow (tweak x/y/z to place it). */
 	position: THREE.Vector3;
 	setIntensity: (amount: number) => void;
@@ -57,37 +58,22 @@ export function createLampFireflyGlow(options: {
 		options.z
 	);
 
-	const geometry = new THREE.BufferGeometry();
-	geometry.setAttribute(
-		"position",
-		new THREE.BufferAttribute(
-			new Float32Array([position.x, position.y, position.z]),
-			3
-		)
-	);
-
-	const material = new THREE.PointsMaterial({
-		map: makeSoftGlowTexture(),
+	const glowTex = makeSoftGlowTexture();
+	const glow = createGlowSprites({
+		positions: new Float32Array([position.x, position.y, position.z]),
+		texture: glowTex,
+		color: "#d8ff66",
 		size,
-		color: new THREE.Color("#d8ff66"),
-		transparent: true,
-		opacity: 0,
-		depthWrite: false,
-		blending: THREE.AdditiveBlending,
-		sizeAttenuation: true,
-		alphaTest: 0.01,
 	});
 
-	const points = new THREE.Points(geometry, material);
+	const points = glow.mesh;
 	points.name = "lamp-firefly-glow";
-	points.frustumCulled = false;
 	points.renderOrder = 3;
 	points.visible = false;
 
 	const syncPosition = () => {
-		const pos = geometry.attributes.position as THREE.BufferAttribute;
-		pos.setXYZ(0, position.x, position.y, position.z);
-		pos.needsUpdate = true;
+		glow.offsets.setXYZ(0, position.x, position.y, position.z);
+		glow.offsets.needsUpdate = true;
 	};
 
 	return {
@@ -98,18 +84,17 @@ export function createLampFireflyGlow(options: {
 			const visible = a > 0.05;
 			points.visible = visible;
 			if (!visible) {
-				material.opacity = 0;
+				glow.setOpacity(0);
 				return;
 			}
 			syncPosition();
-			material.size = size * (0.85 + a * 0.35);
-			material.opacity = THREE.MathUtils.clamp(a * 0.95, 0, 1);
+			glow.setSize(size * (0.85 + a * 0.35));
+			glow.setOpacity(THREE.MathUtils.clamp(a * 0.95, 0, 1));
 		},
 		dispose() {
 			points.removeFromParent();
-			geometry.dispose();
-			material.map?.dispose();
-			material.dispose();
+			glow.dispose();
+			glowTex.dispose();
 		},
 	};
 }

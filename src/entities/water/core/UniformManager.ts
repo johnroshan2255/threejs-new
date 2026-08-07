@@ -37,4 +37,21 @@ export class UniformManager {
   has(name: string): boolean {
     return name in this.uniforms;
   }
+
+  /**
+   * Swap a plain entry for a TSL node, carrying its current value across.
+   *
+   * TSL uniform and texture nodes expose the same `.value` an `IUniform` does,
+   * so once promoted every existing `set()` call keeps working unchanged — the
+   * write now lands on something the node graph can read directly instead of on
+   * a bag that has to be handed to a ShaderMaterial.
+   */
+  promote<T extends { value: unknown }>(name: string, node: T): T {
+    const current = this.uniforms[name]?.value;
+    if (current !== undefined && current !== null) {
+      node.value = current;
+    }
+    this.uniforms[name] = node as unknown as IUniform;
+    return node;
+  }
 }

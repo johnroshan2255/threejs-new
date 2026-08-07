@@ -106,7 +106,16 @@ import {
 	fogRadiusForWorld,
 } from "./environment/VolumetricFogPass";
 import { WebGPURenderer, PostProcessing } from "three/webgpu";
-import { pass } from "three/tsl";
+import {
+	pass,
+	blendScreen,
+	smoothstep as smoothstepTsl,
+	toneMapping as toneMappingTsl,
+	uniform,
+	uv,
+} from "three/tsl";
+import { bloom } from "three/addons/tsl/display/BloomNode.js";
+import { godrays } from "three/addons/tsl/display/GodraysNode.js";
 import { setCharacterAlbedo } from "./entities/human/toonCharacter";
 import { SmokeTrailSystem } from "./environment/smokeTrail";
 import { ExplosionSystem } from "./environment/ExplosionSystem";
@@ -178,6 +187,45 @@ const SERVER_URL = import.meta.env.VITE_SERVER_URL || "http://localhost:3000";
  * skipped — they already carry their own albedo.
  */
 const CHARACTER_ALBEDO = 0.58;
+
+/**
+ * Spin damping on bombs.
+ *
+ * Bombs collide as a plain ball, which has no flat face to come to rest on:
+ * Rapier models no rolling resistance, so on any terrain slope a sphere keeps
+ * turning forever and the body never reaches its sleep threshold. A bomb that
+ * creeps through tall grass indefinitely reads as a light flickering on and off
+ * as blades pass in front of it, and it keeps the physics island awake.
+ *
+ * Measured at the island spawn: at 0.5, two of the five bombs were still rolling
+ * six seconds after being nudged; at 2 all five settle and sleep. Damping only
+ * resists rotation, so a thrown bomb's trajectory is unchanged — it simply stops
+ * trundling once it lands.
+ */
+const BOMB_ANGULAR_DAMPING = 2;
+
+/**
+ * How the editor's top-down map view is rendered differently from gameplay.
+ *
+ * Looking straight down from a few hundred metres, an orthographic pixel spans
+ * metres of ground instead of centimetres, so grass blades drop far below the
+ * sampling rate. Every pixel's alpha coverage then flips as the wind moves and
+ * the whole field crawls with green speckle — measured at ~950 isolated
+ * flickering pixels per frame here against ~21 from the gameplay camera.
+ *
+ * This is a map you edit on, not a beauty shot, which is the same reasoning that
+ * already turns off fog and the stylised grade up here.
+ */
+const EDITOR_TOPDOWN = {
+	/** 948 -> 371 speckled pixels. The view is static, so frames are cheap. */
+	supersample: 2,
+	/**
+	 * Grass density ceiling, percent. At 100 the map is a noise field: measured
+	 * 378 speckled pixels at 100% against 174 at 25%, and the view went from 112
+	 * to 246 fps. 40 keeps it reading as grass while roughly halving both.
+	 */
+	grassDensity: 40,
+} as const;
 
 /**
  * Pass-through grade for the editor's top-down view. The composite always runs
@@ -272,6 +320,14 @@ export class FluffyGrass {
 	private waterFrameCounter = 0;
 	private waterDeltaAccumulator = 0;
 	private renderFrameCounter = 0;
+	/** Scratch vector for the dig inset's logical viewport size. */
+	private readonly _pipViewSize = new THREE.Vector2();
+	/** True while the editor's orthographic map view is the one being rendered. */
+	private editorTopDown = false;
+	/** Pixel ratio the quality tier asks for, before any per-view override. */
+	private basePixelRatio = 1.25;
+	/** GPU teardown deferred to the top of a frame — see queueGpuDispose. */
+	private pendingGpuDisposals: Array<() => void> = [];
 	private lastGpuPanelUpdate = 0;
 	private lastSettingsSync = 0;
 	private lastRippleInjection = 0;
@@ -436,6 +492,12 @@ export class FluffyGrass {
 	private fogFollowPlayer = false;
 	private volumetricFog: VolumetricFogSystem | null = null;
 	private postProcessing: PostProcessing | null = null;
+	/** Beauty pass — its camera is retargeted when the editor takes over. */
+	private scenePass: any = null;
+	private bloomNode: any = null;
+	private godRays: any = null;
+	private readonly gradeExposure = uniform(1);
+	private readonly godRayWeight = uniform(0.3);
 
 	private sunMesh: THREE.Mesh | null = null;
 	/** User-facing master switch for the fog raymarch + bloom. */
@@ -543,9 +605,6 @@ export class FluffyGrass {
 		);
 		this.sunMesh.frustumCulled = false;
 		this.scene.add(this.sunMesh);
-
-		this.postProcessing = new PostProcessing(this.renderer);
-		this.postProcessing.outputNode = pass(this.scene, this.camera);
 
 		this.grassMaterial = new GrassMaterial();
 		this.terrainMat = new THREE.MeshPhongMaterial({
@@ -918,7 +977,7 @@ export class FluffyGrass {
 				const rbDesc = RAPIER.RigidBodyDesc.dynamic()
 					.setTranslation(position.x, position.y, position.z)
 					.setLinearDamping(0.1)
-					.setAngularDamping(0.5);
+					.setAngularDamping(BOMB_ANGULAR_DAMPING);
 				const body = getWorld().createRigidBody(rbDesc);
 
 				const colDesc = RAPIER.ColliderDesc.ball(0.5).setMass(10);
@@ -1585,7 +1644,7 @@ export class FluffyGrass {
 			const rbDesc = RAPIER.RigidBodyDesc.dynamic()
 				.setTranslation(startPos.x, startPos.y, startPos.z)
 				.setLinearDamping(0.5)
-				.setAngularDamping(0.5);
+				.setAngularDamping(BOMB_ANGULAR_DAMPING);
 			const body = world.createRigidBody(rbDesc);
 
 			const colDesc = RAPIER.ColliderDesc.ball(0.5).setMass(10);
@@ -2324,7 +2383,7 @@ export class FluffyGrass {
 			const rbDesc = RAPIER.RigidBodyDesc.dynamic()
 				.setTranslation(worldPos.x, worldPos.y, worldPos.z)
 				.setLinearDamping(0.1)
-				.setAngularDamping(0.5);
+				.setAngularDamping(BOMB_ANGULAR_DAMPING);
 			const body = getWorld().createRigidBody(rbDesc);
 
 			const colDesc = RAPIER.ColliderDesc.ball(0.5).setMass(10);
@@ -2926,7 +2985,7 @@ export class FluffyGrass {
 			const rbDesc = RAPIER.RigidBodyDesc.dynamic()
 				.setTranslation(newPos.x, newPos.y, newPos.z)
 				.setLinearDamping(0.1)
-				.setAngularDamping(0.5);
+				.setAngularDamping(BOMB_ANGULAR_DAMPING);
 			const body = getWorld().createRigidBody(rbDesc);
 			getWorld().createCollider(RAPIER.ColliderDesc.ball(0.5).setMass(10), body);
 			bomb.body = body;
@@ -3159,8 +3218,30 @@ export class FluffyGrass {
 		}
 	}
 
-	private render = async () => {
+	/**
+	 * Synchronous on purpose.
+	 *
+	 * `renderer.render()` and `PostProcessing.render()` both complete inline once
+	 * `renderer.init()` has resolved — the async `renderAsync` forms are
+	 * deprecated. Awaiting them anyway parked the loop mid-frame, which let world
+	 * switches and editor teardown destroy textures and buffers that the
+	 * half-built frame still referenced ("used in submit while destroyed").
+	 */
+	private render = () => {
 		requestAnimationFrame(this.render);
+
+		// Teardown queued since the last frame runs here, before anything is
+		// encoded. See queueGpuDispose for why it cannot run where it was asked.
+		if (this.pendingGpuDisposals.length > 0) {
+			const pending = this.pendingGpuDisposals.splice(0);
+			for (const dispose of pending) {
+				try {
+					dispose();
+				} catch (error) {
+					console.error("[dispose] deferred teardown failed:", error);
+				}
+			}
+		}
 
 		const now = performance.now();
 		let frameDt = (now - this.lastFrameTime) * 0.001;
@@ -3172,7 +3253,12 @@ export class FluffyGrass {
 			this.resolutionQuality === "Medium" &&
 			this.renderFrameCounter % 6 === 0
 		) {
-
+			// Medium keeps shadow.autoUpdate off and re-arms the map by hand, so
+			// the expensive depth pass runs at ~10 Hz instead of every frame.
+			const keyShadow = this.dayNight?.lights.keyLight.shadow;
+			if (keyShadow && this.renderer.shadowMap.enabled) {
+				keyShadow.needsUpdate = true;
+			}
 		}
 
 		this.Uniforms.uTime.value += this.clock.getDelta();
@@ -3334,6 +3420,13 @@ export class FluffyGrass {
 
 			// Grass shades itself, so hand it the key/fill/shadow colours directly.
 			this.grassMaterial.setLightParams(this.dayNight.getGrassLightParams());
+			// ...and the rig's real key radiance, which is only used to recover the
+			// shadow mask from what the lighting model receives.
+			this.grassMaterial.setKeyLightRadiance(
+				this.dayNight.lights.keyLight.color,
+				this.dayNight.lights.keyLight.intensity
+			);
+			this.syncPostFxGrade();
 
 
 			if (this.dayNight.fillScale !== this.lookTuning.fill) {
@@ -3366,8 +3459,10 @@ export class FluffyGrass {
 			// Medium quality refreshes it every 6th frame, so moving the frustum
 			// every frame leaves the map's contents describing a stale frustum —
 			// which reads as shadows blinking at ~10 Hz.
+			const keyShadow = this.dayNight.lights.keyLight.shadow;
 			const shadowsWillRedraw =
-				this.renderer.shadowMap.enabled;
+				this.renderer.shadowMap.enabled &&
+				(keyShadow.autoUpdate || keyShadow.needsUpdate);
 			if (shadowsWillRedraw) {
 				const shadowFocus =
 					this.activePlayer === "human" && this.human?.mesh
@@ -3926,26 +4021,67 @@ export class FluffyGrass {
 		// held frame, and rendering against a half-built chain would flash.
 		if (!this.postFxTransitioning) {
 			const renderCam = this.editMode?.isEnabled ? this.editMode.activeCamera : this.camera;
-			if (this.postFxEnabled && this.postProcessing) {
-				await this.postProcessing.renderAsync();
+			this.syncEditorViewTuning();
+
+			// The editor's map view takes the neutral path, which is what the
+			// comment on the grade above has always said it should: a stylised
+			// grade fights readability up there, same reason fog is off.
+			//
+			// It is also what removes the yellow-green blobs from that view. Bloom
+			// gathers clusters of the grass speckle and blurs them into soft round
+			// halos; with the chain bypassed they disappear outright, and the
+			// speckle itself drops from ~948 to ~728 pixels per frame.
+			const usePostFx =
+				this.postFxEnabled && !this.editorTopDown;
+			if (usePostFx && !this.postProcessing) this.setupPostProcessing();
+
+			// Tone mapping belongs to whichever path is drawing: the chain applies
+			// ACES itself, the direct path needs the renderer to do it. Assigned
+			// only on a change — it is part of the pipeline cache key, so writing
+			// it every frame would recompile the world.
+			const wantToneMapping = usePostFx
+				? THREE.NoToneMapping
+				: THREE.ACESFilmicToneMapping;
+			if (this.renderer.toneMapping !== wantToneMapping) {
+				this.renderer.toneMapping = wantToneMapping;
+				this.renderer.toneMappingExposure = 1.0;
+			}
+
+			if (usePostFx && this.postProcessing) {
+				// The beauty pass owns its camera, so the editor's view has to be
+				// pushed into it — otherwise the composite keeps rendering the
+				// gameplay camera while the editor thinks it is in control.
+				if (this.scenePass && this.scenePass.camera !== renderCam) {
+					this.scenePass.camera = renderCam;
+				}
+				this.postProcessing.render();
 			} else {
-				await this.renderer.renderAsync(this.scene, renderCam);
+				this.renderer.render(this.scene, renderCam);
 			}
 
 			if (this.editMode?.isEnabled && this.editMode.isDigging) {
-				const pr = this.renderer.getPixelRatio();
-				const size = Math.floor(300 * pr);
-				const margin = Math.floor(20 * pr);
-				const w = this.renderer.domElement.width;
-				const h = this.renderer.domElement.height;
-				
-				this.renderer.setViewport(w - size - margin, h - size - margin, size, size);
-				this.renderer.setScissor(w - size - margin, h - size - margin, size, size);
+				// setViewport / setScissor take *logical* pixels — three multiplies
+				// them by the pixel ratio itself (`scissorValue.multiplyScalar`).
+				// This used to read `domElement.width` and pre-scale by the ratio,
+				// which double-counted it. At ratio 1 that is a no-op, so it went
+				// unnoticed until the editor started supersampling: the rect landed
+				// outside the render area, WebGPU rejected the scissor, and the
+				// whole frame was discarded.
+				const view = this.renderer.getSize(this._pipViewSize);
+				const w = view.x;
+				const h = view.y;
+				const size = Math.max(1, Math.min(300, Math.floor(Math.min(w, h) * 0.4)));
+				const margin = 20;
+				const x = Math.max(0, w - size - margin);
+				const y = Math.max(0, h - size - margin);
+
+				this.renderer.setViewport(x, y, size, size);
+				this.renderer.setScissor(x, y, size, size);
 				this.renderer.setScissorTest(true);
 				this.renderer.clearDepth();
-				
-				await this.renderer.renderAsync(this.scene, this.editMode.pipCamera);
-				
+
+				this.renderer.render(this.scene, this.editMode.pipCamera);
+
 				this.renderer.setViewport(0, 0, w, h);
 				this.renderer.setScissorTest(false);
 			}
@@ -4089,18 +4225,83 @@ export class FluffyGrass {
 		this.shadowQuality = quality;
 		const shadowsEnabled = quality !== "Low";
 		this.renderer.shadowMap.enabled = shadowsEnabled;
-		this.dayNight?.setShadowQuality(quality === "High" ? 4096 : 2048, 200);
+		// WebGPU has no renderer-wide shadowMap.autoUpdate — the equivalent switch
+		// lives on each light's shadow (ShadowNode reads shadow.autoUpdate /
+		// shadow.needsUpdate). Without this the 4096² map is re-rendered from
+		// scratch every frame, which is most of the cost of a frame.
+		const keyShadow = this.dayNight?.lights.keyLight.shadow;
+		if (keyShadow) {
+			keyShadow.autoUpdate = quality === "High";
+			if (shadowsEnabled) keyShadow.needsUpdate = true;
+		}
+		// 2048 over the +/-200 m ortho box is ~10 cm per texel, which PCF-soft
+		// shadows of a car and some trees cannot resolve past. 4096 cost 96 MB more
+		// of texture memory for a frame that measured pixel-identical.
+		this.dayNight?.setShadowQuality(quality === "High" ? 2048 : 1024, 200);
 		this.grassMaterial.updateGrassGraphicsChange(quality === "High");
 	}
 
 	private applyResolutionQuality(quality: QualityLevel) {
 		this.resolutionQuality = quality;
-		const pixelRatio =
-			quality === "Low" ? 0.75 : quality === "Medium" ? 1 : 2;
-		this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, pixelRatio));
+		const cap = quality === "Low" ? 0.75 : quality === "Medium" ? 1 : 2;
+		const target = Math.min(window.devicePixelRatio, cap);
+
+		// Never render the world below ~1.25 device pixels per CSS pixel.
+		//
+		// A grass blade is roughly a pixel wide at mid distance, so at 1:1 it lands
+		// under the sampling rate: every pixel's coverage jumps between discrete
+		// values as the wind moves the blade, and against the HDR/bloom chain that
+		// reads as green speckle crawling over the whole field. Measured on the
+		// island at 1200x750, isolated flickering pixels per frame:
+		//
+		//   1.00x -> 49    1.25x -> 9    1.50x -> 11    2.00x -> 8
+		//
+		// So the artifact is gone by 1.25x and buys nothing above it. The frame
+		// cost of that step is ~11% (129 -> 115 fps unthrottled), which is a good
+		// trade for the two tiers that are about looking right. `Low` is the tier
+		// that exists to buy frames back, so it keeps its 0.75x and its speckle.
+		const supersampleFloor = quality === "Low" ? target : 1.25;
+		this.basePixelRatio = Math.max(target, supersampleFloor);
+		this.applyPixelRatio();
 		this.resizePondTargets();
 
 		this.syncVolumetricFogQuality();
+	}
+
+	private applyPixelRatio() {
+		const ratio = this.editorTopDown
+			? Math.max(this.basePixelRatio, EDITOR_TOPDOWN.supersample)
+			: this.basePixelRatio;
+		if (this.renderer.getPixelRatio() !== ratio) {
+			this.renderer.setPixelRatio(ratio);
+			this.resizePondTargets();
+		}
+	}
+
+	/**
+	 * Re-apply grass density, folding in the editor map view's ceiling.
+	 *
+	 * Kept separate from the user's `grassDensity` setting so entering and
+	 * leaving the editor never overwrites what they chose.
+	 */
+	private applyGrassDensity() {
+		const density = this.editorTopDown
+			? Math.min(this.grassDensity, EDITOR_TOPDOWN.grassDensity)
+			: this.grassDensity;
+		this.islandGrassField?.setDensity(density);
+		this.valleyGrassField?.setDensity(density);
+		this.customGrassField?.setDensity(density);
+	}
+
+	/** Called each frame; acts only when the editor's map view comes or goes. */
+	private syncEditorViewTuning() {
+		const active =
+			!!this.editMode?.isEnabled &&
+			this.editMode.activeCamera?.type === "OrthographicCamera";
+		if (active === this.editorTopDown) return;
+		this.editorTopDown = active;
+		this.applyPixelRatio();
+		this.applyGrassDensity();
 	}
 
 	private applyWaterQuality(quality: QualityLevel) {
@@ -4111,6 +4312,85 @@ export class FluffyGrass {
 		this.waterDeltaAccumulator = 0;
 		this.editorWaterFrameCounter = 0;
 		this.editorWaterDeltaAccumulator = 0;
+	}
+
+	/**
+	 * Build the composite: god rays, bloom, vignette, ACES.
+	 *
+	 * Runs after the day/night rig exists because the god rays are anchored to
+	 * the key light rather than to a proxy sun mesh — the node wants the light
+	 * itself, not something standing in for it.
+	 *
+	 * Effect order matches the WebGL EffectPass it replaces: rays and bloom are
+	 * added in linear HDR, then the vignette, and tone mapping last so the whole
+	 * composite rolls off together instead of clipping before it is graded.
+	 */
+	private setupPostProcessing() {
+		if (this.postProcessing) return;
+		const keyLight = this.dayNight?.lights.keyLight;
+		if (!keyLight) return;
+
+		// GodraysNode marches the key light's shadow map, and reads
+		// `shadow.map.depthTexture` while its graph is being built. That map is
+		// allocated by the light's ShadowNode the first time a lit material is
+		// compiled, so the chain cannot be assembled until at least one ordinary
+		// frame has been drawn — the render loop retries until it can.
+		if (!keyLight.shadow.map) return;
+
+		const scenePass = pass(this.scene, this.camera);
+		this.scenePass = scenePass;
+
+		const sceneColor = scenePass.getTextureNode("output");
+		const sceneDepth = scenePass.getTextureNode("depth");
+
+		const rays = godrays(sceneDepth as any, this.camera, keyLight);
+		rays.raymarchSteps.value = 40;
+		rays.density.value = 0.55;
+		rays.maxDensity.value = 0.4;
+		this.godRays = rays;
+
+		// SCREEN blend, as the WebGL GodRaysEffect used: rays lift the image
+		// toward white without ever pushing it past it, which additive would.
+		const withRays: any = blendScreen(sceneColor, rays.mul(this.godRayWeight));
+
+		const bloomNode = bloom(withRays, 0.42, 0.4, 0.72);
+		// Bloom keeps a 5-level mip chain (10 targets) plus a bright pass, and the
+		// composite reads all five, so the level count is not safely tunable. The
+		// input scale is: at 0.35 the chain holds roughly half the pixels of the
+		// 0.5 default, and the result is a wide blur that never showed that detail
+		// in the first place.
+		bloomNode.setResolutionScale(0.35);
+		this.bloomNode = bloomNode;
+
+		// Vignette: no addon node for this one, and it is two lines.
+		const vignetteAmount = uv().sub(0.5).length().mul(1.4142);
+		const vignetteFactor = smoothstepTsl(1.0, 0.1, vignetteAmount.sub(0.1))
+			.mul(0.5)
+			.add(0.5);
+
+		const graded: any = withRays.add(bloomNode).mul(vignetteFactor);
+
+		this.postProcessing = new PostProcessing(this.renderer);
+		this.postProcessing.outputNode = toneMappingTsl(
+			THREE.ACESFilmicToneMapping,
+			this.gradeExposure,
+			graded
+		);
+	}
+
+	/**
+	 * Push the current day/night grade into the composite.
+	 *
+	 * The grade table already described exposure and bloom per period; under
+	 * WebGL those numbers were read by the fog pass's composite, which this chain
+	 * replaces. Without this they would simply go unused.
+	 */
+	private syncPostFxGrade() {
+		if (!this.dayNight || !this.bloomNode) return;
+		const grade = this.dayNight.getGrade();
+		this.gradeExposure.value = grade.exposure;
+		this.bloomNode.strength.value = grade.bloomStrength;
+		this.bloomNode.threshold.value = grade.bloomThreshold;
 	}
 
 	/**
@@ -4132,7 +4412,10 @@ export class FluffyGrass {
 	
 	
 	private syncVolumetricFogQuality() {
-		const multisampled = false;
+		// WebGPU resolves alpha-to-coverage against the *target's* sample count.
+		// With `antialias: true` the canvas and the PostProcessing pass target both
+		// inherit renderer.samples, so this is the real number, not a quality tier.
+		const multisampled = this.renderer.samples > 1;
 		this.grassMaterial.setAlphaToCoverage(multisampled);
 		setFoliageAlphaToCoverage(multisampled, this.scene);
 	}
@@ -4482,9 +4765,7 @@ export class FluffyGrass {
 
 	private setGrassDensity(percent: number) {
 		this.grassDensity = THREE.MathUtils.clamp(percent, 0, 100);
-		this.islandGrassField?.setDensity(this.grassDensity);
-		this.valleyGrassField?.setDensity(this.grassDensity);
-		this.customGrassField?.setDensity(this.grassDensity);
+		this.applyGrassDensity();
 	}
 
 	private setGrassCullDistance(meters: number) {
@@ -5511,9 +5792,27 @@ export class FluffyGrass {
 		this.syncVolumetricFogQuality();
 	}
 
+	/**
+	 * Defer GPU teardown to the start of the next frame.
+	 *
+	 * The render loop is `async` on WebGPU, so it can be parked on an `await`
+	 * partway through building a frame. A world switch or an editor action that
+	 * disposes render targets right then destroys the underlying textures before
+	 * the half-built frame is submitted — which the device rejects with
+	 * "Destroyed texture used in a submit", and the frame is lost.
+	 *
+	 * Queuing instead means teardown always lands between frames, when nothing is
+	 * encoded. The WebGL renderer never needed this because `render()` was
+	 * synchronous and could not be interleaved with.
+	 */
+	private queueGpuDispose(dispose: () => void) {
+		this.pendingGpuDisposals.push(dispose);
+	}
+
 	private disposeIslandWorld() {
-		this.pond?.mesh.removeFromParent();
-		this.pond?.dispose();
+		const pond = this.pond;
+		pond?.mesh.removeFromParent();
+		if (pond) this.queueGpuDispose(() => pond.dispose());
 		this.pond = undefined;
 
 		this.disposeEditorPondsIn(this.worldGroup);
@@ -5574,7 +5873,7 @@ export class FluffyGrass {
 				continue;
 			}
 			pond.mesh.removeFromParent();
-			pond.dispose();
+			this.queueGpuDispose(() => pond.dispose());
 		}
 		this.editorPonds = kept;
 		this.resizePondTargets();
@@ -5592,6 +5891,19 @@ export class FluffyGrass {
 	}
 
 	private disposeWorldGroup(group: THREE.Group) {
+		// The instanced tree manager outlives every world — a switch re-parents it
+		// rather than rebuilding it — so its geometry and materials must not be
+		// torn down here. Detaching first keeps it out of both the traversal and
+		// the clear() below.
+		//
+		// Under WebGL this only leaked a rebuild: disposing a geometry dropped its
+		// GL buffers and the next draw quietly recreated them. WebGPU destroys the
+		// GPUBuffer for real, and the next frame's instanceMatrix upload lands on a
+		// dead handle — thousands of "used in submit while destroyed" per switch.
+		const treeGroup = this.treeManager?.group;
+		const treesWereHere = !!treeGroup && treeGroup.parent === group;
+		if (treesWereHere) group.remove(treeGroup!);
+
 		group.traverse((object) => {
 			if (!(object instanceof THREE.Mesh || object instanceof THREE.Points)) return;
 			if (
@@ -5613,6 +5925,8 @@ export class FluffyGrass {
 			}
 		});
 		group.clear();
+
+		if (treesWereHere) group.add(treeGroup!);
 	}
 
 	private disposeBombs() {
@@ -5816,6 +6130,7 @@ export class FluffyGrass {
 
 const canvas = document.querySelector("#canvas") as HTMLCanvasElement;
 const app = new FluffyGrass(canvas);
+if (import.meta.env.DEV) (window as any).__game = app;
 app.start().catch((err) => {
 	console.error("Failed to start FluffyGrass:", err);
 	(window as unknown as { __bootError?: string }).__bootError =

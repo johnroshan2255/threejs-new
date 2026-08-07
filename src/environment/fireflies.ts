@@ -1,9 +1,10 @@
 import * as THREE from "three";
+import { createGlowSprites } from "./glowSprites";
 import { getWorldTerrainY } from "../terrain/islandHeight";
 import { TERRAIN_CONFIG } from "../terrain/createLargeTerrain";
 
 export type Fireflies = {
-	points: THREE.Points;
+	points: THREE.Object3D;
 	update: (
 		dt: number,
 		intensity: number,
@@ -203,6 +204,11 @@ export function createFireflies(options: FirefliesOptions = {}): Fireflies {
 
 	const fireflies: Firefly[] = [];
 	const positions = new Float32Array(count * 3);
+	// Per-insect twinkle: [phase, rate] pairs. Each firefly already carries a
+	// random phase and speed for its flight path; reusing them here means the
+	// swarm blinks the way a real one does — out of step with itself — instead
+	// of every insect peaking on the same frame.
+	const pulse = new Float32Array(count * 2);
 	const glowTex = makeSoftGlowTexture();
 
 	for (let i = 0; i < count; i++) {
@@ -213,26 +219,23 @@ export function createFireflies(options: FirefliesOptions = {}): Fireflies {
 		positions[i * 3] = f.cx;
 		positions[i * 3 + 1] = f.cy;
 		positions[i * 3 + 2] = f.cz;
+		pulse[i * 2] = f.phase;
+		pulse[i * 2 + 1] = 0.6 + f.speed * 0.55;
 	}
 
-	const geometry = new THREE.BufferGeometry();
-	geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-
-	const material = new THREE.PointsMaterial({
-		map: glowTex,
+	const swarm = createGlowSprites({
+		positions,
+		pulse,
+		texture: glowTex,
+		color: "#d8ff66",
 		size: 0.35,
-		color: new THREE.Color("#d8ff66"),
-		transparent: true,
-		opacity: 0,
-		depthWrite: false,
-		blending: THREE.AdditiveBlending,
-		sizeAttenuation: true,
-		alphaTest: 0.01,
+		// Fireflies wander right past the chase camera. Without a cap, one of them
+		// at arm's length is a screen-filling additive flash.
+		maxScreenPx: 56,
 	});
 
-	const points = new THREE.Points(geometry, material);
+	const points = swarm.mesh;
 	points.name = "fireflies";
-	points.frustumCulled = false;
 	points.renderOrder = 2;
 
 	let time = 0;
@@ -246,12 +249,12 @@ export function createFireflies(options: FirefliesOptions = {}): Fireflies {
 			const visible = intensity > 0.05;
 			points.visible = visible;
 			if (!visible) {
-				material.opacity = 0;
+				swarm.setOpacity(0);
 				return;
 			}
 
-			material.size = 0.2 + intensity * 0.14 + avgBoost * 0.5;
-			material.opacity = THREE.MathUtils.clamp(intensity * 0.85, 0, 0.95);
+			swarm.setSize(0.2 + intensity * 0.14 + avgBoost * 0.5);
+			swarm.setOpacity(THREE.MathUtils.clamp(intensity * 0.85, 0, 0.95));
 
 			const threatOn =
 				!!lightThreat &&
@@ -263,7 +266,7 @@ export function createFireflies(options: FirefliesOptions = {}): Fireflies {
 			const cosCone = Math.cos(halfAngle);
 			const headI = lightThreat?.intensity ?? 0;
 
-			const pos = geometry.attributes.position as THREE.BufferAttribute;
+			const pos = swarm.offsets;
 			for (let i = 0; i < fireflies.length; i++) {
 				const f = fireflies[i];
 
@@ -364,12 +367,11 @@ export function createFireflies(options: FirefliesOptions = {}): Fireflies {
 			}
 			pos.needsUpdate = true;
 
-			material.opacity *= 0.72 + 0.28 * Math.sin(time * 2.1);
+			swarm.setTime(time);
 		},
 		dispose() {
 			points.removeFromParent();
-			geometry.dispose();
-			material.dispose();
+			swarm.dispose();
 			glowTex.dispose();
 		},
 	};

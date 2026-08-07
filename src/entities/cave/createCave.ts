@@ -1,4 +1,5 @@
 import * as THREE from "three";
+import { attribute, clamp, materialColor, mix, uniform } from "three/tsl";
 import { buildCaveGeometry, geometryFromCaveMeshData } from "../../terrain/caveMesh";
 import type { CaveGeometryResult } from "../../terrain/caveMesh";
 import type { CaveMeshRequest } from "../../terrain/caveMeshCore";
@@ -23,7 +24,7 @@ let sharedRockMaterial: THREE.MeshPhongMaterial | null = null;
  * Ground colour the mouth fades into. Lives outside the material so a world
  * switch can retint every existing cave without rebuilding shaders.
  */
-const terrainTint = { value: new THREE.Color(0x1d360c) };
+const terrainTint = uniform(new THREE.Color(0x1d360c));
 
 /** Match the mouths to the active world's terrain colour. */
 export function setCaveTerrainColor(color: THREE.ColorRepresentation) {
@@ -49,7 +50,15 @@ function rockMaterial(): THREE.MeshPhongMaterial {
 			side: THREE.DoubleSide,
 		});
 		sharedRockMaterial.name = "cave-rock";
-		// onBeforeCompile terrain blend temporarily disabled for WebGPU migration
+		// The mesher writes a 0..1 blend per vertex that runs from rock deep in the
+		// tunnel to ground colour at the mouth. Tinting the albedo (rather than the
+		// final colour) keeps the lighting running over the blended value, which is
+		// what stops the mouth reading as a flat brown ring pasted on the grass.
+		(sharedRockMaterial as any).colorNode = mix(
+			materialColor,
+			terrainTint,
+			clamp(attribute("aTerrainBlend", "float"), 0.0, 1.0)
+		);
 	}
 	return sharedRockMaterial;
 }

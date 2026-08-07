@@ -1,105 +1,89 @@
 import {
   ClampToEdgeWrapping,
-  Color,
   FloatType,
   NearestFilter,
-  NoColorSpace,
   RGBAFormat,
   type Texture,
-  type RenderTarget,
 } from 'three';
-import { RenderTargets } from '../core/RenderTargets';
+import { StorageTexture } from 'three/webgpu';
 
 /**
- * GPU heightfield storage (ping-pong render targets).
+ * GPU heightfield storage (ping-pong storage textures).
  *
  * Owns simulation buffers and exposes read/write textures.
  * Does not run the wave equation — that lives in {@link RippleSimulation}.
+ *
+ * These are `StorageTexture`s rather than render targets because the simulation
+ * is a compute dispatch, not a draw. A render target would drag along a whole
+ * render pass — attachments, viewport, pipeline state — to run what is really
+ * just a stencil over a 2D array.
  */
 export class HeightField {
   readonly resolution: number;
 
-  private readonly renderTargets: RenderTargets;
-  private readTarget: RenderTarget | null = null;
-  private writeTarget: RenderTarget | null = null;
-  private readonly _clearColor = new Color();
+  private readTexture_: StorageTexture | null = null;
+  private writeTexture_: StorageTexture | null = null;
 
-  constructor(resolution: number, renderTargets: RenderTargets = new RenderTargets()) {
+  constructor(resolution: number) {
     this.resolution = resolution;
-    this.renderTargets = renderTargets;
   }
 
-  /** Allocate ping-pong float targets (data buffers, not color images). */
+  /** Allocate the ping-pong pair. */
   initialize(): void {
-    if (this.readTarget && this.writeTarget) {
+    if (this.readTexture_ && this.writeTexture_) {
       return;
     }
 
-    const options = {
-      type: FloatType,
-      format: RGBAFormat,
-      minFilter: NearestFilter,
-      magFilter: NearestFilter,
-      wrapS: ClampToEdgeWrapping,
-      wrapT: ClampToEdgeWrapping,
-      depthBuffer: false,
-      stencilBuffer: false,
-    } as const;
-
-    this.readTarget = this.renderTargets.create(this.resolution, this.resolution, options);
-    this.writeTarget = this.renderTargets.create(this.resolution, this.resolution, options);
-
-    for (const target of [this.readTarget, this.writeTarget]) {
-      target.texture.generateMipmaps = false;
-      target.texture.colorSpace = NoColorSpace;
-    }
+    this.readTexture_ = this.createTexture();
+    this.writeTexture_ = this.createTexture();
   }
 
-  /** Clear both buffers to a flat surface. */
-  clear(renderer: any): void {
-    if (!this.readTarget || !this.writeTarget) {
-      return;
-    }
-
-    const previous = renderer.getRenderTarget();
-    renderer.getClearColor(this._clearColor);
-    const previousAlpha = renderer.getClearAlpha();
-
-    renderer.setClearColor(0x000000, 0);
-    renderer.setRenderTarget(this.readTarget);
-    renderer.clear(true, true, true);
-    renderer.setRenderTarget(this.writeTarget);
-    renderer.clear(true, true, true);
-
-    renderer.setClearColor(this._clearColor, previousAlpha);
-    renderer.setRenderTarget(previous);
+  private createTexture(): StorageTexture {
+    const tex = new StorageTexture(this.resolution, this.resolution);
+    // R = current height, G = previous height. Float so the wave integrator does
+    // not quantise, and nearest because neighbouring texels are discrete samples
+    // of the simulation grid, not an image to be smoothed.
+    tex.type = FloatType;
+    tex.format = RGBAFormat;
+    tex.minFilter = NearestFilter;
+    tex.magFilter = NearestFilter;
+    tex.wrapS = ClampToEdgeWrapping;
+    tex.wrapT = ClampToEdgeWrapping;
+    tex.generateMipmaps = false;
+    return tex;
   }
+
+  /**
+   * Storage textures start zeroed by the backend, which is already a flat
+   * surface — there is nothing to clear.
+   */
+  clear(_renderer: unknown): void {}
 
   /** Texture currently holding the latest heights. */
   get readTexture(): Texture | null {
-    return this.readTarget ? RenderTargets.texture(this.readTarget) : null;
+    return this.readTexture_;
   }
 
-  get read(): RenderTarget | null {
-    return this.readTarget;
+  get read(): StorageTexture | null {
+    return this.readTexture_;
   }
 
   /** Target that the next simulation pass should write into. */
-  get write(): RenderTarget | null {
-    return this.writeTarget;
+  get write(): StorageTexture | null {
+    return this.writeTexture_;
   }
 
   /** Swap read/write after a simulation step. */
   swap(): void {
-    const previous = this.readTarget;
-    this.readTarget = this.writeTarget;
-    this.writeTarget = previous;
+    const tmp = this.readTexture_;
+    this.readTexture_ = this.writeTexture_;
+    this.writeTexture_ = tmp;
   }
 
-  /** Release GPU resources. */
   dispose(): void {
-    this.renderTargets.dispose();
-    this.readTarget = null;
-    this.writeTarget = null;
+    this.readTexture_?.dispose();
+    this.writeTexture_?.dispose();
+    this.readTexture_ = null;
+    this.writeTexture_ = null;
   }
 }

@@ -1,4 +1,31 @@
 import * as THREE from "three";
+import { MeshBasicNodeMaterial } from "three/webgpu";
+import {
+	Fn,
+	abs,
+	cameraProjectionMatrix,
+	cameraViewMatrix,
+	clamp,
+	dot,
+	float,
+	length,
+	materialColor,
+	max,
+	mix,
+	modelViewMatrix,
+	normalView,
+	normalize,
+	positionLocal,
+	positionViewDirection,
+	pow,
+	saturate,
+	select,
+	smoothstep,
+	uniform,
+	vec2,
+	vec3,
+	vec4,
+} from "three/tsl";
 
 /**
  * Genshin-style character shading: rim light, cool shadow hue, outlines, and
@@ -47,16 +74,26 @@ import * as THREE from "three";
 
 /** Shared per-frame NPR params — one object referenced by every character material. */
 export const toonCharacterUniforms = {
-	uRimColor: { value: new THREE.Color(0xffe6c0) },
-	uRimStrength: { value: 0.7 },
-	uRimPower: { value: 3.0 },
-	uCharShadowTint: { value: new THREE.Color(0x5c76c8) },
+	uRimColor: uniform(new THREE.Color(0xffe6c0)),
+	uRimStrength: uniform(0.7),
+	uRimPower: uniform(3.0),
+	uCharShadowTint: uniform(new THREE.Color(0x5c76c8)),
 	/** How far the unlit side is pushed toward the tint hue. */
-	uCharShadowTintStrength: { value: 0.4 },
-	uSpecColor: { value: new THREE.Color(0xffffff) },
-	uSpecPower: { value: 48.0 },
-	uSpecThreshold: { value: 0.45 },
-	uSpecSoftness: { value: 0.08 },
+	uCharShadowTintStrength: uniform(0.4),
+	uSpecColor: uniform(new THREE.Color(0xffffff)),
+	uSpecPower: uniform(48.0),
+	uSpecThreshold: uniform(0.45),
+	uSpecSoftness: uniform(0.08),
+	/**
+	 * World-space direction *toward* the key light.
+	 *
+	 * The GLSL version read `directionalLights[0]` straight out of the light
+	 * uniform block. Node materials give no equivalent handle on "the first
+	 * directional light", and the NPR terms only ever wanted the key anyway — so
+	 * it is fed in explicitly, alongside the rest of the day/night params.
+	 */
+	uKeyDirection: uniform(new THREE.Vector3(0, 1, 0)),
+	uKeyColor: uniform(new THREE.Color(0xffffff)),
 	/**
 	 * Low by default: in the no-ramp path the material's own GGX lobe already
 	 * provides a highlight, so this is a small stylised accent rather than the
@@ -64,23 +101,26 @@ export const toonCharacterUniforms = {
 	 * albedo is what blew the character out. Raise it when ramp is on, where
 	 * there is no GGX to begin with.
 	 */
-	uSpecStrength: { value: 0.1 },
+	uSpecStrength: uniform(0.1),
 };
 
 /** Shared outline params. Width is in *pixels*, so model scale doesn't matter. */
 export const toonOutlineUniforms = {
-	uOutlineWidth: { value: 1.6 },
+	uOutlineWidth: uniform(1.6),
 	/** Distance at which the outline is exactly uOutlineWidth pixels wide. */
-	uRefDistance: { value: 6.0 },
+	uRefDistance: uniform(6.0),
 	/** Floor on the distance falloff so far silhouettes keep an outline. */
-	uMinScale: { value: 0.3 },
-	uResolution: { value: new THREE.Vector2(1, 1) },
+	uMinScale: uniform(0.3),
+	uResolution: uniform(new THREE.Vector2(1, 1)),
 };
 
 export type ToonCharacterLight = {
 	rimColor: THREE.Color;
 	rimStrength: number;
 	shadowTint: THREE.Color;
+	/** World-space direction toward the key light (dayNight.getSunDirection()). */
+	keyDirection?: THREE.Vector3;
+	keyColor?: THREE.Color;
 };
 
 /** Feed the day/night table into every character material at once. */
@@ -88,6 +128,10 @@ export function updateToonCharacterLight(p: ToonCharacterLight) {
 	toonCharacterUniforms.uRimColor.value.copy(p.rimColor);
 	toonCharacterUniforms.uRimStrength.value = p.rimStrength;
 	toonCharacterUniforms.uCharShadowTint.value.copy(p.shadowTint);
+	if (p.keyDirection) {
+		toonCharacterUniforms.uKeyDirection.value.copy(p.keyDirection).normalize();
+	}
+	if (p.keyColor) toonCharacterUniforms.uKeyColor.value.copy(p.keyColor);
 }
 
 /** Outline width is screen-space, so it needs the drawing-buffer size. */
@@ -151,7 +195,63 @@ function getSharedRamp(): THREE.DataTexture {
  * highlight. Hooked at `lights_fragment_end` so it lands after light
  * accumulation but before tone mapping, and can therefore bloom.
  */
-function patchToonShader(material: THREE.MeshToonMaterial) { return; }
+function patchToonShader(material: THREE.MeshToonMaterial) {
+	const u = toonCharacterUniforms;
+	const mat = material as any;
+
+	// View-space, to match normalView / positionViewDirection below. The GLSL
+	// version got this for free because directionalLights[].direction is already
+	// view space.
+	const keyDir: any = cameraViewMatrix.transformDirection(u.uKeyDirection);
+	const ndl: any = dot(normalView, keyDir);
+
+	// Unlit side gets a cool *hue*, not just a lower value. Normalising by
+	// luminance keeps this a rotation rather than a darkening.
+	//
+	// GLSL applied this to reflectedLight after accumulation, at full strength on
+	// the direct term and half on the indirect. There is no node hook between
+	// accumulation and output, so it moves into the albedo — where it reaches
+	// both terms at one strength. The terminator hue is what the effect is for,
+	// and that survives the move.
+	const shadowMask = float(1.0).sub(smoothstep(-0.08, 0.18, ndl));
+	const tintLuma: any = max(
+		dot(u.uCharShadowTint as any, vec3(0.2126, 0.7152, 0.0722)),
+		float(1e-4)
+	);
+	const tint: any = (u.uCharShadowTint as any).div(tintLuma);
+	mat.colorNode = (materialColor as any).mul(
+		mix(vec3(1.0), tint, shadowMask.mul(u.uCharShadowTintStrength))
+	);
+
+	// Silhouette rim. Added as emission rather than modulated by albedo so it
+	// still reads on dark clothing — that separation from the background is most
+	// of what makes a character look "anime". Emissive is exactly where
+	// `totalEmissiveRadiance` landed, so it still blooms.
+	const fres = pow(
+		saturate(float(1.0).sub(abs(dot(normalView, positionViewDirection)))),
+		u.uRimPower
+	);
+	const rim = fres.mul(smoothstep(-0.25, 0.35, ndl));
+
+	// Hard-edged highlight instead of a GGX lobe.
+	const halfDir = normalize(keyDir.add(positionViewDirection));
+	const rawSpec = pow(saturate(dot(normalView, halfDir)), u.uSpecPower);
+	const spec = smoothstep(
+		u.uSpecThreshold,
+		u.uSpecThreshold.add(u.uSpecSoftness),
+		rawSpec
+	);
+
+	mat.emissiveNode = (u.uRimColor as any)
+		.mul(rim.mul(u.uRimStrength))
+		.add(
+			(u.uKeyColor as any)
+				.mul(u.uSpecColor)
+				.mul(spec.mul(u.uSpecStrength).mul(saturate(ndl)))
+		);
+
+	mat.needsUpdate = true;
+}
 
 /**
  * Screen-space inverted-hull outline.
@@ -162,14 +262,40 @@ function patchToonShader(material: THREE.MeshToonMaterial) { return; }
  * depth/normal post pass at this character count, and gives per-vertex control.
  */
 function createOutlineMaterial(color: THREE.ColorRepresentation) {
-	const mat = new THREE.MeshBasicMaterial({ color, side: THREE.BackSide, depthWrite: true }) as any;
-	mat.uniforms = {
-		uOutlineWidth: { value: 0 },
-		uRefDistance: { value: 0 },
-		uMinScale: { value: 0 },
-		uResolution: { value: new THREE.Vector2() },
-		uOutlineColor: { value: new THREE.Color(color) }
-	};
+	const u = toonOutlineUniforms;
+	const uOutlineColor = uniform(new THREE.Color(color));
+
+	const mat = new MeshBasicNodeMaterial({
+		// Inverted hull: draw only back faces of the inflated shell.
+		side: THREE.BackSide,
+		toneMapped: false,
+		fog: false,
+	});
+
+	mat.vertexNode = Fn(() => {
+		// positionLocal / normalView already carry skinning — NodeMaterial applies
+		// it before it evaluates a vertexNode, which is what the GLSL version was
+		// doing by hand with <skinning_vertex> / <skinnormal_vertex>.
+		const mvPosition: any = modelViewMatrix.mul(vec4(positionLocal, 1.0)).toVar();
+		const clip: any = cameraProjectionMatrix.mul(mvPosition).toVar();
+
+		// Constant pixel width, tapering with distance so far characters don't end
+		// up wearing a thick black suit.
+		const dist = max(mvPosition.z.negate(), float(1e-3));
+		const scale = clamp(u.uRefDistance.div(dist), u.uMinScale, float(1.0));
+		const px = u.uOutlineWidth.mul(scale).mul(2.0).div(u.uResolution);
+
+		const dir2: any = normalView.xy.toVar();
+		const len = length(dir2);
+		// A degenerate normal would otherwise push the vertex to NaN.
+		dir2.assign(select(len.greaterThan(1e-5), dir2.div(len), vec2(0.0)));
+
+		clip.xy = clip.xy.add(dir2.mul(px).mul(clip.w));
+		return clip;
+	})();
+
+	mat.colorNode = uOutlineColor;
+	(mat as any).uniforms = { ...u, uOutlineColor };
 	return mat;
 }
 

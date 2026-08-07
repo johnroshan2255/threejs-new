@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
-import { createFoliageMaterial, setFoliageLeafColor, type FoliageMaterial } from "./foliageMaterial";
+import { createFoliageMaterial, setFoliageInstanceSource, setFoliageLeafColor, type FoliageMaterial } from "./foliageMaterial";
 import { applySnowToMaterial } from "../../terrain/snowShading";
 
 const TREE_URL = "/models/tree/tree.glb";
@@ -84,7 +84,23 @@ export class TreeInstancedMesh {
 	private foliageMesh!: THREE.InstancedMesh;
 	private foliageMaterial!: FoliageMaterial;
 	
-	private capacity = 20000;
+	/**
+	 * Instance slots reserved up front.
+	 *
+	 * An InstancedMesh allocates its whole matrix buffer at construction, so this
+	 * is paid whether or not a single tree exists — and the island places none.
+	 * At 20000 that was 20000*64 B for trunks plus 20000*4 layers*64 B for
+	 * foliage: 6.4 MB of mostly zeroes.
+	 *
+	 * Worse, three re-registers an instance matrix as four vec4 attribute views
+	 * every time the material's node graph rebuilds, and the old registrations
+	 * are not released. Measured: +24.4 MB of reported attribute memory per
+	 * rebuild, which is how the renderer arrived at 228 MB of attributes for a
+	 * scene holding 10 MB of real instance data. Sizing this to something a
+	 * hand-placed world can actually reach cuts both the idle cost and the
+	 * per-rebuild cost by 10x.
+	 */
+	private capacity = 2000;
 	private count = 0;
 	
 	// Map of entityId to index in the instance buffer
@@ -137,8 +153,18 @@ export class TreeInstancedMesh {
 		this.foliageMesh.receiveShadow = true;
 		this.foliageMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
 		
-		// Optional: We can tint individual leaves using instanceColor
-		this.foliageMesh.instanceColor = new THREE.InstancedBufferAttribute(new Float32Array(foliageCapacity * 3), 3);
+		// Wind phase and snow coverage are per tree, so the shader needs each
+		// instance's own translation — hand it the attribute now that it exists.
+		setFoliageInstanceSource(this.foliageMaterial, this.foliageMesh.instanceMatrix);
+
+		// Optional: We can tint individual leaves using instanceColor. Seeded to
+		// white because instance colour *multiplies* the material colour — left at
+		// the zero-fill, every tree added without an explicit leaf colour would
+		// render black.
+		this.foliageMesh.instanceColor = new THREE.InstancedBufferAttribute(
+			new Float32Array(foliageCapacity * 3).fill(1),
+			3
+		);
 		this.foliageMesh.count = 0;
 		
 		this.trunkMesh.frustumCulled = false;

@@ -1,4 +1,27 @@
 import * as THREE from "three";
+import { MeshBasicNodeMaterial } from "three/webgpu";
+import {
+	Fn,
+	If,
+	Loop,
+	abs,
+	clamp,
+	dot,
+	exp,
+	float,
+	floor,
+	fract,
+	max,
+	mix,
+	normalize,
+	positionGeometry,
+	pow,
+	smoothstep,
+	step,
+	uniform,
+	vec2,
+	vec3,
+} from "three/tsl";
 
 export type DayPeriod = "morning" | "noon" | "evening" | "sunset" | "night";
 
@@ -395,7 +418,7 @@ function hourToSunDirection(hour: number, out: THREE.Vector3): THREE.Vector3 {
 	return out.set(Math.cos(t), Math.sin(t), Math.sin(t * 0.35) * 0.35).normalize();
 }
 
-function smoothstep(t: number) {
+function smoothstep01(t: number) {
 	return t * t * (3 - 2 * t);
 }
 
@@ -417,7 +440,7 @@ function sampleAtHour(hour: number, out: Sampled): Sampled {
 		}
 	}
 
-	const t = smoothstep(
+	const t = smoothstep01(
 		THREE.MathUtils.clamp(
 			(probe - from.hour) / Math.max(0.001, to.hour - from.hour),
 			0,
@@ -498,27 +521,197 @@ function sampleAtHour(hour: number, out: Sampled): Sampled {
 	return out;
 }
 
+const hash21 = /*#__PURE__*/ Fn(([input]: [any]) => {
+	const p: any = fract(input.mul(vec2(123.34, 456.21))).toVar();
+	p.addAssign(dot(p, p.add(45.32)));
+	return fract(p.x.mul(p.y));
+});
+
+const vnoise = /*#__PURE__*/ Fn(([p]: [any]) => {
+	const i: any = floor(p).toVar();
+	const f: any = fract(p).toVar();
+	f.assign(f.mul(f).mul(float(3.0).sub(f.mul(2.0))));
+	const a = hash21(i);
+	const b = hash21(i.add(vec2(1.0, 0.0)));
+	const c = hash21(i.add(vec2(0.0, 1.0)));
+	const d = hash21(i.add(vec2(1.0, 1.0)));
+	return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+});
+
+/** 4 octaves — enough for billowy shapes without a heavy sky pass. */
+const fbm = /*#__PURE__*/ Fn(([input]: [any]) => {
+	const p = input.toVar();
+	const v = float(0.0).toVar();
+	const a = float(0.5).toVar();
+	Loop(4, () => {
+		v.addAssign(a.mul(vnoise(p)));
+		p.assign(p.mul(2.02).add(vec2(17.3, 9.1)));
+		a.mulAssign(0.5);
+	});
+	return v;
+});
+
+/**
+ * Procedural sky dome: gradient, sun/moon discs and glow, and domain-warped
+ * clouds — all in one fragment, no cubemap and no extra passes.
+ *
+ * The uniform bag keeps the `{ uName: { value } }` shape the day/night sampler
+ * writes to every frame; each entry is a TSL uniform node, which exposes the
+ * same `.value` while also being usable directly in the node graph.
+ */
 function createSkyMaterial() {
-	const mat = new THREE.MeshBasicMaterial({ color: "#4aa0e0", side: THREE.BackSide, depthWrite: false, fog: false }) as any;
-	mat.uniforms = {
-		uSunDir: { value: new THREE.Vector3(0, 1, 0) },
-		uMoonDir: { value: new THREE.Vector3(0, -1, 0) },
-		uZenith: { value: new THREE.Color("#4aa0e0") },
-		uHorizon: { value: new THREE.Color("#c8e4f5") },
-		uSunColor: { value: new THREE.Color("#fff5e0") },
-		uMoonColor: { value: new THREE.Color("#c4d4ff") },
-		uSunGlow: { value: 1 },
-		uSunIntensity: { value: 1 },
-		uMoonIntensity: { value: 0 },
-		uTime: { value: 0 },
-		uCloudCoverage: { value: 0.45 },
-		uCloudOpacity: { value: 0.85 },
-		uCloudLight: { value: new THREE.Color("#ffffff") },
-		uCloudDark: { value: new THREE.Color("#c6d6ea") },
-		uCloudScale: { value: 0.65 },
-		uCloudSpeed: { value: 1 }
+	const uniforms = {
+		uSunDir: uniform(new THREE.Vector3(0, 1, 0)),
+		uMoonDir: uniform(new THREE.Vector3(0, -1, 0)),
+		uZenith: uniform(new THREE.Color("#4aa0e0")),
+		uHorizon: uniform(new THREE.Color("#c8e4f5")),
+		uSunColor: uniform(new THREE.Color("#fff5e0")),
+		uMoonColor: uniform(new THREE.Color("#c4d4ff")),
+		uSunGlow: uniform(1),
+		uSunIntensity: uniform(1),
+		uMoonIntensity: uniform(0),
+		uTime: uniform(0),
+		uCloudCoverage: uniform(0.45),
+		uCloudOpacity: uniform(0.85),
+		uCloudLight: uniform(new THREE.Color("#ffffff")),
+		uCloudDark: uniform(new THREE.Color("#c6d6ea")),
+		/** Larger = smaller, more numerous clouds. */
+		uCloudScale: uniform(0.65),
+		uCloudSpeed: uniform(1),
 	};
-	return mat;
+
+	const mat = new MeshBasicNodeMaterial({
+		side: THREE.BackSide,
+		depthWrite: false,
+		fog: false,
+	});
+
+	mat.colorNode = Fn(() => {
+		// Direction from the dome's own centre, not from the world origin, so the
+		// dome can be re-centred on the camera each frame without the sky sliding
+		// as the player walks.
+		const dir: any = normalize(positionGeometry).toVar();
+		const sun: any = normalize(uniforms.uSunDir as any).toVar();
+		const moon: any = normalize(uniforms.uMoonDir as any).toVar();
+
+		const elev = dir.y;
+		const hMix = smoothstep(-0.1, 0.7, elev);
+		const sky = mix(uniforms.uHorizon, uniforms.uZenith, hMix).toVar();
+
+		const sunElev = sun.y;
+		// Only kick in strong warm glow when the sun is near the horizon.
+		const lowSun = smoothstep(0.28, 0.02, sunElev);
+		const sunDot = max(dot(dir, sun), 0.0).toVar();
+
+		const dirFlat = normalize(vec3(dir.x, 0.001, dir.z));
+		const sunFlat = normalize(vec3(sun.x, 0.001, sun.z));
+		// Tight azimuth around the sun — stops a fire band across the sky.
+		const towardSun = pow(max(dot(dirFlat, sunFlat), 0.0), 8.0);
+		const horizonArc = exp(abs(elev.sub(max(sunElev, 0.0))).mul(-16.0));
+		const sunHalo = pow(sunDot, 32.0).mul(uniforms.uSunGlow);
+		const mie = pow(sunDot, 14.0).mul(uniforms.uSunGlow).mul(0.18);
+		const warm = horizonArc
+			.mul(towardSun)
+			.mul(0.35)
+			.add(sunHalo)
+			.add(mie)
+			.mul(lowSun)
+			.mul(clamp(uniforms.uSunGlow, 0.0, 2.0));
+		sky.addAssign(uniforms.uSunColor.mul(warm).mul(0.55));
+
+		// Soft pale rim for evening (high sun) — tiny, not an orange wash.
+		const dayGlow = pow(sunDot, 48.0)
+			.mul(uniforms.uSunGlow)
+			.mul(float(1.0).sub(lowSun));
+		sky.addAssign(
+			mix(uniforms.uSunColor, vec3(1.0), 0.5).mul(dayGlow).mul(0.35)
+		);
+
+		// Bright sun disc (single — no extra mesh orb).
+		const disc = smoothstep(0.9994, 0.9999, sunDot).mul(step(-0.05, sunElev));
+		sky.addAssign(
+			mix(uniforms.uSunColor, vec3(1.0, 0.97, 0.9), 0.75)
+				.mul(disc)
+				.mul(uniforms.uSunGlow.mul(0.25).add(1.8))
+		);
+
+		// Soft moon at night.
+		const moonDot = max(dot(dir, moon), 0.0).toVar();
+		const moonDisc = smoothstep(0.9988, 0.9996, moonDot).mul(
+			uniforms.uMoonIntensity
+		);
+		sky.addAssign(uniforms.uMoonColor.mul(moonDisc).mul(1.4));
+		sky.addAssign(
+			uniforms.uMoonColor
+				.mul(pow(moonDot, 40.0))
+				.mul(uniforms.uMoonIntensity)
+				.mul(0.25)
+		);
+
+		// ---- Clouds -------------------------------------------------------
+		// Projected onto a virtual flat plane overhead: dividing by dir.y is what
+		// makes them converge and flatten toward the horizon instead of wrapping
+		// the dome like wallpaper.
+		const cloudFade = smoothstep(0.015, 0.2, elev);
+		If(
+			cloudFade
+				.greaterThan(0.001)
+				.and(uniforms.uCloudOpacity.greaterThan(0.001)),
+			() => {
+				const cuv = dir.xz.div(max(elev, 0.06)).mul(uniforms.uCloudScale);
+				const drift = vec2(
+					uniforms.uTime.mul(0.0075),
+					uniforms.uTime.mul(0.003)
+				).mul(uniforms.uCloudSpeed);
+
+				// Domain warp — straight FBM gives soft blobs; warping it gives the
+				// curled, billowed silhouette that reads as cumulus.
+				const w = vec2(
+					fbm(cuv.mul(0.5).add(drift)),
+					fbm(cuv.mul(0.5).add(drift).add(3.7))
+				).sub(0.5);
+				const n = fbm(cuv.add(drift).add(w.mul(1.35))).toVar();
+
+				const thresh = float(1.0).sub(uniforms.uCloudCoverage).toVar();
+				const cov = smoothstep(thresh, thresh.add(0.22), n).toVar();
+				const density = cov.mul(cloudFade).mul(uniforms.uCloudOpacity);
+
+				// Thickness proxy: deeper into the cloud reads as lit top, thin edges
+				// stay dark, which fakes self-shadowing cheaply.
+				const cloudCol = mix(
+					uniforms.uCloudDark,
+					uniforms.uCloudLight,
+					smoothstep(0.3, 0.85, n)
+				).toVar();
+
+				// Sun-side scattering plus a bright rim on thin edges — the silver
+				// lining that sells a stylised sky.
+				const sunAmt = pow(max(dot(dir, sun), 0.0), 3.0);
+				const rim = smoothstep(0.6, 0.15, cov).mul(sunAmt);
+				const sunScale = clamp(uniforms.uSunIntensity.div(3.0), 0.0, 1.2);
+				cloudCol.addAssign(
+					uniforms.uSunColor
+						.mul(sunAmt.mul(0.3).add(rim.mul(0.85)))
+						.mul(sunScale)
+				);
+
+				// Moonlit edges at night.
+				const moonAmt = pow(max(dot(dir, moon), 0.0), 4.0);
+				cloudCol.addAssign(
+					uniforms.uMoonColor.mul(moonAmt).mul(uniforms.uMoonIntensity).mul(0.18)
+				);
+
+				// Drawn last so clouds occlude the sun and moon discs.
+				sky.assign(mix(sky, cloudCol, clamp(density, 0.0, 1.0)));
+			}
+		);
+
+		return sky;
+	})();
+
+	// The day/night sampler writes `skyMat.uniforms.uX.value` every frame.
+	(mat as any).uniforms = uniforms;
+	return mat as MeshBasicNodeMaterial & { uniforms: typeof uniforms };
 }
 
 export type DayNightCycle = {
