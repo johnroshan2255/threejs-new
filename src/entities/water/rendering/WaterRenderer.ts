@@ -3,6 +3,7 @@ import type { WaterMaterial } from '../materials/WaterMaterial';
 import { CausticsPass } from './CausticsPass';
 import { ReflectionPass } from './ReflectionPass';
 import { RefractionPass } from './RefractionPass';
+import { isMobileDevice } from '../../../ui/mobileControls';
 
 /**
  * Orchestrates reflection / refraction / caustics and feeds textures into the material.
@@ -26,10 +27,11 @@ export class WaterRenderer {
 
   /** Allocate pass targets. */
   initialize(width: number, height: number): void {
-    this.width = width;
-    this.height = height;
-    this.reflectionPass.initialize(width, height);
-    this.refractionPass.initialize(width, height);
+    const scale = isMobileDevice() ? 0.5 : 1.0;
+    this.width = width * scale;
+    this.height = height * scale;
+    this.reflectionPass.initialize(this.width, this.height);
+    this.refractionPass.initialize(this.width, this.height);
     this.causticsPass.initialize(this.causticsResolution);
     this.material.setResolution(width, height);
   }
@@ -72,11 +74,12 @@ export class WaterRenderer {
   }
 
   setSize(width: number, height: number): void {
-    this.width = width;
-    this.height = height;
-    this.reflectionPass.setSize(width, height);
-    this.refractionPass.setSize(width, height);
-    this.material.setResolution(width, height);
+    const scale = isMobileDevice() ? 0.5 : 1.0;
+    this.width = width * scale;
+    this.height = height * scale;
+    this.reflectionPass.setSize(this.width, this.height);
+    this.refractionPass.setSize(this.width, this.height);
+    this.material.setResolution(this.width, this.height);
   }
 
   dispose(): void {
