@@ -272,6 +272,8 @@ export class FluffyGrass {
 	private waterDeltaAccumulator = 0;
 	private renderFrameCounter = 0;
 	private lastGpuPanelUpdate = 0;
+	private frameCalls = 0;
+	private frameTriangles = 0;
 	private lastSettingsSync = 0;
 	private lastRippleInjection = 0;
 	private lastEditorRippleInjection = 0;
@@ -538,6 +540,14 @@ export class FluffyGrass {
 		this.renderer.toneMapping = THREE.NoToneMapping;
 		this.renderer.setSize(window.innerWidth, window.innerHeight);
 		this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+
+		const originalRender = this.renderer.render.bind(this.renderer);
+		this.renderer.render = (...args: any[]) => {
+			(originalRender as any)(...args);
+			this.frameCalls += this.renderer.info.render.calls;
+			this.frameTriangles += this.renderer.info.render.triangles;
+		};
+
 		this.scene.frustumCulled = true;
 
 				this.sunMesh = new THREE.Mesh(
@@ -3203,6 +3213,8 @@ export class FluffyGrass {
 
 	private render = () => {
 		requestAnimationFrame(this.render);
+		this.frameCalls = 0;
+		this.frameTriangles = 0;
 
 		const now = performance.now();
 		let frameDt = (now - this.lastFrameTime) * 0.001;
@@ -4010,7 +4022,7 @@ export class FluffyGrass {
 			this.lastGpuPanelUpdate = now;
 			const gpuPanel = document.getElementById("custom-gpu-panel");
 			if (gpuPanel) {
-				gpuPanel.innerHTML = `GPU LOAD<br/>Calls: ${this.renderer.info.render.calls}<br/>Tris: ${this.renderer.info.render.triangles}`;
+				gpuPanel.innerHTML = `GPU LOAD<br/>Calls: ${this.frameCalls}<br/>Tris: ${this.frameTriangles}`;
 			}
 		}
 	};
