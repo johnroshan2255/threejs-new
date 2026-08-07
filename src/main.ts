@@ -4097,9 +4097,13 @@ export class FluffyGrass {
 			this.lastGpuPanelUpdate = now;
 			const gpuPanel = document.getElementById("custom-gpu-panel");
 			if (gpuPanel) {
-				gpuPanel.innerHTML = `GPU LOAD<br/>Calls: ${this.renderer.info.render.calls}<br/>Tris: ${this.renderer.info.render.triangles}`;
+				gpuPanel.innerHTML = `GPU LOAD<br/>Draws: ${this.renderer.info.render.calls}<br/>Tris: ${this.renderer.info.render.triangles}`;
 			}
 		}
+
+		// Since we render multiple post-processing passes, we must reset the stats manually
+		// at the end of the frame to get the true cumulative total.
+		this.renderer.info.reset();
 	};
 
 	private setupTextures() {
@@ -4856,12 +4860,15 @@ export class FluffyGrass {
 			customGpuPanel.style.width = "80px";
 			customGpuPanel.style.height = "48px";
 			customGpuPanel.style.boxSizing = "border-box";
-			customGpuPanel.innerHTML = "GPU LOAD<br/>Calls: 0<br/>Tris: 0";
+			customGpuPanel.innerHTML = "GPU LOAD<br/>Draws: 0<br/>Tris: 0";
 			statsDom.appendChild(customGpuPanel);
 		}, 100); // small delay to ensure stats-gl has created the children
 
 		document.body.appendChild(statsDom);
 		this.setShowStatsEnabled(this.showStatsEnabled);
+
+		// Prevent the renderer from resetting stats between post-processing passes
+		this.renderer.info.autoReset = false;
 	}
 
 	private setupEditMode() {
