@@ -253,9 +253,11 @@ export class FluffyGrass {
 	private islandGrassField: GrassChunkField | null = null;
 	private valleyGrassField: GrassChunkField | null = null;
 	private customGrassField: GrassChunkField | null = null;
+
 	/** Bumps per off-thread grass build so only the newest result is adopted. */
 	private grassBuildGeneration = 0;
 	private customWorldGroup = new THREE.Group();
+	private shadowFrameCounter = 0;
 	private customTerrainMesh: THREE.Mesh | null = null;
 	private customHeights: Float32Array | null = null;
 	private customTerrainHandle: TerrainColliderHandle | null = null;
@@ -3426,10 +3428,15 @@ export class FluffyGrass {
 			// Medium quality refreshes it every 6th frame, so moving the frustum
 			// every frame leaves the map's contents describing a stale frustum —
 			// which reads as shadows blinking at ~10 Hz.
-			const shadowsWillRedraw =
-				this.renderer.shadowMap.enabled &&
-				(this.renderer.shadowMap.autoUpdate ||
-					this.renderer.shadowMap.needsUpdate);
+			
+			this.shadowFrameCounter++;
+			const shadowInterval = this.shadowQuality === "High" ? 2 : this.shadowQuality === "Medium" ? 6 : 999;
+			const shouldRedrawShadows = this.renderer.shadowMap.enabled && (this.shadowFrameCounter % shadowInterval === 0);
+			if (shouldRedrawShadows) {
+				this.renderer.shadowMap.needsUpdate = true;
+			}
+			
+			const shadowsWillRedraw = shouldRedrawShadows || this.renderer.shadowMap.needsUpdate;
 			if (shadowsWillRedraw) {
 				const shadowFocus =
 					this.activePlayer === "human" && this.human?.mesh
@@ -3470,7 +3477,6 @@ export class FluffyGrass {
 		if (!this.isWorldSwitching && this.isGameActive && this.car && this.carInput && this.chaseCameraInput && this.human && this.humanInput) {
 			const playAllowed = this.orientationGate?.isPlayAllowed() ?? true;
 			const world = getWorld();
-			world.timestep = dt;
 
 			if (playAllowed) {
 				if (this.activePlayer === "car") {
@@ -3530,6 +3536,7 @@ export class FluffyGrass {
 				this.human.playAnimation("being carried");
 			}
 
+			world.timestep = dt;
 			world.step();
 
 			if (playAllowed) {
@@ -4157,7 +4164,7 @@ export class FluffyGrass {
 		this.shadowQuality = quality;
 		const shadowsEnabled = quality !== "Low";
 		this.renderer.shadowMap.enabled = shadowsEnabled;
-		this.renderer.shadowMap.autoUpdate = quality === "High";
+		this.renderer.shadowMap.autoUpdate = false; // Always false, handled by shadowFrameCounter
 		if (shadowsEnabled) this.renderer.shadowMap.needsUpdate = true;
 		this.dayNight?.setShadowQuality(quality === "High" ? 4096 : 2048, 200);
 		this.grassMaterial.updateGrassGraphicsChange(quality === "High");
@@ -4181,6 +4188,10 @@ export class FluffyGrass {
 		this.waterDeltaAccumulator = 0;
 		this.editorWaterFrameCounter = 0;
 		this.editorWaterDeltaAccumulator = 0;
+
+		if (this.pond) {
+			this.pond.enableReflections = quality === "High";
+		}
 	}
 
 	/**

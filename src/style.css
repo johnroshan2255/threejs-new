@@ -400,6 +400,45 @@ body.has-mobile-controls .controls-hint {
 	font-size: 20px !important;
 }
 
+.mc-joystick {
+	pointer-events: auto;
+	position: absolute;
+	left: max(16px, env(safe-area-inset-left));
+	bottom: max(18px, env(safe-area-inset-bottom));
+	width: 140px;
+	height: 140px;
+	display: flex;
+	justify-content: center;
+	align-items: center;
+	touch-action: none;
+	-webkit-user-select: none;
+}
+
+.mc-joystick-base {
+	width: 120px;
+	height: 120px;
+	border-radius: 50%;
+	background: rgba(10, 16, 12, 0.35);
+	border: 1px solid rgba(210, 230, 190, 0.15);
+	backdrop-filter: blur(8px);
+	-webkit-backdrop-filter: blur(8px);
+	display: flex;
+	justify-content: center;
+	align-items: center;
+	position: relative;
+}
+
+.mc-joystick-thumb {
+	width: 48px;
+	height: 48px;
+	border-radius: 50%;
+	background: rgba(240, 248, 232, 0.8);
+	box-shadow: 0 4px 8px rgba(0, 0, 0, 0.4);
+	position: absolute;
+	pointer-events: none; /* Let touches pass through to base */
+	transition: transform 0.05s ease-out;
+}
+
 .mc-actions {
 	pointer-events: auto;
 	position: absolute;
@@ -2495,10 +2534,7 @@ button {
 }
 @media (max-width: 600px) {
   #game-top-nav {
-    justify-content: center;
-    width: 100%;
-    background: linear-gradient(180deg, rgba(0,0,0,0.6) 0%, transparent 100%);
-    padding-top: 15px;
+    display: none !important;
   }
   .game-nav-btn {
     font-size: 0.85rem !important;

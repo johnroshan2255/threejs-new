@@ -1,4 +1,5 @@
 import { AuthService, type AuthUser } from "../auth/AuthService";
+import { isMobileDevice } from "./mobileControls";
 
 type LoadingScreenOptions = {
 	auth: AuthService;
@@ -23,7 +24,14 @@ export class LoadingScreenController {
 			playButton.textContent = "Play";
 			playButton.disabled = false;
 			playButton.classList.add("ready");
-			playButton.addEventListener("click", this.options.onPlay);
+			playButton.addEventListener("click", () => {
+				if (isMobileDevice() && document.documentElement.requestFullscreen) {
+					document.documentElement.requestFullscreen().catch(() => {
+						// Ignore if browser blocks it or it's not supported
+					});
+				}
+				this.options.onPlay();
+			});
 		}
 
 		createAccountButton?.addEventListener("click", () => {

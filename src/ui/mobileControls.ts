@@ -54,13 +54,18 @@ export function createMobileControls(onReset: () => void): MobileControls {
 	root.className = "mobile-controls";
 	root.id = "mobile-controls";
 	root.innerHTML = `
-		<div class="mc-steer-arrows">
+		<div class="mc-steer-arrows mc-car-only">
 			<div class="mc-btn mc-steer-btn mc-left-arrow" data-mc="steer-left" role="button" tabindex="0">◀</div>
 			<div class="mc-btn mc-steer-btn mc-right-arrow" data-mc="steer-right" role="button" tabindex="0">▶</div>
 		</div>
+		<div class="mc-joystick mc-human-only">
+			<div class="mc-joystick-base" id="mc-joystick-base">
+				<div class="mc-joystick-thumb" id="mc-joystick-thumb"></div>
+			</div>
+		</div>
 		<div class="mc-actions">
-			<div class="mc-btn mc-gas" id="mc-gas" data-mc="gas" role="button" tabindex="0">▲</div>
-			<div class="mc-btn mc-brake" id="mc-brake" data-mc="reverse" role="button" tabindex="0">▼</div>
+			<div class="mc-btn mc-gas mc-car-only" id="mc-gas" data-mc="gas" role="button" tabindex="0">▲</div>
+			<div class="mc-btn mc-brake mc-car-only" id="mc-brake" data-mc="reverse" role="button" tabindex="0">▼</div>
 			<div class="mc-btn mc-handbrake mc-car-only" id="mc-handbrake" data-mc="brake" role="button" tabindex="0">BRK</div>
 			<div class="mc-btn mc-jump mc-human-only" data-mc="key-Space" role="button" tabindex="0">JMP</div>
 			<div class="mc-btn mc-attack mc-human-only" data-mc="mouse-0" role="button" tabindex="0">ATK</div>
@@ -81,6 +86,16 @@ export function createMobileControls(onReset: () => void): MobileControls {
 	let braking = false;
 	let steerLeft = false;
 	let steerRight = false;
+	
+	let joystickTouchId: number | null = null;
+	let joystickSteer = 0;
+	let joystickThrottle = 0;
+	let joystickCenterX = 0;
+	let joystickCenterY = 0;
+	
+	const joystickBase = root.querySelector("#mc-joystick-base") as HTMLElement;
+	const joystickThumb = root.querySelector("#mc-joystick-thumb") as HTMLElement;
+	const JOYSTICK_RADIUS = 50;
 
 	const active = new Map<number, TouchKind>();
 
@@ -174,6 +189,18 @@ export function createMobileControls(onReset: () => void): MobileControls {
 	const onTouchStart = (e: TouchEvent) => {
 		for (let i = 0; i < e.changedTouches.length; i++) {
 			const t = e.changedTouches[i];
+			const isJoystick = (t.target as HTMLElement | null)?.closest(".mc-joystick-base");
+			
+			if (isJoystick && joystickTouchId === null) {
+				e.preventDefault();
+				joystickTouchId = t.identifier;
+				const rect = joystickBase.getBoundingClientRect();
+				joystickCenterX = rect.left + rect.width / 2;
+				joystickCenterY = rect.top + rect.height / 2;
+				updateJoystickPosition(t.clientX, t.clientY);
+				continue;
+			}
+			
 			const kind =
 				kindFromTarget(t.target) || kindFromPoint(t.clientX, t.clientY);
 			if (!kind) continue;
@@ -182,10 +209,28 @@ export function createMobileControls(onReset: () => void): MobileControls {
 		}
 	};
 
+	const updateJoystickPosition = (clientX: number, clientY: number) => {
+		let dx = clientX - joystickCenterX;
+		let dy = clientY - joystickCenterY;
+		const distance = Math.hypot(dx, dy);
+		if (distance > JOYSTICK_RADIUS) {
+			dx = (dx / distance) * JOYSTICK_RADIUS;
+			dy = (dy / distance) * JOYSTICK_RADIUS;
+		}
+		joystickSteer = dx / JOYSTICK_RADIUS;
+		joystickThrottle = -dy / JOYSTICK_RADIUS; 
+		joystickThumb.style.transform = `translate(${dx}px, ${dy}px)`;
+	};
+
 	const onTouchMove = (e: TouchEvent) => {
 		let used = false;
 		for (let i = 0; i < e.touches.length; i++) {
 			const t = e.touches[i];
+			if (t.identifier === joystickTouchId) {
+				updateJoystickPosition(t.clientX, t.clientY);
+				used = true;
+				continue;
+			}
 			const kind = active.get(t.identifier);
 			if (!kind) continue;
 			used = true;
@@ -196,7 +241,15 @@ export function createMobileControls(onReset: () => void): MobileControls {
 
 	const onTouchEnd = (e: TouchEvent) => {
 		for (let i = 0; i < e.changedTouches.length; i++) {
-			endControl(e.changedTouches[i].identifier);
+			const t = e.changedTouches[i];
+			if (t.identifier === joystickTouchId) {
+				joystickTouchId = null;
+				joystickSteer = 0;
+				joystickThrottle = 0;
+				joystickThumb.style.transform = `translate(0px, 0px)`;
+				continue;
+			}
+			endControl(t.identifier);
 		}
 	};
 
@@ -237,8 +290,8 @@ export function createMobileControls(onReset: () => void): MobileControls {
 			isMobileDevice() &&
 			!document.body.classList.contains("orientation-portrait-lock"),
 		getState: () => ({
-			throttle: gas ? 1 : reverse ? -1 : 0,
-			steer: (steerLeft ? 1 : 0) + (steerRight ? -1 : 0),
+			throttle: Math.max(-1, Math.min(1, (gas ? 1 : reverse ? -1 : 0) + joystickThrottle)),
+			steer: Math.max(-1, Math.min(1, (steerLeft ? 1 : 0) + (steerRight ? -1 : 0) + joystickSteer)),
 			braking,
 		}),
 		setButtonVisible: (key: string, visible: boolean) => {

@@ -16,6 +16,7 @@ export class WaterRenderer {
   private width = 512;
   private height = 512;
   private causticsResolution = 256;
+  public enableReflections = true;
 
   constructor(material: WaterMaterial, causticsResolution = 256) {
     this.material = material;
@@ -48,7 +49,7 @@ export class WaterRenderer {
   ): void {
     this.reflectionPass.setWaterLevel(waterMesh.position.y);
 
-    if (this.isPerspectiveCamera(camera)) {
+    if (this.enableReflections && this.isPerspectiveCamera(camera)) {
       const grass = scene.getObjectByName('Grass');
       if (grass) grass.visible = false;
       this.reflectionPass.render(renderer, scene, camera, waterMesh);
@@ -58,10 +59,14 @@ export class WaterRenderer {
     this.refractionPass.render(renderer, scene, camera, waterMesh);
     this.causticsPass.render(renderer, heightMap);
 
-    this.material.setReflectionMap(this.reflectionPass.texture);
+    if (this.enableReflections) {
+      this.material.setReflectionMap(this.reflectionPass.texture);
+      this.material.setTextureMatrix(this.reflectionPass.getTextureMatrix());
+    } else {
+      this.material.setReflectionMap(null);
+    }
     this.material.setRefractionMap(this.refractionPass.texture);
     this.material.setDepthMap(this.refractionPass.depthTexture);
-    this.material.setTextureMatrix(this.reflectionPass.getTextureMatrix());
     this.material.setResolution(this.width, this.height);
 
     if (this.isPerspectiveCamera(camera)) {

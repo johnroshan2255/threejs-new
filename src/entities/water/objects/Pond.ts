@@ -147,6 +147,11 @@ export class Pond {
     this.waterRenderer.setSize(width, height);
   }
 
+  /** Toggle live planar reflections (improves performance when disabled). */
+  set enableReflections(value: boolean) {
+    this.waterRenderer.enableReflections = value;
+  }
+
   /** 0 = murky, 1 = crystal clear. */
   setClarity(value: number): void {
     this.material.setClarity(value);
