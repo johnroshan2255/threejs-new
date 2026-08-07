@@ -472,6 +472,12 @@ export class FluffyGrass {
 	private readonly _fireflyCarQuat = new THREE.Quaternion();
 
 	constructor(_canvas: HTMLCanvasElement) {
+		if (isMobileDevice()) {
+			this.grassDensity = 30; // drop density by 70%
+			this.grassCullDistance = 60; // cut cull distance drastically
+			this.postFxEnabled = false; // skip heavy post-processing on mobile
+		}
+
 		this.loadingManager = new THREE.LoadingManager();
 
 		const loadingBar = document.getElementById("loading-bar");
@@ -526,7 +532,7 @@ export class FluffyGrass {
 			// multisampled target, and the only thing drawn to the default
 			// framebuffer is the composite's fullscreen quad. It still covers the
 			// edit-mode dig PIP, which does render the scene straight to the canvas.
-			antialias: true,
+			antialias: !isMobileDevice(),
 			alpha: true,
 			precision: "highp",
 		});
@@ -537,9 +543,9 @@ export class FluffyGrass {
 		// Tone mapping lives in VolumetricFogPass's composite, not per-material.
 		// ACES was actively desaturating highlights; the composite runs a
 		// saturation-preserving curve instead, and needs linear HDR to reach it.
-		this.renderer.toneMapping = THREE.NoToneMapping;
+		this.renderer.toneMapping = this.postFxEnabled ? THREE.NoToneMapping : THREE.ACESFilmicToneMapping;
 		this.renderer.setSize(window.innerWidth, window.innerHeight);
-		this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+		this.renderer.setPixelRatio(isMobileDevice() ? Math.min(window.devicePixelRatio, 1.0) : Math.min(window.devicePixelRatio, 2));
 
 		const originalRender = this.renderer.render.bind(this.renderer);
 		this.renderer.render = (...args: any[]) => {

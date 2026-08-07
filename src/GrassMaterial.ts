@@ -1,6 +1,7 @@
 import { GUI } from "dat.gui";
 import * as THREE from "three";
 import { SNOW_GLSL, snowShaderUniforms } from "./terrain/snowShading";
+import { isMobileDevice } from "./ui/mobileControls";
 
 interface GrassUniformsInterface {
 	uTime?: { value: number };
@@ -133,6 +134,7 @@ export class GrassMaterial {
 	}
 
 	private setupGrassMaterial(material: THREE.Material) {
+		const mobile = isMobileDevice();
 		material.onBeforeCompile = (shader) => {
 			shader.uniforms = {
 				...shader.uniforms,
@@ -211,13 +213,17 @@ export class GrassMaterial {
         // which is harmless for tiling noise but wrong for a mask lookup.
         vSnowWorldPos = modelPosition.xyz;
 
+        float xDisp = 0.0;
+        float zDisp = 0.0;
+        
+        #if ${mobile ? "0" : "1"}
         vec4 noise = texture2D(uNoiseTexture,vGlobalUV+uTime*uNoiseSpeed);
-
         float tip = (1.-uv.y);
         float sinWave = sin(uWindFreq*dot(windDirection, vGlobalUV) + noise.g*uNoiseFactor + uTime * uSpeed) * uWindAmp * tip;
+        xDisp = sinWave;
+        zDisp = sinWave;
+        #endif
 
-        float xDisp = sinWave;
-        float zDisp = sinWave;
         modelPosition.x += xDisp;
         modelPosition.z += zDisp;
 
@@ -309,7 +315,7 @@ export class GrassMaterial {
           float shadow = 1.0;
           float currentShadow = 0.0;
           float NdotL;
-          if(uEnableShadows == 1){
+          if(uEnableShadows == 1 && ${!mobile}){
             #if ( NUM_DIR_LIGHTS > 0) 
               DirectionalLight directionalLight;
             #if defined( USE_SHADOWMAP ) && NUM_DIR_LIGHT_SHADOWS > 0
