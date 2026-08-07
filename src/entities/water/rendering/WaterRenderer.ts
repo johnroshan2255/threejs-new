@@ -15,6 +15,7 @@ export class WaterRenderer {
   private width = 512;
   private height = 512;
   private causticsResolution = 256;
+  public enableReflections = true;
 
   constructor(material: WaterMaterial, causticsResolution = 256) {
     this.material = material;
@@ -63,7 +64,7 @@ export class WaterRenderer {
   ): void {
     this.reflectionPass.setWaterLevel(waterMesh.position.y);
 
-    if (this.isPerspectiveCamera(camera)) {
+    if (this.enableReflections && this.isPerspectiveCamera(camera)) {
       // Every grass field is hidden for the mirror pass, not just the first one
       // getObjectByName happens to return. A world carries one "Grass" group per
       // field — island, pond surround, each custom-world patch — and together
@@ -80,7 +81,9 @@ export class WaterRenderer {
     this.refractionPass.render(renderer, scene, camera, waterMesh);
     this.causticsPass.render(renderer, heightMap);
 
-    this.material.setReflectionMap(this.reflectionPass.texture);
+    if (this.enableReflections) {
+      this.material.setReflectionMap(this.reflectionPass.texture);
+    }
     this.material.setRefractionMap(this.refractionPass.texture);
     this.material.setDepthMap(this.refractionPass.depthTexture);
     this.material.setTextureMatrix(this.reflectionPass.getTextureMatrix());

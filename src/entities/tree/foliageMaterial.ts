@@ -24,6 +24,7 @@ import {
 } from "three/tsl";
 import { snowAt } from "../../terrain/snowShading";
 import { snowUniforms } from "../../terrain/snowMask";
+import { isMobileDevice } from "../../ui/mobileControls";
 
 /** Shared wind clock — call updateFoliageWind(dt) once per frame. */
 export const foliageWind = {
@@ -148,6 +149,10 @@ function buildFoliageNodes(
 		// view * model * instance * position — the shader's `mVM * position`.
 		const viewPos = modelViewMatrix.mul(vec4(positionLocal, 1.0)).toVar();
 		viewPos.addAssign(vec4(mix(vec3(0.0), inflated, u.u_effectBlend), 0.0));
+		
+		if (isMobileDevice()) {
+			return cameraProjectionMatrix.mul(viewPos);
+		}
 
 		// Wind: rotate about view Z, biased so the top of the canopy leads.
 		const boundedYNormal = remap(normalLocal.y, -1.0, 1.0, 0.0, 1.0);

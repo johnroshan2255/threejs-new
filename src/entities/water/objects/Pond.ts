@@ -6,6 +6,7 @@ import { RippleSimulation } from '../simulation/RippleSimulation';
 import type { CreateRippleOptions, RipplePosition } from '../types/Ripple';
 import type { ResolvedWaterOptions, WaterOptions } from '../types/WaterOptions';
 import { getRippleXZ } from '../utils/Helpers';
+import { isMobileDevice } from '../../../ui/mobileControls';
 
 /**
  * Public façade for the water system.
@@ -58,6 +59,7 @@ export class Pond {
     this.simulation.initialize();
 
     this.waterRenderer = new WaterRenderer(this.material, this.options.resolution);
+    this.waterRenderer.enableReflections = !isMobileDevice();
 
     const passWidth = this.options.renderer?.domElement.width || 1024;
     const passHeight = this.options.renderer?.domElement.height || 1024;

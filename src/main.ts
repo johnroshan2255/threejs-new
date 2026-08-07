@@ -585,19 +585,19 @@ export class FluffyGrass {
 			// multisampled target, and the only thing drawn to the default
 			// framebuffer is the composite's fullscreen quad. It still covers the
 			// edit-mode dig PIP, which does render the scene straight to the canvas.
-			antialias: true,
+			antialias: !isMobileDevice(),
 			alpha: true,
 		});
 		this.renderer.shadowMap.enabled = true;
 
-		this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+		this.renderer.shadowMap.type = isMobileDevice() ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap;
 		this.renderer.outputColorSpace = THREE.SRGBColorSpace;
 		// Tone mapping lives in VolumetricFogPass's composite, not per-material.
 		// ACES was actively desaturating highlights; the composite runs a
 		// saturation-preserving curve instead, and needs linear HDR to reach it.
 		this.renderer.toneMapping = THREE.NoToneMapping;
 		this.renderer.setSize(window.innerWidth, window.innerHeight);
-		this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+		this.renderer.setPixelRatio(isMobileDevice() ? 1.0 : Math.min(window.devicePixelRatio, 2));
 		this.scene.frustumCulled = true;
 
 				this.sunMesh = new THREE.Mesh(
@@ -3305,6 +3305,8 @@ export class FluffyGrass {
 			} else if (this.activeWorldDef.kind === "custom" && this.customWorldGroup.visible) {
 				this.customGrassField?.updateCompute(this.renderer, this.camera, cullPos);
 			}
+			this.treeManager.updateCompute(this.renderer, this.camera, cullPos);
+			this.grassMaterial.uniforms.uPlayerPosition.value.copy(cullPos);
 			this.updateMeshDistanceCulling(cullPos);
 		}
 
@@ -4033,7 +4035,7 @@ export class FluffyGrass {
 			// halos; with the chain bypassed they disappear outright, and the
 			// speckle itself drops from ~948 to ~728 pixels per frame.
 			const usePostFx =
-				this.postFxEnabled && !this.editorTopDown;
+				this.postFxEnabled && !this.editorTopDown && !isMobileDevice();
 			if (usePostFx && !this.postProcessing) this.setupPostProcessing();
 
 			// Tone mapping belongs to whichever path is drawing: the chain applies
@@ -4399,7 +4401,7 @@ export class FluffyGrass {
 		);
 
 		// 2. Extract Bloom from the LDR tonemapped output
-		const bloomNode = bloom(tonemappedRays, 0.42, 0.4, 0.72);
+		const bloomNode = bloom(vec4(tonemappedRays as any, 1.0), 0.42, 0.4, 0.72);
 		// Bloom keeps a 5-level mip chain (10 targets) plus a bright pass, and the
 		// composite reads all five, so the level count is not safely tunable. The
 		// input scale is: at 0.35 the chain holds roughly half the pixels of the

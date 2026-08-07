@@ -211,23 +211,7 @@ export class GrassChunkField {
 					
 				If(inFrustum, () => {
 					const hash = fract(sin(worldPos.x.mul(12.9898).add(worldPos.z.mul(78.233))).mul(43758.5453));
-					
-					const fadeStart = float(this.fadeStart);
-					const fadeEnd = float(this.fadeEnd);
-					const fadeRange = max(float(0.001), fadeEnd.sub(fadeStart));
-					const dist = sqrt(distSq);
-					
-					const baseDensity = this.densityUniform;
-					const distScale = float(1.0).toVar();
-					
-					If(dist.greaterThan(fadeStart), () => {
-						const t = dist.sub(fadeStart).div(fadeRange);
-						distScale.assign(float(1.0).sub(t.mul(t).mul(float(3.0).sub(t.mul(2.0)))));
-					});
-					
-					const finalDensity = baseDensity.mul(distScale);
-					
-					isVisible.assign(hash.lessThan(finalDensity));
+					isVisible.assign(hash.lessThan(this.densityUniform));
 				});
 			});
 			

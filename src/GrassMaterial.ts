@@ -22,6 +22,9 @@ import {
 	uv,
 	varyingProperty,
 	vec2,
+	normalLocal,
+	distance,
+	smoothstep,
 	vec3,
 	vec4,
 	modelWorldMatrix,
@@ -282,6 +285,8 @@ export class GrassMaterial {
 		const vGlobalUV = varyingProperty("vec2", "vGrassGlobalUV");
 		const vBladeWorld = varyingProperty("vec3", "vGrassBladeWorld");
 
+		material.normalNode = normalLocal;
+
 		material.positionNode = Fn(() => {
 			// positionLocal already carries the instance transform: NodeMaterial
 			// applies instancing before it evaluates positionNode.
@@ -296,9 +301,19 @@ export class GrassMaterial {
 			vGlobalUV.assign(globalUV);
 			vBladeWorld.assign(bladeWorld);
 
+			// Distance fade: sink grass into the ground at the edges
+			const distToCamera = distance(bladeWorld, u.uPlayerPosition);
+			// fadeStart = 48, fadeEnd = 68
+			const fadeStart = float(48.0);
+			const fadeEnd = float(68.0);
+			const scale = float(1.0).sub(smoothstep(fadeStart, fadeEnd, distToCamera));
+			
+			const sinkOffset = float(1.0).sub(scale).mul(float(-2.0));
+			const scaledPos = positionLocal.add(vec3(0.0, sinkOffset, 0.0));
+
 			// Wind. Amplitude scales with blade height so short grass sways less.
 			const windDirection = normalize(vec2(1.0, 1.0));
-			const windAmp = float(0.1).mul(u.uBladeHeightScale);
+			const windAmp = float(0.1).mul(u.uBladeHeightScale).mul(scale);
 			const windFreq = float(50.0);
 			const speed = float(0.0);
 			const noiseFactor = float(5.5);
@@ -325,9 +340,10 @@ export class GrassMaterial {
 			const lift: any = exp(u.noiseTexture.sample(globalUV.mul(u.uNoiseScale)).r)
 				.mul(0.5)
 				.mul(u.uBladeHeightScale)
-				.mul(tip);
+				.mul(tip)
+				.mul(scale);
 
-			return positionLocal.add(vec3(sinWave, lift, sinWave));
+			return scaledPos.add(vec3(sinWave, lift, sinWave));
 		})();
 
 		// The blade texture is authored with v increasing downward relative to the
