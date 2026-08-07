@@ -111,9 +111,9 @@ export function createFoliageMaterial(
 		shadowSide: THREE.FrontSide,
 		roughness: 1,
 		metalness: 0,
-		defines: { OPTIMIZE_TREE: "1" },
 	}) as FoliageMaterial;
 
+	material.defines = { OPTIMIZE_TREE: "1" };
 	material.userData.foliageUniforms = uniforms;
 	return material;
 }
