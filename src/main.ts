@@ -113,6 +113,7 @@ import {
 	toneMapping as toneMappingTsl,
 	uniform,
 	uv,
+	vec4,
 } from "three/tsl";
 import { bloom } from "three/addons/tsl/display/BloomNode.js";
 import { godrays } from "three/addons/tsl/display/GodraysNode.js";
@@ -663,7 +664,7 @@ export class FluffyGrass {
 		this.setupInteractionUI();
 		this.healthHud = new HealthHud();
 		this.orientationGate = createOrientationGate();
-		this.dayNight = createDayNightCycle(this.scene, { shadowExtent: 200 });
+		this.dayNight = createDayNightCycle(this.scene, { shadowExtent: 90 });
 		this.dayNight.auto = this.dayNightGui.auto;
 		this.worldLoading = new WorldLoadingOverlay();
 		this.setupSettings();
@@ -4237,7 +4238,7 @@ export class FluffyGrass {
 		// 2048 over the +/-200 m ortho box is ~10 cm per texel, which PCF-soft
 		// shadows of a car and some trees cannot resolve past. 4096 cost 96 MB more
 		// of texture memory for a frame that measured pixel-identical.
-		this.dayNight?.setShadowQuality(quality === "High" ? 2048 : 1024, 200);
+		this.dayNight?.setShadowQuality(quality === "High" ? 2048 : 1024, 90);
 		this.grassMaterial.updateGrassGraphicsChange(quality === "High");
 	}
 
@@ -4353,7 +4354,15 @@ export class FluffyGrass {
 		// toward white without ever pushing it past it, which additive would.
 		const withRays: any = blendScreen(sceneColor, rays.mul(this.godRayWeight));
 
-		const bloomNode = bloom(withRays, 0.42, 0.4, 0.72);
+		// 1. Tonemap the HDR input (withRays)
+		const tonemappedRays = toneMappingTsl(
+			THREE.ACESFilmicToneMapping,
+			this.gradeExposure,
+			withRays
+		);
+
+		// 2. Extract Bloom from the LDR tonemapped output
+		const bloomNode = bloom(tonemappedRays, 0.42, 0.4, 0.72);
 		// Bloom keeps a 5-level mip chain (10 targets) plus a bright pass, and the
 		// composite reads all five, so the level count is not safely tunable. The
 		// input scale is: at 0.35 the chain holds roughly half the pixels of the
@@ -4368,14 +4377,12 @@ export class FluffyGrass {
 			.mul(0.5)
 			.add(0.5);
 
-		const graded: any = withRays.add(bloomNode).mul(vignetteFactor);
+		// 3. Add bloom to the tonemapped output, then apply vignette.
+		const graded: any = tonemappedRays.add(bloomNode).mul(vignetteFactor);
 
 		this.postProcessing = new PostProcessing(this.renderer);
-		this.postProcessing.outputNode = toneMappingTsl(
-			THREE.ACESFilmicToneMapping,
-			this.gradeExposure,
-			graded
-		);
+		// Since we already tonemapped, outputNode is just the graded result!
+		this.postProcessing.outputNode = graded;
 	}
 
 	/**

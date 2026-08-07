@@ -9,6 +9,7 @@ import {
 	exp,
 	float,
 	max,
+	min,
 	mix,
 	normalView,
 	normalize,
@@ -22,6 +23,10 @@ import {
 	varyingProperty,
 	vec2,
 	vec3,
+	vec4,
+	modelWorldMatrix,
+	positionGeometry,
+	attribute
 } from "three/tsl";
 import { snowMaskAt } from "./terrain/snowShading";
 import { snowUniforms } from "./terrain/snowMask";
@@ -103,7 +108,8 @@ class GrassLightingModel extends LightingModel {
 
 			// The base->tip gradient stands in for NdotL, which reads as noise on a
 			// near-vertical blade, and doubles as cheap AO.
-			const lit = this.key.mul(this.tipLift);
+			// Clamp tipLift so it doesn't act as a >1.0 multiplier (which blows out into HDR/bloom)
+			const lit = this.key.mul(min(this.tipLift, float(1.0)));
 			reflectedLight.directDiffuse.addAssign(
 				mix(lit.mul(this.shadowDarkness).mul(this.shadowTint), lit, shadowMask).mul(
 					diffuseColor.rgb
@@ -116,8 +122,11 @@ class GrassLightingModel extends LightingModel {
 		// lights up from either face rather than flickering as it sways through
 		// the terminator.
 		const ndl = abs(dot(normalView, lightDirection)).clamp();
+		// Clamp lightColor to prevent infinite brightness when a point light 
+		// passes exactly through a grass vertex (distance = 0)
+		const safeLightColor = min(lightColor, vec3(10.0));
 		reflectedLight.directDiffuse.addAssign(
-			lightColor.mul(ndl).mul(0.28).mul(diffuseColor.rgb)
+			safeLightColor.mul(ndl).mul(0.28).mul(diffuseColor.rgb)
 		);
 	}
 
@@ -276,7 +285,8 @@ export class GrassMaterial {
 		material.positionNode = Fn(() => {
 			// positionLocal already carries the instance transform: NodeMaterial
 			// applies instancing before it evaluates positionNode.
-			const bladeWorld = positionWorld.toVar();
+			const instMatrix: any = attribute('instanceMatrix', 'mat4');
+			const bladeWorld = modelWorldMatrix.mul(instMatrix).mul(vec4(positionGeometry, 1.0)).xyz.toVar();
 
 			const terrainSize = u.uTerrainSize;
 			const globalUV = terrainSize
@@ -291,9 +301,9 @@ export class GrassMaterial {
 			const windDirection = normalize(vec2(1.0, 1.0));
 			const windAmp = float(0.1).mul(u.uBladeHeightScale);
 			const windFreq = float(50.0);
-			const speed = float(1.0);
+			const speed = float(0.0);
 			const noiseFactor = float(5.5);
-			const noiseSpeed = float(0.001);
+			const noiseSpeed = float(0.0);
 
 			const noise = u.noiseTexture.sample(
 				globalUV.add(u.uTime.mul(noiseSpeed))

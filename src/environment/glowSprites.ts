@@ -3,8 +3,7 @@ import { SpriteNodeMaterial } from "three/webgpu";
 import {
 	cameraProjectionMatrix,
 	float,
-	instancedBufferAttribute,
-	instancedDynamicBufferAttribute,
+	attribute,
 	materialColor,
 	materialOpacity,
 	max,
@@ -105,9 +104,10 @@ export function createGlowSprites(options: {
 		transparent: true,
 		opacity: 0,
 		depthWrite: false,
+		depthTest: false,
 		blending: THREE.AdditiveBlending,
 	});
-	const offsetNode: any = instancedDynamicBufferAttribute(offsets, "vec3");
+	const offsetNode: any = attribute("aOffset", "vec3");
 	material.positionNode = offsetNode;
 
 	// Match the sizing convention these sprites were tuned against.
@@ -156,7 +156,7 @@ export function createGlowSprites(options: {
 		const pulseBuffer = new THREE.InstancedBufferAttribute(options.pulse, 2);
 		geometry.setAttribute("aPulse", pulseBuffer);
 		// phase = .x, per-sprite rate multiplier = .y
-		const pulseAttr: any = instancedBufferAttribute(pulseBuffer, "vec2");
+		const pulseAttr: any = attribute("aPulse", "vec2");
 		const wave = sin(uTime.mul(rate).mul(pulseAttr.y).add(pulseAttr.x));
 		alpha = alpha.mul(wave.mul(depth).add(1 - depth));
 	}

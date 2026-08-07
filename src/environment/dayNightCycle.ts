@@ -799,6 +799,7 @@ export function createDayNightCycle(
 		const texel = (shadowExtent * 2) / keyLight.shadow.mapSize.x;
 		keyLight.shadow.normalBias = texel * 1.8;
 		keyLight.shadow.bias = -0.00008;
+		keyLight.shadow.radius = 8; // Soften shadow edges to prevent bloom popping
 	}
 	applyShadowBias();
 
