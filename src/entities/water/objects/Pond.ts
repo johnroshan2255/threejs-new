@@ -63,6 +63,11 @@ export class Pond {
     const passHeight = this.options.renderer?.domElement.height || 1024;
     this.waterRenderer.initialize(passWidth, passHeight);
 
+    const allTex = this.simulation.allTextures;
+    if (allTex) {
+      this.waterRenderer.prepareCaustics(allTex[0], allTex[1]);
+    }
+
     const geometry: BufferGeometry =
       options.geometry ??
       (() => {

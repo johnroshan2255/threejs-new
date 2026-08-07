@@ -47,6 +47,10 @@ export class WaterRenderer {
     this.material.setResolution(width, height);
   }
 
+  prepareCaustics(textureA: Texture, textureB: Texture): void {
+    this.causticsPass.prepare(textureA, textureB);
+  }
+
   /**
    * Run reflection / refraction / caustics and bind results on the water material.
    */

@@ -4,16 +4,21 @@ import {
 	If,
 	atomicAdd,
 	atomicStore,
+	atomicLoad,
 	float,
 	fract,
 	instanceIndex,
+	invocationLocalIndex,
 	max,
 	sin,
 	sqrt,
 	storage,
+	uint,
 	uniform,
 	uniformArray,
 	vec3,
+	workgroupArray,
+	workgroupBarrier,
 } from "three/tsl";
 import { StorageBufferAttribute, StorageInstancedBufferAttribute, IndirectStorageBufferAttribute } from "three/webgpu";
 import type { GrassChunkData } from "./grassPlacementCore";
@@ -42,7 +47,7 @@ export class GrassChunkField {
 	private fadeEnd = DEFAULT_FADE_END;
 	private showDistance = DEFAULT_SHOW_DISTANCE; // Kept for API compatibility though compute shader fades per frame smoothly
 	private hideDistance = DEFAULT_GRASS_CULL_DISTANCE;
-	
+
 	private grassMesh?: THREE.InstancedMesh;
 	private indirectBuffer?: IndirectStorageBufferAttribute;
 	private cullingComputeNode?: any;
@@ -50,21 +55,21 @@ export class GrassChunkField {
 	private frustumPlanesUniform?: any;
 	private cullPositionUniform: any;
 	private densityUniform: any;
-	
+
 	private allMatrices?: Float32Array;
 	private roadMasked?: boolean[];
 	private instanceDataBuffer?: StorageBufferAttribute;
-	
+
 	private frustum = new THREE.Frustum();
 	private projScreenMatrix = new THREE.Matrix4();
-	
+
 	private initialized = false;
 
 	constructor(options: GrassChunkFieldOptions) {
 		this.density = THREE.MathUtils.clamp(options.density ?? 100, 0, 100);
 		this.group.name = "Grass";
 		this.group.position.copy(options.origin ?? new THREE.Vector3());
-		
+
 		if (options.cullDistance != null) {
 			this.setCullDistance(options.cullDistance);
 		}
@@ -79,7 +84,7 @@ export class GrassChunkField {
 			for (const chunk of options.chunks) {
 				this.allMatrices.set(chunk.matrices, offset);
 				offset += chunk.count * 16;
-				
+
 				boundingBox.expandByPoint(new THREE.Vector3(chunk.minX, chunk.minY, chunk.minZ));
 				boundingBox.expandByPoint(new THREE.Vector3(chunk.maxX, chunk.maxY, chunk.maxZ));
 			}
@@ -137,22 +142,32 @@ export class GrassChunkField {
 		boundingBox.getBoundingSphere(this.grassMesh.boundingSphere);
 		this.grassMesh.geometry.indirect = this.indirectBuffer;
 		this.grassMesh.instanceMatrix = culledDataBuffer;
-		
+
 		this.group.add(this.grassMesh);
 
 		// 6. Compute Shaders
-		
+
 		// 6a. Reset node
 		const resetFn = Fn(() => {
-			atomicStore(indirectNode.element(1), 0);
+			atomicStore(indirectNode.element(1), uint(0));
 		});
 		this.resetComputeNode = resetFn().compute(1);
-		
+
 		// 6b. Culling node
 		const cullingFn = Fn(() => {
+			const sharedData = workgroupArray('atomic<u32>', 2);
+			
+			If(invocationLocalIndex.equal(0), () => {
+				// @ts-ignore
+				atomicStore(sharedData.element(uint(0)), uint(0));
+				// @ts-ignore
+				atomicStore(sharedData.element(uint(1)), uint(0));
+			});
+			workgroupBarrier();
+
 			const index = instanceIndex;
 			const matrix = instanceDataNode.element(index);
-			
+
 			const posX = matrix[3][0];
 			const posY = matrix[3][1];
 			const posZ = matrix[3][2];
@@ -164,8 +179,11 @@ export class GrassChunkField {
 			const dx = this.cullPositionUniform.x.sub(worldPos.x);
 			const dz = this.cullPositionUniform.z.sub(worldPos.z);
 			const distSq = dx.mul(dx).add(dz.mul(dz));
-			
+
 			const hideDist = float(this.hideDistance);
+
+			// Compute visibility WITHOUT early-exiting so barriers stay uniform
+			const isVisible = uint(0).toVar();
 			
 			If(distSq.lessThan(hideDist.mul(hideDist)), () => {
 				const radius = float(bladeReach);
@@ -209,11 +227,37 @@ export class GrassChunkField {
 					
 					const finalDensity = baseDensity.mul(distScale);
 					
-					If(hash.lessThan(finalDensity), () => {
-						const writeIndex = atomicAdd(indirectNode.element(1), 1);
-						culledDataNode.element(writeIndex).assign(matrix);
-					});
+					isVisible.assign(hash.lessThan(finalDensity));
 				});
+			});
+			
+			// From here on, EVERY thread in the workgroup executes identically.
+			// Only the isVisible-gated *work* differs, not control flow around barriers.
+			const localOffset = uint(0).toVar();
+			
+			If(isVisible, () => {
+				// @ts-ignore
+				localOffset.assign(atomicAdd(sharedData.element(uint(0)), uint(1)));
+			});
+			
+			workgroupBarrier();
+			
+			If(invocationLocalIndex.equal(0), () => {
+				// @ts-ignore
+				const totalLocal = atomicLoad(sharedData.element(uint(0)));
+				// @ts-ignore
+				If(totalLocal.greaterThan(uint(0)), () => {
+					// @ts-ignore
+					atomicStore(sharedData.element(uint(1)), atomicAdd(indirectNode.element(1), totalLocal));
+				});
+			});
+			
+			workgroupBarrier();
+			
+			If(isVisible, () => {
+				// @ts-ignore
+				const writeIndex = atomicLoad(sharedData.element(uint(1))).add(localOffset);
+				culledDataNode.element(writeIndex).assign(matrix);
 			});
 		});
 
@@ -245,21 +289,21 @@ export class GrassChunkField {
 		// Used to be called per frame, but distance culling is fully in the GPU now.
 		// Retained for API compatibility.
 	}
-	
+
 	updateCompute(renderer: any, camera: THREE.Camera, cullPos: THREE.Vector3) {
 		if (!this.initialized) return;
-		
+
 		this.cullPositionUniform.value.copy(cullPos);
-		
+
 		// Extract frustum planes
 		this.projScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
 		this.frustum.setFromProjectionMatrix(this.projScreenMatrix);
-		
+
 		for (let i = 0; i < 6; i++) {
 			const plane = this.frustum.planes[i];
 			this.frustumPlanesUniform.array[i].set(plane.normal.x, plane.normal.y, plane.normal.z, plane.constant);
 		}
-		
+
 		renderer.compute(this.resetComputeNode);
 		renderer.compute(this.cullingComputeNode);
 	}
@@ -276,7 +320,7 @@ export class GrassChunkField {
 		const cx = new Float64Array(circles.length);
 		const cz = new Float64Array(circles.length);
 		const cr2 = new Float64Array(circles.length);
-		
+
 		for (let n = 0; n < circles.length; n++) {
 			const c = circles[n]!;
 			cx[n] = c.x - originX;
@@ -286,10 +330,10 @@ export class GrassChunkField {
 
 		let changed = false;
 		const totalCount = this.allMatrices.length / 16;
-		
+
 		for (let i = 0; i < totalCount; i++) {
 			if (this.roadMasked[i]) continue;
-			
+
 			const offset = i * 16;
 			const posX = this.allMatrices[offset + 12];
 			const posZ = this.allMatrices[offset + 14];
@@ -303,7 +347,7 @@ export class GrassChunkField {
 					break;
 				}
 			}
-			
+
 			if (!inside) continue;
 
 			this.roadMasked[i] = true;
@@ -315,7 +359,7 @@ export class GrassChunkField {
 			this.allMatrices[offset + 10] *= 0.001;
 			changed = true;
 		}
-		
+
 		if (changed) {
 			this.instanceDataBuffer.array.set(this.allMatrices);
 			this.instanceDataBuffer.needsUpdate = true;

@@ -40,8 +40,8 @@ import {
  */
 export class CausticsPass {
   private target: StorageTexture | null = null;
-  private kernel: any = null;
-  private boundHeightMap: Texture | null = null;
+  private kernels: [any, any] | null = null;
+  private boundTextures: [Texture, Texture] | null = null;
   private resolution = 0;
 
   private readonly uLightDir = uniform(new Vector3(0.3, 1.0, 0.2).normalize());
@@ -62,6 +62,12 @@ export class CausticsPass {
     this.target.generateMipmaps = false;
   }
 
+  /** Call once both ping-pong textures are known (e.g. from RippleSimulation.initialize). */
+  prepare(textureA: Texture, textureB: Texture): void {
+    this.boundTextures = [textureA, textureB];
+    this.kernels = [this.buildKernel(textureA), this.buildKernel(textureB)];
+  }
+
   /**
    * The kernel bakes in its source texture, so it is rebuilt only when the
    * simulation hands over a different heightfield — not per frame.
@@ -70,11 +76,10 @@ export class CausticsPass {
     const res = this.resolution;
     const last = res - 1;
     const dst = this.target!;
-    const src = texture(heightMap);
 
     const at = (coord: any, dx: number, dy: number) =>
       textureLoad(
-        src,
+        heightMap,
         (clamp as any)(coord.add(ivec2(dx, dy)), ivec2(0, 0), ivec2(last, last)) as any,
       ).r;
 
@@ -105,16 +110,12 @@ export class CausticsPass {
   }
 
   render(renderer: any, heightMap: Texture | null): void {
-    if (!this.target || !heightMap) {
+    if (!this.target || !heightMap || !this.kernels || !this.boundTextures) {
       return;
     }
 
-    if (this.boundHeightMap !== heightMap) {
-      this.kernel = this.buildKernel(heightMap);
-      this.boundHeightMap = heightMap;
-    }
-
-    renderer.compute(this.kernel);
+    const index = heightMap === this.boundTextures[0] ? 0 : 1;
+    renderer.compute(this.kernels[index]);
   }
 
   get texture(): Texture | null {
@@ -124,7 +125,7 @@ export class CausticsPass {
   dispose(): void {
     this.target?.dispose();
     this.target = null;
-    this.kernel = null;
-    this.boundHeightMap = null;
+    this.kernels = null;
+    this.boundTextures = null;
   }
 }

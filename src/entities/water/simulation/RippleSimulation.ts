@@ -185,6 +185,10 @@ export class RippleSimulation {
     return this.heightField.readTexture;
   }
 
+  get allTextures(): [Texture, Texture] | null {
+    return this.heightField.allTextures;
+  }
+
   dispose(): void {
     this.pending.length = 0;
     this.heightField.dispose();

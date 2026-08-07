@@ -23,6 +23,7 @@ export class HeightField {
 
   private readTexture_: StorageTexture | null = null;
   private writeTexture_: StorageTexture | null = null;
+  private originalTextures_: [StorageTexture, StorageTexture] | null = null;
 
   constructor(resolution: number) {
     this.resolution = resolution;
@@ -36,6 +37,7 @@ export class HeightField {
 
     this.readTexture_ = this.createTexture();
     this.writeTexture_ = this.createTexture();
+    this.originalTextures_ = [this.readTexture_, this.writeTexture_];
   }
 
   private createTexture(): StorageTexture {
@@ -62,6 +64,10 @@ export class HeightField {
   /** Texture currently holding the latest heights. */
   get readTexture(): Texture | null {
     return this.readTexture_;
+  }
+
+  get allTextures(): [Texture, Texture] | null {
+    return this.originalTextures_;
   }
 
   get read(): StorageTexture | null {
