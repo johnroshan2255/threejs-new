@@ -1,201 +1,233 @@
 import * as THREE from "three";
+import {
+	Fn,
+	If,
+	atomicAdd,
+	atomicStore,
+	float,
+	fract,
+	instanceIndex,
+	max,
+	sin,
+	sqrt,
+	storage,
+	uniform,
+	uniformArray,
+	vec3,
+} from "three/tsl";
+import { StorageBufferAttribute, StorageInstancedBufferAttribute, IndirectStorageBufferAttribute } from "three/webgpu";
 import type { GrassChunkData } from "./grassPlacementCore";
 
-const CHUNK_SIZE = 15;
-/** Extra radius so wind-displaced blades near chunk edges don't pop. */
 const BOUND_PADDING = 4;
-
-/** Full blade density inside this horizontal distance from the focus. */
 const DEFAULT_FADE_START = 48;
-/** Soft density reaches 0 by this distance (aligned near island fog ~65). */
 const DEFAULT_FADE_END = 68;
-/** Stay fully hidden until closer than this (hysteresis vs fade end). */
 const DEFAULT_SHOW_DISTANCE = 62;
-/** Hard-hide once past this (slightly beyond fade end). */
 export const DEFAULT_GRASS_CULL_DISTANCE = 72;
 
 export type GrassChunkFieldOptions = {
-	/**
-	 * Per-instance matrices. Prefer `chunks` — building Matrix4 objects for a
-	 * million blades is exactly the main-thread cost the worker path removes.
-	 * Kept for the MeshSurfaceSampler path on the built-in worlds.
-	 */
 	matrices?: THREE.Matrix4[];
-	/** Pre-chunked flat matrix buffers from the placement worker. */
 	chunks?: GrassChunkData[];
 	geometry: THREE.BufferGeometry;
 	material: THREE.Material;
 	origin?: THREE.Vector3;
 	chunkSize?: number;
 	density?: number;
-	/** Max horizontal distance before grass hides (default {@link DEFAULT_GRASS_CULL_DISTANCE}). */
 	cullDistance?: number;
 };
 
-function shuffleInPlace<T>(arr: T[]) {
-	for (let i = arr.length - 1; i > 0; i--) {
-		const j = Math.floor(Math.random() * (i + 1));
-		const tmp = arr[i]!;
-		arr[i] = arr[j]!;
-		arr[j] = tmp;
-	}
-}
-
-/**
- * Same fluffy grass mesh, split into spatial InstancedMesh chunks so Three.js
- * frustum culling can skip off-screen tiles. Distance culling softly thins
- * then hides far chunks with hysteresis — same gradual band as the island.
- */
 export class GrassChunkField {
 	readonly group = new THREE.Group();
-	private readonly meshes: THREE.InstancedMesh[] = [];
-	private readonly chunkCenters: THREE.Vector3[] = [];
-	private readonly distanceScale: number[] = [];
-	private readonly hidden: boolean[] = [];
 	private density: number;
-	private readonly chunkSize: number;
 	private fadeStart = DEFAULT_FADE_START;
 	private fadeEnd = DEFAULT_FADE_END;
-	private showDistance = DEFAULT_SHOW_DISTANCE;
+	private showDistance = DEFAULT_SHOW_DISTANCE; // Kept for API compatibility though compute shader fades per frame smoothly
 	private hideDistance = DEFAULT_GRASS_CULL_DISTANCE;
-	private readonly _matrix = new THREE.Matrix4();
-	private readonly _pos = new THREE.Vector3();
-	private readonly _quat = new THREE.Quaternion();
-	private readonly _scale = new THREE.Vector3();
-	/** Per-mesh bitset of instances cleared by roads (same length as maxGrassCount). */
-	private readonly roadMasked: boolean[][] = [];
+	
+	private grassMesh?: THREE.InstancedMesh;
+	private indirectBuffer?: IndirectStorageBufferAttribute;
+	private cullingComputeNode?: any;
+	private resetComputeNode?: any;
+	private frustumPlanesUniform?: any;
+	private cullPositionUniform: any;
+	private densityUniform: any;
+	
+	private allMatrices?: Float32Array;
+	private roadMasked?: boolean[];
+	private instanceDataBuffer?: StorageBufferAttribute;
+	
+	private frustum = new THREE.Frustum();
+	private projScreenMatrix = new THREE.Matrix4();
+	
+	private initialized = false;
 
 	constructor(options: GrassChunkFieldOptions) {
-		this.chunkSize = options.chunkSize ?? CHUNK_SIZE;
 		this.density = THREE.MathUtils.clamp(options.density ?? 100, 0, 100);
 		this.group.name = "Grass";
 		this.group.position.copy(options.origin ?? new THREE.Vector3());
+		
 		if (options.cullDistance != null) {
 			this.setCullDistance(options.cullDistance);
 		}
 
+		let totalCount = 0;
+		let boundingBox = new THREE.Box3();
+
 		if (options.chunks) {
-			this.buildFromChunks(options.chunks, options.geometry, options.material);
+			totalCount = options.chunks.reduce((sum, chunk) => sum + chunk.count, 0);
+			this.allMatrices = new Float32Array(totalCount * 16);
+			let offset = 0;
+			for (const chunk of options.chunks) {
+				this.allMatrices.set(chunk.matrices, offset);
+				offset += chunk.count * 16;
+				
+				boundingBox.expandByPoint(new THREE.Vector3(chunk.minX, chunk.minY, chunk.minZ));
+				boundingBox.expandByPoint(new THREE.Vector3(chunk.maxX, chunk.maxY, chunk.maxZ));
+			}
+		} else if (options.matrices) {
+			totalCount = options.matrices.length;
+			this.allMatrices = new Float32Array(totalCount * 16);
+			let offset = 0;
+			const pos = new THREE.Vector3();
+			for (const matrix of options.matrices) {
+				matrix.toArray(this.allMatrices, offset);
+				pos.setFromMatrixPosition(matrix);
+				boundingBox.expandByPoint(pos);
+				offset += 16;
+			}
+		} else {
 			return;
 		}
 
-		const buckets = new Map<string, THREE.Matrix4[]>();
-		const matrixPosition = new THREE.Vector3();
+		if (totalCount === 0) return;
+		this.roadMasked = new Array(totalCount).fill(false);
 
-		for (const matrix of options.matrices ?? []) {
-			matrixPosition.setFromMatrixPosition(matrix);
-			const chunkX = Math.floor(matrixPosition.x / this.chunkSize);
-			const chunkZ = Math.floor(matrixPosition.z / this.chunkSize);
-			const key = `${chunkX}:${chunkZ}`;
-			const bucket = buckets.get(key);
-			if (bucket) bucket.push(matrix);
-			else buckets.set(key, [matrix]);
-		}
+		if (!options.geometry.boundingSphere) options.geometry.computeBoundingSphere();
+		const bladeReach = (options.geometry.boundingSphere?.radius ?? 1) * 1.2 + BOUND_PADDING;
+		boundingBox.expandByScalar(bladeReach);
 
-		for (const bucket of buckets.values()) {
-			// Shuffle so soft fade (mesh.count) thins randomly, not by grid side.
-			shuffleInPlace(bucket);
+		// 1. Storage buffer for ALL raw instance matrices
+		this.instanceDataBuffer = new StorageBufferAttribute(totalCount, 16);
+		this.instanceDataBuffer.array.set(this.allMatrices);
+		const instanceDataNode = storage(this.instanceDataBuffer, 'mat4', totalCount);
 
-			const mesh = new THREE.InstancedMesh(
-				options.geometry,
-				options.material,
-				bucket.length
-			);
-			mesh.name = "GrassChunk";
-			mesh.receiveShadow = true;
-			mesh.frustumCulled = true;
-			mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-			mesh.layers.set(0);
+		// 2. Storage buffer for CULLED instance matrices
+		const culledDataBuffer = new StorageInstancedBufferAttribute(totalCount, 16);
+		const culledDataNode = storage(culledDataBuffer, 'mat4', totalCount);
 
-			const center = new THREE.Vector3();
-			const masked = new Array(bucket.length).fill(false);
-			for (let i = 0; i < bucket.length; i++) {
-				mesh.setMatrixAt(i, bucket[i]!);
-				matrixPosition.setFromMatrixPosition(bucket[i]!);
-				center.add(matrixPosition);
-			}
-			center.multiplyScalar(1 / bucket.length);
+		// 3. Indirect draw buffer: [indexCount, instanceCount, firstIndex, baseVertex, firstInstance]
+		const indexCount = options.geometry.index ? options.geometry.index.count : options.geometry.attributes.position.count;
+		this.indirectBuffer = new IndirectStorageBufferAttribute(new Uint32Array([indexCount, 0, 0, 0, 0]), 1);
+		const indirectNode = storage(this.indirectBuffer, 'uint', 5).toAtomic();
 
-			mesh.instanceMatrix.needsUpdate = true;
-			mesh.userData.maxGrassCount = bucket.length;
-			mesh.count = Math.floor(bucket.length * (this.density / 100));
+		// 4. Frustum planes uniform
+		this.frustumPlanesUniform = uniformArray([
+			new THREE.Vector4(), new THREE.Vector4(), new THREE.Vector4(),
+			new THREE.Vector4(), new THREE.Vector4(), new THREE.Vector4()
+		]);
+		this.cullPositionUniform = uniform(new THREE.Vector3());
+		this.densityUniform = uniform(float(this.density / 100.0));
 
-			mesh.computeBoundingBox();
-			mesh.computeBoundingSphere();
-			if (mesh.boundingSphere) {
-				mesh.boundingSphere.radius += BOUND_PADDING;
-			}
-			if (mesh.boundingBox) {
-				mesh.boundingBox.expandByScalar(BOUND_PADDING);
-			}
+		// 5. Mesh setup
+		this.grassMesh = new THREE.InstancedMesh(options.geometry, options.material, totalCount);
+		this.grassMesh.name = "GrassGPU";
+		this.grassMesh.receiveShadow = true;
+		this.grassMesh.frustumCulled = false; // We compute our own culling
+		this.grassMesh.boundingBox = boundingBox;
+		this.grassMesh.boundingSphere = new THREE.Sphere();
+		boundingBox.getBoundingSphere(this.grassMesh.boundingSphere);
+		this.grassMesh.geometry.indirect = this.indirectBuffer;
+		this.grassMesh.instanceMatrix = culledDataBuffer;
+		
+		this.group.add(this.grassMesh);
 
-			this.group.add(mesh);
-			this.meshes.push(mesh);
-			this.chunkCenters.push(center);
-			this.distanceScale.push(1);
-			this.hidden.push(false);
-			this.roadMasked.push(masked);
-		}
-	}
+		// 6. Compute Shaders
+		
+		// 6a. Reset node
+		const resetFn = Fn(() => {
+			atomicStore(indirectNode.element(1), 0);
+		});
+		this.resetComputeNode = resetFn().compute(1);
+		
+		// 6b. Culling node
+		const cullingFn = Fn(() => {
+			const index = instanceIndex;
+			const matrix = instanceDataNode.element(index);
+			
+			const posX = matrix[3][0];
+			const posY = matrix[3][1];
+			const posZ = matrix[3][2];
+			const pos = vec3(posX, posY, posZ);
 
-	/**
-	 * Adopt worker output with no per-instance JS work: each chunk's matrix buffer
-	 * is blitted straight into instanceMatrix, and bounds come from the worker's
-	 * position extents rather than InstancedMesh.computeBoundingBox (which would
-	 * walk every instance again on the main thread).
-	 */
-	private buildFromChunks(
-		chunks: GrassChunkData[],
-		geometry: THREE.BufferGeometry,
-		material: THREE.Material
-	) {
-		// Conservative padding: blade extent at its largest instance scale. Bounding
-		// volumes only have to enclose, so overestimating costs nothing but culling.
-		if (!geometry.boundingSphere) geometry.computeBoundingSphere();
-		const bladeReach = (geometry.boundingSphere?.radius ?? 1) * 1.2 + BOUND_PADDING;
+			const origin = vec3(this.group.position);
+			const worldPos = pos.add(origin);
 
-		for (const chunk of chunks) {
-			if (chunk.count === 0) continue;
-			const mesh = new THREE.InstancedMesh(geometry, material, chunk.count);
-			mesh.name = "GrassChunk";
-			mesh.receiveShadow = true;
-			mesh.frustumCulled = true;
-			mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
-			mesh.layers.set(0);
+			const dx = this.cullPositionUniform.x.sub(worldPos.x);
+			const dz = this.cullPositionUniform.z.sub(worldPos.z);
+			const distSq = dx.mul(dx).add(dz.mul(dz));
+			
+			const hideDist = float(this.hideDistance);
+			
+			If(distSq.lessThan(hideDist.mul(hideDist)), () => {
+				const radius = float(bladeReach);
+				
+				const p0 = this.frustumPlanesUniform.element(0);
+				const p1 = this.frustumPlanesUniform.element(1);
+				const p2 = this.frustumPlanesUniform.element(2);
+				const p3 = this.frustumPlanesUniform.element(3);
+				const p4 = this.frustumPlanesUniform.element(4);
+				const p5 = this.frustumPlanesUniform.element(5);
+				
+				const d0 = p0.x.mul(worldPos.x).add(p0.y.mul(worldPos.y)).add(p0.z.mul(worldPos.z)).add(p0.w);
+				const d1 = p1.x.mul(worldPos.x).add(p1.y.mul(worldPos.y)).add(p1.z.mul(worldPos.z)).add(p1.w);
+				const d2 = p2.x.mul(worldPos.x).add(p2.y.mul(worldPos.y)).add(p2.z.mul(worldPos.z)).add(p2.w);
+				const d3 = p3.x.mul(worldPos.x).add(p3.y.mul(worldPos.y)).add(p3.z.mul(worldPos.z)).add(p3.w);
+				const d4 = p4.x.mul(worldPos.x).add(p4.y.mul(worldPos.y)).add(p4.z.mul(worldPos.z)).add(p4.w);
+				const d5 = p5.x.mul(worldPos.x).add(p5.y.mul(worldPos.y)).add(p5.z.mul(worldPos.z)).add(p5.w);
+				
+				const inFrustum = d0.greaterThanEqual(radius.negate())
+					.and(d1.greaterThanEqual(radius.negate()))
+					.and(d2.greaterThanEqual(radius.negate()))
+					.and(d3.greaterThanEqual(radius.negate()))
+					.and(d4.greaterThanEqual(radius.negate()))
+					.and(d5.greaterThanEqual(radius.negate()));
+					
+				If(inFrustum, () => {
+					const hash = fract(sin(worldPos.x.mul(12.9898).add(worldPos.z.mul(78.233))).mul(43758.5453));
+					
+					const fadeStart = float(this.fadeStart);
+					const fadeEnd = float(this.fadeEnd);
+					const fadeRange = max(float(0.001), fadeEnd.sub(fadeStart));
+					const dist = sqrt(distSq);
+					
+					const baseDensity = this.densityUniform;
+					const distScale = float(1.0).toVar();
+					
+					If(dist.greaterThan(fadeStart), () => {
+						const t = dist.sub(fadeStart).div(fadeRange);
+						distScale.assign(float(1.0).sub(t.mul(t).mul(float(3.0).sub(t.mul(2.0)))));
+					});
+					
+					const finalDensity = baseDensity.mul(distScale);
+					
+					If(hash.lessThan(finalDensity), () => {
+						const writeIndex = atomicAdd(indirectNode.element(1), 1);
+						culledDataNode.element(writeIndex).assign(matrix);
+					});
+				});
+			});
+		});
 
-			(mesh.instanceMatrix.array as Float32Array).set(chunk.matrices);
-			mesh.instanceMatrix.needsUpdate = true;
-
-			mesh.userData.maxGrassCount = chunk.count;
-			mesh.count = Math.floor(chunk.count * (this.density / 100));
-
-			mesh.boundingBox = new THREE.Box3(
-				new THREE.Vector3(chunk.minX, chunk.minY, chunk.minZ),
-				new THREE.Vector3(chunk.maxX, chunk.maxY, chunk.maxZ)
-			).expandByScalar(bladeReach);
-			mesh.boundingSphere = new THREE.Sphere();
-			mesh.boundingBox.getBoundingSphere(mesh.boundingSphere);
-
-			this.group.add(mesh);
-			this.meshes.push(mesh);
-			this.chunkCenters.push(
-				new THREE.Vector3(chunk.centerX, chunk.centerY, chunk.centerZ)
-			);
-			this.distanceScale.push(1);
-			this.hidden.push(false);
-			this.roadMasked.push(new Array(chunk.count).fill(false));
-		}
+		this.cullingComputeNode = cullingFn().compute(totalCount);
+		this.initialized = true;
 	}
 
 	setDensity(percent: number) {
 		this.density = THREE.MathUtils.clamp(percent, 0, 100);
-		this.applyCounts();
+		if (this.densityUniform) {
+			this.densityUniform.value = this.density / 100.0;
+		}
 	}
 
-	/**
-	 * How far grass stays visible before hard hide (meters).
-	 * Scales the island fade band (48→68→72) proportionally. Default 72.
-	 */
 	setCullDistance(meters: number) {
 		const hide = THREE.MathUtils.clamp(meters, 30, 250);
 		const scale = hide / DEFAULT_GRASS_CULL_DISTANCE;
@@ -209,144 +241,95 @@ export class GrassChunkField {
 		return this.hideDistance;
 	}
 
-	/**
-	 * Softly thin then hide chunks by horizontal distance from the focus
-	 * (player / car). Gradual fade then hard hide at {@link cullDistance}.
-	 */
 	updateDistanceCulling(focusPosition: THREE.Vector3) {
-		const originX = this.group.position.x;
-		const originZ = this.group.position.z;
-		const fadeRange = Math.max(0.001, this.fadeEnd - this.fadeStart);
-
-		for (let i = 0; i < this.meshes.length; i++) {
-			const local = this.chunkCenters[i]!;
-			const cx = local.x + originX;
-			const cz = local.z + originZ;
-			const dx = focusPosition.x - cx;
-			const dz = focusPosition.z - cz;
-			const dist = Math.sqrt(dx * dx + dz * dz);
-
-			if (this.hidden[i]) {
-				if (dist <= this.showDistance) this.hidden[i] = false;
-			} else if (dist >= this.hideDistance) {
-				this.hidden[i] = true;
-			}
-
-			let scale = 1;
-			if (this.hidden[i] || dist >= this.fadeEnd) {
-				scale = 0;
-			} else if (dist > this.fadeStart) {
-				const t = (dist - this.fadeStart) / fadeRange;
-				// Full smoothstep 1 → 0 (island-style gradual fade).
-				scale = 1 - t * t * (3 - 2 * t);
-			}
-
-			this.distanceScale[i] = scale;
+		// Used to be called per frame, but distance culling is fully in the GPU now.
+		// Retained for API compatibility.
+	}
+	
+	updateCompute(renderer: any, camera: THREE.Camera, cullPos: THREE.Vector3) {
+		if (!this.initialized) return;
+		
+		this.cullPositionUniform.value.copy(cullPos);
+		
+		// Extract frustum planes
+		this.projScreenMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+		this.frustum.setFromProjectionMatrix(this.projScreenMatrix);
+		
+		for (let i = 0; i < 6; i++) {
+			const plane = this.frustum.planes[i];
+			this.frustumPlanesUniform.array[i].set(plane.normal.x, plane.normal.y, plane.normal.z, plane.constant);
 		}
-
-		this.applyCounts();
+		
+		renderer.compute(this.resetComputeNode);
+		renderer.compute(this.cullingComputeNode);
 	}
 
-	/**
-	 * Clear fluffy grass in a circle (mud road). Buries instances under the terrain.
-	 */
 	maskRoadCircle(worldX: number, worldZ: number, radius: number) {
 		this.maskCircles([{ x: worldX, z: worldZ, radius }]);
 	}
 
-	/**
-	 * Clear grass under many circles in a single instance pass.
-	 *
-	 * A cave mouth is not one circle — it is however much of the tunnel runs near
-	 * the surface, which can be tens of metres of spine. Masking that circle by
-	 * circle would rescan every blade in range once per circle.
-	 */
 	maskCircles(circles: { x: number; z: number; radius: number }[]) {
-		if (!circles.length) return;
+		if (!circles.length || !this.allMatrices || !this.roadMasked || !this.instanceDataBuffer) return;
 
 		const originX = this.group.position.x;
 		const originZ = this.group.position.z;
 		const cx = new Float64Array(circles.length);
 		const cz = new Float64Array(circles.length);
-		const cr = new Float64Array(circles.length);
 		const cr2 = new Float64Array(circles.length);
+		
 		for (let n = 0; n < circles.length; n++) {
 			const c = circles[n]!;
 			cx[n] = c.x - originX;
 			cz[n] = c.z - originZ;
-			cr[n] = c.radius;
 			cr2[n] = c.radius * c.radius;
 		}
 
-		const nearby: number[] = [];
-		for (let c = 0; c < this.meshes.length; c++) {
-			const center = this.chunkCenters[c]!;
+		let changed = false;
+		const totalCount = this.allMatrices.length / 16;
+		
+		for (let i = 0; i < totalCount; i++) {
+			if (this.roadMasked[i]) continue;
+			
+			const offset = i * 16;
+			const posX = this.allMatrices[offset + 12];
+			const posZ = this.allMatrices[offset + 14];
 
-			// Narrow to the circles this chunk can actually touch, so the per-blade
-			// loop below stays proportional to local mouth width, not spine length.
-			nearby.length = 0;
+			let inside = false;
 			for (let n = 0; n < circles.length; n++) {
-				const pad = this.chunkSize * 0.5 + cr[n]!;
-				const dx = center.x - cx[n]!;
-				const dz = center.z - cz[n]!;
-				if (dx * dx + dz * dz <= pad * pad) nearby.push(n);
-			}
-			if (!nearby.length) continue;
-
-			const mesh = this.meshes[c]!;
-			const masked = this.roadMasked[c]!;
-			const maximum = mesh.userData.maxGrassCount as number;
-			let changed = false;
-
-			for (let i = 0; i < maximum; i++) {
-				if (masked[i]) continue;
-				mesh.getMatrixAt(i, this._matrix);
-				this._matrix.decompose(this._pos, this._quat, this._scale);
-
-				let inside = false;
-				for (const n of nearby) {
-					const dx = this._pos.x - cx[n]!;
-					const dz = this._pos.z - cz[n]!;
-					if (dx * dx + dz * dz <= cr2[n]!) {
-						inside = true;
-						break;
-					}
+				const dx = posX - cx[n]!;
+				const dz = posZ - cz[n]!;
+				if (dx * dx + dz * dz <= cr2[n]!) {
+					inside = true;
+					break;
 				}
-				if (!inside) continue;
-
-				masked[i] = true;
-				this._pos.y = -50;
-				this._scale.set(0.001, 0.001, 0.001);
-				this._matrix.compose(this._pos, this._quat, this._scale);
-				mesh.setMatrixAt(i, this._matrix);
-				changed = true;
 			}
-			if (changed) mesh.instanceMatrix.needsUpdate = true;
-		}
-	}
+			
+			if (!inside) continue;
 
-	private applyCounts() {
-		const densityFactor = this.density / 100;
-		for (let i = 0; i < this.meshes.length; i++) {
-			const mesh = this.meshes[i]!;
-			const maximum = mesh.userData.maxGrassCount as number;
-			const scale = this.distanceScale[i]!;
-			const count = Math.floor(maximum * densityFactor * scale);
-			mesh.count = count;
-			mesh.visible = !this.hidden[i] && count > 0;
+			this.roadMasked[i] = true;
+			// Sink into ground
+			this.allMatrices[offset + 13] = -50;
+			// Scale down
+			this.allMatrices[offset + 0] *= 0.001;
+			this.allMatrices[offset + 5] *= 0.001;
+			this.allMatrices[offset + 10] *= 0.001;
+			changed = true;
+		}
+		
+		if (changed) {
+			this.instanceDataBuffer.array.set(this.allMatrices);
+			this.instanceDataBuffer.needsUpdate = true;
 		}
 	}
 
 	dispose() {
 		this.group.removeFromParent();
-		for (const mesh of this.meshes) {
-			mesh.dispose();
-		}
-		this.meshes.length = 0;
-		this.chunkCenters.length = 0;
-		this.distanceScale.length = 0;
-		this.hidden.length = 0;
-		this.roadMasked.length = 0;
+		this.grassMesh?.geometry.dispose();
+		this.grassMesh?.dispose();
+		this.indirectBuffer?.dispose();
+		this.instanceDataBuffer?.dispose();
 		this.group.clear();
+		this.allMatrices = undefined;
+		this.roadMasked = undefined;
 	}
 }

@@ -285,8 +285,7 @@ export class GrassMaterial {
 		material.positionNode = Fn(() => {
 			// positionLocal already carries the instance transform: NodeMaterial
 			// applies instancing before it evaluates positionNode.
-			const instMatrix: any = attribute('instanceMatrix', 'mat4');
-			const bladeWorld = modelWorldMatrix.mul(instMatrix).mul(vec4(positionGeometry, 1.0)).xyz.toVar();
+			const bladeWorld = modelWorldMatrix.mul(vec4(positionLocal, 1.0)).xyz.toVar();
 
 			const terrainSize = u.uTerrainSize;
 			const globalUV = terrainSize

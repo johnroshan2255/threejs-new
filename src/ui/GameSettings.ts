@@ -261,10 +261,13 @@ export class GameSettings {
 							<h3>GRASS SETTINGS</h3>
 							<div class="setting-row">
 								<label for="set-grass-density">Density %</label>
-								<div class="slider-container">
+								<div class="slider-container" style="flex:1;">
 									<input type="range" id="set-grass-density" min="0" max="100" step="1" />
 									<span class="slider-value">100</span>
 								</div>
+							</div>
+							<div class="setting-row">
+								<button id="btn-turn-off-grass" style="width:100%; padding:8px; margin-bottom:10px; background:#444; color:#fff; border:none; cursor:pointer;">Turn Off Grass</button>
 							</div>
 							<div class="setting-row">
 								<label for="set-grass-cull">Cull Distance (m)</label>
@@ -372,6 +375,15 @@ export class GameSettings {
 			gDensInp.nextElementSibling!.textContent = val.toString();
 			this.options.onGrassDensityChange(val);
 		});
+
+		const btnTurnOffGrass = overlay.querySelector("#btn-turn-off-grass") as HTMLButtonElement;
+		if (btnTurnOffGrass) {
+			btnTurnOffGrass.addEventListener("click", () => {
+				gDensInp.value = "0";
+				gDensInp.nextElementSibling!.textContent = "0";
+				this.options.onGrassDensityChange(0);
+			});
+		}
 
 		const gCullInp = overlay.querySelector("#set-grass-cull") as HTMLInputElement;
 		gCullInp.value = this.state.grassCullDistance.toString();

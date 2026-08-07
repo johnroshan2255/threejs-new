@@ -3299,11 +3299,11 @@ export class FluffyGrass {
 		}
 		if (this.renderFrameCounter % 2 === 0) {
 			if (this.currentWorld === "island" && this.worldGroup.visible) {
-				this.islandGrassField?.updateDistanceCulling(cullPos);
+				this.islandGrassField?.updateCompute(this.renderer, this.camera, cullPos);
 			} else if (this.currentWorld === "valley" && this.newWorldGroup.visible) {
-				this.valleyGrassField?.updateDistanceCulling(cullPos);
+				this.valleyGrassField?.updateCompute(this.renderer, this.camera, cullPos);
 			} else if (this.activeWorldDef.kind === "custom" && this.customWorldGroup.visible) {
-				this.customGrassField?.updateDistanceCulling(cullPos);
+				this.customGrassField?.updateCompute(this.renderer, this.camera, cullPos);
 			}
 			this.updateMeshDistanceCulling(cullPos);
 		}
@@ -4097,13 +4097,46 @@ export class FluffyGrass {
 			this.lastGpuPanelUpdate = now;
 			const gpuPanel = document.getElementById("custom-gpu-panel");
 			if (gpuPanel) {
-				gpuPanel.innerHTML = `GPU LOAD<br/>Draws: ${this.renderer.info.render.calls}<br/>Tris: ${this.renderer.info.render.triangles}`;
+				// renderer.info is unreliable on WebGPU (PostProcessing node pipeline
+				// doesn't update it the same way). Count directly from the scene graph.
+				let draws = 0;
+				let tris = 0;
+				this.scene.traverseVisible((obj: THREE.Object3D) => {
+					const mesh = obj as THREE.Mesh;
+					if (!mesh.isMesh) return;
+
+					const instanced = (mesh as unknown as THREE.InstancedMesh);
+					// InstancedMesh with count=0 contributes no GPU work (distance-culled)
+					const instanceCount = instanced.isInstancedMesh ? instanced.count : 1;
+					if (instanceCount === 0) return;
+
+					// Each draw call = 1 GPU draw, regardless of instance count
+					draws++;
+
+					const geo = mesh.geometry as THREE.BufferGeometry;
+					// Use drawRange to match what Three.js actually submits to GPU
+					const drawRangeCount = geo.drawRange.count;
+					let geoTris = 0;
+					if (geo.index) {
+						const idxCount = drawRangeCount === Infinity ? geo.index.count : Math.min(drawRangeCount, geo.index.count);
+						geoTris = idxCount / 3;
+					} else {
+						const pos = geo.attributes.position;
+						if (pos) {
+							const vtxCount = drawRangeCount === Infinity ? pos.count : Math.min(drawRangeCount, pos.count);
+							geoTris = vtxCount / 3;
+						}
+					}
+					tris += geoTris * instanceCount;
+				});
+				const triStr = tris >= 1_000_000
+					? `${(tris / 1_000_000).toFixed(2)}M`
+					: tris >= 1_000
+					? `${(tris / 1_000).toFixed(1)}K`
+					: `${tris}`;
+				gpuPanel.innerHTML = `GPU LOAD<br/>Draws: ${draws}<br/>Tris: ${triStr}`;
 			}
 		}
-
-		// Since we render multiple post-processing passes, we must reset the stats manually
-		// at the end of the frame to get the true cumulative total.
-		this.renderer.info.reset();
 	};
 
 	private setupTextures() {
@@ -4866,9 +4899,6 @@ export class FluffyGrass {
 
 		document.body.appendChild(statsDom);
 		this.setShowStatsEnabled(this.showStatsEnabled);
-
-		// Prevent the renderer from resetting stats between post-processing passes
-		this.renderer.info.autoReset = false;
 	}
 
 	private setupEditMode() {
