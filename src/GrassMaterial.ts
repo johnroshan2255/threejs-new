@@ -33,6 +33,7 @@ import {
 } from "three/tsl";
 import { snowMaskAt } from "./terrain/snowShading";
 import { snowUniforms } from "./terrain/snowMask";
+import { isMobileDevice } from "./ui/mobileControls";
 
 interface GrassUniformsInterface {
 	uTime?: { value: number };
@@ -197,10 +198,13 @@ export class GrassMaterial {
 
 	constructor(grassProps?: GrassUniformsInterface) {
 		this.mergeUniforms(grassProps);
+		const isMobile = isMobileDevice();
 		this.material = new MeshLambertNodeMaterial({
 			side: THREE.DoubleSide,
-			transparent: true,
-			alphaTest: 0.1,
+			// On mobile we start opaque (no depth-write = flickering on tile GPUs).
+			// Desktop starts transparent and upgrades to alphaToCoverage when MSAA kicks in.
+			transparent: !isMobile,
+			alphaTest: isMobile ? 0.5 : 0.1,
 			shadowSide: THREE.BackSide,
 		});
 		// A double-sided *transparent* material is drawn twice — back faces, then
@@ -227,6 +231,9 @@ export class GrassMaterial {
 	 */
 	setAlphaToCoverage(enabled: boolean) {
 		const material = this.material;
+		// Never turn on alphaToCoverage on mobile — tile GPUs don't benefit
+		// and we intentionally keep grass in the opaque queue there.
+		if (isMobileDevice()) return;
 		if (material.alphaToCoverage === enabled) return;
 		material.alphaToCoverage = enabled;
 		material.transparent = !enabled;

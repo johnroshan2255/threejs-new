@@ -298,8 +298,8 @@ export class FluffyGrass {
 	private grassGeometry = new THREE.BufferGeometry();
 	private grassMaterial: GrassMaterial;
 	private grassCount = 50000;
-	private grassDensity = 100;
-	private grassCullDistance = DEFAULT_GRASS_CULL_DISTANCE;
+	private grassDensity = isMobileDevice() ? 50 : 100;
+	private grassCullDistance = isMobileDevice() ? 55 : DEFAULT_GRASS_CULL_DISTANCE;
 	private islandGrassField: GrassChunkField | null = null;
 	private valleyGrassField: GrassChunkField | null = null;
 	private customGrassField: GrassChunkField | null = null;
@@ -4174,6 +4174,13 @@ export class FluffyGrass {
 			}
 		} catch (e) {
 			console.warn("Failed to load settings from localStorage", e);
+		}
+		// Mobile hard overrides — always applied after saved settings so a
+		// desktop save never bleeds onto a mobile session.
+		if (isMobileDevice()) {
+			this.postFxEnabled = false;
+			this.grassDensity = Math.min(this.grassDensity, 50);
+			this.grassCullDistance = Math.min(this.grassCullDistance, 55);
 		}
 	}
 
