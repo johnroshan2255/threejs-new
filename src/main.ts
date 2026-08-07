@@ -685,7 +685,7 @@ export class FluffyGrass {
 		this.scene.add(this.bulletSystem.group);
 		this.bulletSystem.getGroundY = (x, z) => getWorldTerrainY(x, z);
 
-		this.treeManager = new TreeInstancedMesh(this.loadingManager);
+		this.treeManager = new TreeInstancedMesh(this.loadingManager, 1);
 
 		this.initializationPromise = (async () => {
 			await this.treeManager.initialize();

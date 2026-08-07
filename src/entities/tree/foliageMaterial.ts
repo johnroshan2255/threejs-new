@@ -5,6 +5,7 @@ import {
 	FOLIAGE_VERTEX_SHADER,
 } from "./foliageShader";
 import { SNOW_GLSL, snowShaderUniforms } from "../../terrain/snowShading";
+import { isMobileDevice } from "../../ui/mobileControls";
 
 /** Shared wind clock — call updateFoliageWind(dt) once per frame. */
 export const foliageWind = {
@@ -110,6 +111,7 @@ export function createFoliageMaterial(
 		shadowSide: THREE.FrontSide,
 		roughness: 1,
 		metalness: 0,
+		defines: { OPTIMIZE_TREE: "1" },
 	}) as FoliageMaterial;
 
 	material.userData.foliageUniforms = uniforms;

@@ -35,6 +35,9 @@ mat4 rotateZ(float radians) {
 }
 
 vec4 applyWind(vec4 v) {
+#if OPTIMIZE_TREE == 1
+  return v;
+#else
   float boundedYNormal = remap(normal.y, -1.0, 1.0, 0.0, 1.0);
   
 #ifdef USE_INSTANCING
@@ -51,6 +54,7 @@ vec4 applyWind(vec4 v) {
   float radians = mix(bottomFacing, topFacing, boundedYNormal);
 
   return rotateZ(radians) * v;
+#endif
 }
 
 vec2 calcInitialOffsetFromUVs() {

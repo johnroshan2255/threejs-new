@@ -215,10 +215,10 @@ export class GrassMaterial {
 
         float xDisp = 0.0;
         float zDisp = 0.0;
+        float tip = (1.-uv.y);
         
         #if ${mobile ? "0" : "1"}
         vec4 noise = texture2D(uNoiseTexture,vGlobalUV+uTime*uNoiseSpeed);
-        float tip = (1.-uv.y);
         float sinWave = sin(uWindFreq*dot(windDirection, vGlobalUV) + noise.g*uNoiseFactor + uTime * uSpeed) * uWindAmp * tip;
         xDisp = sinWave;
         zDisp = sinWave;
