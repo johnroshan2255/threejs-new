@@ -800,9 +800,16 @@ export class EditApplier {
 	async applyMany(ops: WorldEditOp[]) {
 		this.deferColliderRebuild = true;
 		try {
+			const pending = new Map<string, Promise<any>>();
 			for (const op of ops) {
-				await this.apply(op);
+				if (op.type === "delete-entity" || op.type === "transform-entity") {
+					const p = pending.get(op.entityId);
+					if (p) await p;
+				}
+				const promise = this.apply(op);
+				pending.set(op.id, promise);
 			}
+			await Promise.all(pending.values());
 		} finally {
 			this.deferColliderRebuild = false;
 		}
