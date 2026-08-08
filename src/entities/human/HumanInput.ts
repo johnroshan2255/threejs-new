@@ -171,6 +171,7 @@ export class HumanInput {
     private isLeftMouseDown = false;
     private isRightMouseDown = false;
     private leftMouseDownTime = 0;
+    private qDownTime = 0;
     private attackTimer = 0;
     private attackDuration = 0;
     private readonly handPos = new THREE.Vector3();
@@ -338,8 +339,11 @@ export class HumanInput {
         this.keys[k] = true;
         if (k === "t") this.triggerPickup();
         if (k === "h") this.triggerCarryPlayer();
+        if (k === "1") this.equipWeapon("fists");
+        if (k === "2") this.equipWeapon("gun");
         if (k === "q" && !e.repeat) {
             e.preventDefault();
+            this.qDownTime = performance.now();
             if (this.mobileControls) {
                 if (this.weaponWheel?.isOpen()) {
                     this.closeWeaponWheel(false);
@@ -358,7 +362,15 @@ export class HumanInput {
         this.keys[k] = false;
         if (k === "q") {
             if (!this.mobileControls) {
-                this.closeWeaponWheel(true);
+                const elapsed = performance.now() - this.qDownTime;
+                // If it was a quick tap, and the wheel didn't select something else, just swap
+                if (elapsed < 250 && this.weaponWheel?.getHighlighted() === this.inventory.equipped) {
+                    this.closeWeaponWheel(false);
+                    const next = this.inventory.equipped === "fists" ? "gun" : "fists";
+                    this.equipWeapon(next);
+                } else {
+                    this.closeWeaponWheel(true);
+                }
             }
         }
     };

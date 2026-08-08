@@ -35,11 +35,4 @@ function ensureHost(): HTMLElement {
 /** Log a line to the console and the on-screen overlay. */
 export function debugLine(message: string) {
 	console.warn(message);
-	lines.push(message);
-	while (lines.length > MAX_LINES) lines.shift();
-	try {
-		ensureHost().textContent = lines.join("\n");
-	} catch {
-		/* pre-DOM call — console still has it */
-	}
 }

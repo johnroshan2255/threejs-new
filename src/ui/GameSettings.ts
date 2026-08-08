@@ -61,11 +61,26 @@ export class GameSettings {
 	show(): void {
 		this.overlay.style.display = "flex";
 		this.overlay.classList.remove("hidden");
+		this.syncToggle();
 	}
 
 	hide(): void {
 		this.overlay.style.display = "none";
 		this.overlay.classList.add("hidden");
+		// Return focus to the document so form elements (select, input) inside
+		// the settings panel don't keep blocking game keyboard inputs (Q, WASD…)
+		const focused = this.overlay.querySelector<HTMLElement>(":focus");
+		focused?.blur();
+		this.syncToggle();
+	}
+
+	private syncToggle(): void {
+		const toggle = document.getElementById("settings-toggle");
+		if (toggle) {
+			const open = this.overlay.style.display === "flex";
+			toggle.classList.toggle("is-open", open);
+			toggle.setAttribute("aria-label", open ? "Close settings" : "Open settings");
+		}
 	}
 
 	setHour(hour: number): void {
@@ -108,33 +123,25 @@ export class GameSettings {
 
 	private bindToggle(): void {
 		const toggle = document.getElementById("settings-toggle");
-		const sync = () => {
-			const open = this.overlay.style.display === "flex";
-			toggle?.classList.toggle("is-open", open);
-			toggle?.setAttribute("aria-label", open ? "Close settings" : "Open settings");
-		};
 
-		sync();
+		this.syncToggle();
 		toggle?.addEventListener("click", () => {
 			if (this.overlay.style.display === "none") {
 				this.show();
 			} else {
 				this.hide();
 			}
-			sync();
 		});
 
 		const closeBtn = this.overlay.querySelector(".custom-settings-close");
 		closeBtn?.addEventListener("click", () => {
 			this.hide();
-			sync();
 		});
 		
 		// Close on backdrop click
 		this.overlay.addEventListener("click", (e) => {
 			if (e.target === this.overlay) {
 				this.hide();
-				sync();
 			}
 		});
 	}
@@ -409,6 +416,9 @@ export class GameSettings {
 		this.worldSelect.addEventListener("change", async (e) => {
 			const next = (e.target as HTMLSelectElement).value;
 			const previous = this.state.world;
+			
+			this.hide();
+			
 			try {
 				await this.options.onWorldChange(next);
 			} catch {

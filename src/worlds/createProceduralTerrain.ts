@@ -2,56 +2,7 @@ import * as THREE from "three";
 import type { WorldDefinition } from "./worldTypes";
 import { applySnowToMaterial } from "../terrain/snowShading";
 
-function fade(t: number) {
-	return t * t * t * (t * (t * 6 - 15) + 10);
-}
-
-function lerp(a: number, b: number, t: number) {
-	return a + (b - a) * t;
-}
-
-function valueNoise2D(x: number, z: number, seed: number) {
-	const x0 = Math.floor(x);
-	const z0 = Math.floor(z);
-	const fx = fade(x - x0);
-	const fz = fade(z - z0);
-	const hash = (ix: number, iz: number) => {
-		const n = Math.sin(ix * 127.1 + iz * 311.7 + seed * 0.001) * 43758.5453;
-		return n - Math.floor(n);
-	};
-	return lerp(
-		lerp(hash(x0, z0), hash(x0 + 1, z0), fx),
-		lerp(hash(x0, z0 + 1), hash(x0 + 1, z0 + 1), fx),
-		fz
-	);
-}
-
-function fbm(x: number, z: number, seed: number) {
-	let amp = 1;
-	let freq = 1;
-	let value = 0;
-	let norm = 0;
-	for (let i = 0; i < 5; i++) {
-		value += valueNoise2D(x * freq, z * freq, seed + i * 17) * amp;
-		norm += amp;
-		amp *= 0.5;
-		freq *= 2;
-	}
-	return value / norm;
-}
-
-function hillMound(
-	x: number,
-	z: number,
-	cx: number,
-	cz: number,
-	radius: number
-) {
-	const d = Math.hypot(x - cx, z - cz) / radius;
-	if (d >= 1) return 0;
-	const t = 1 - d;
-	return t * t * (3 - 2 * t);
-}
+import { buildTerrainGeneration } from "./terrainGenerationCore";
 
 export type ProceduralTerrainResult = {
 	mesh: THREE.Mesh;
@@ -74,44 +25,19 @@ export function createProceduralTerrain(
 
 	const { size, segments } = definition;
 	const seed = definition.seed ?? 42;
-	const half = size * 0.5;
-	const scale = size / 200;
-	const maxHeight = 7 * Math.min(1.4, Math.sqrt(scale));
-	const hillStrength = 1;
-	const mainHill = {
-		x: 36 * scale * 0.35,
-		z: -24 * scale * 0.35,
-		height: 18 * Math.min(1.2, Math.sqrt(scale)),
-		radius: 40 * Math.min(2.2, scale * 0.45),
-	};
 
-	const sample = (x: number, z: number) => {
-		const nx = (x / half) * 1.6;
-		const nz = (z / half) * 1.6;
-		const rolling = (fbm(nx * 1.1 + 2.3, nz * 1.1 - 1.7, seed) - 0.5) * 2;
-		const detail = (fbm(nx * 3.4 - 5.1, nz * 3.4 + 4.2, seed + 3) - 0.5) * 0.45;
-		const broad = (fbm(nx * 0.45 + 10, nz * 0.45 - 8, seed + 7) - 0.5) * 1.4;
-		const edge = Math.max(Math.abs(x), Math.abs(z)) / half;
-		const edgeMask = 1 - Math.pow(Math.min(edge, 1), 3) * 0.35;
-		const base =
-			(rolling * hillStrength + detail + broad) * maxHeight * 0.35 * edgeMask;
-		const mound = hillMound(x, z, mainHill.x, mainHill.z, mainHill.radius);
-		return base + mound * mainHill.height * edgeMask;
-	};
+	const { positions, normals, heights, nrows, ncols } = buildTerrainGeneration({
+		size,
+		segments,
+		seed
+	});
 
 	const geometry = new THREE.PlaneGeometry(size, size, segments, segments);
 	geometry.rotateX(-Math.PI / 2);
 
-	const positions = geometry.attributes.position as THREE.BufferAttribute;
-	// No vertex colors by default — material.color is the island green.
-	// Road paint adds a color attribute later.
-	for (let i = 0; i < positions.count; i++) {
-		const x = positions.getX(i);
-		const z = positions.getZ(i);
-		positions.setY(i, sample(x, z));
-	}
-	positions.needsUpdate = true;
-	geometry.computeVertexNormals();
+	geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+	geometry.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
+
 	geometry.computeBoundingBox();
 	geometry.computeBoundingSphere();
 	geometry.computeBoundsTree();
@@ -120,18 +46,6 @@ export function createProceduralTerrain(
 	mesh.name = `terrain-${definition.id}`;
 	mesh.receiveShadow = true;
 	mesh.castShadow = false;
-
-	const nrows = segments;
-	const ncols = segments;
-	const heights = new Float32Array((nrows + 1) * (ncols + 1));
-	// Rapier expects Z to vary fastest
-	for (let col = 0; col <= ncols; col++) { // col is X
-		for (let row = 0; row <= nrows; row++) { // row is Z
-			const x = -half + (col / ncols) * size;
-			const z = -half + (row / nrows) * size;
-			heights[row + col * (nrows + 1)] = sample(x, z);
-		}
-	}
 
 	return { mesh, heights, nrows, ncols, size };
 }

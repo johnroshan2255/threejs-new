@@ -604,6 +604,12 @@ export class VolumetricFogPass {
 		renderer.clear();
 		renderer.render(scene, camera);
 
+		// --- WebGPU fix ---
+		// End the render pass and release sceneRT.texture from RenderAttachment usage
+		// before bloom samples it.
+		renderer.setRenderTarget(null);
+
+		// Bloom can now safely sample sceneRT.texture
 		const bloomTex = this.bloomEnabled
 			? this.bloom.render(renderer, this.sceneRT.texture, this.bloomThreshold)
 			: null;

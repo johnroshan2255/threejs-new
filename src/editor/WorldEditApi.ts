@@ -89,7 +89,10 @@ export class WorldEditApi {
 				{ headers }
 			);
 			if (!res.ok) return null;
-			return (await res.json()) as SavedWorldPayload;
+			
+			const buffer = await res.arrayBuffer();
+			const { parseJsonAsync } = await import("../workers/jsonClient");
+			return (await parseJsonAsync(buffer)) as SavedWorldPayload;
 		} catch {
 			return null;
 		}

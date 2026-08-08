@@ -128,6 +128,10 @@ export class WeaponWheel {
 		this.highlight(best);
 	}
 
+	public getHighlighted(): WeaponId | null {
+		return this.highlighted;
+	}
+
 	private highlight(id: WeaponId) {
 		if (this.highlighted === id) return;
 		this.highlighted = id;

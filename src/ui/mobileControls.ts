@@ -29,10 +29,8 @@ export function isMobileDevice(): boolean {
 		/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile/i.test(
 			ua
 		) ||
-		window.matchMedia("(pointer: coarse)").matches ||
-		(touchPoints > 0 &&
-			window.matchMedia("(hover: none)").matches &&
-			Math.min(window.screen.width, window.screen.height) <= 1024)
+		(window.matchMedia("(pointer: coarse)").matches && 
+			window.matchMedia("(hover: none)").matches)
 	);
 }
 

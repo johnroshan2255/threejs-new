@@ -4408,7 +4408,7 @@ export class FluffyGrass {
 		);
 
 		// 2. Extract Bloom from the LDR tonemapped output
-		const bloomNode = bloom(vec4(tonemappedRays as any, 1.0), 0.42, 0.4, 0.72);
+		const bloomNode = bloom(vec4((tonemappedRays as any).xyz, 1.0), 0.42, 0.4, 0.72);
 		// Bloom keeps a 5-level mip chain (10 targets) plus a bright pass, and the
 		// composite reads all five, so the level count is not safely tunable. The
 		// input scale is: at 0.35 the chain holds roughly half the pixels of the

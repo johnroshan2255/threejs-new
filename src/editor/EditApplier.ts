@@ -83,6 +83,8 @@ export class EditApplier {
 	private colliderDirty = false;
 	private caveTerrainDirty = false;
 	private deferColliderRebuild = false;
+	public isBatching = false;
+	private queuedPaints: import("../worlds/terrainColorCompute").PaintCircle[] = [];
 	/** When false (edit mode), dig basins only — no Pond meshes. */
 	private spawnWaterSurfaces = true;
 
@@ -289,9 +291,15 @@ export class EditApplier {
 				const mesh = this.host.getTerrainMesh();
 				if (mesh) {
 					this.host.enableTerrainVertexColors();
-					paintTerrainMud(mesh, op.x, op.z, op.radius);
+					if (this.isBatching) {
+						this.queuedPaints.push({ x: op.x, z: op.z, radius: op.radius, type: "mud" });
+					} else {
+						paintTerrainMud(mesh, op.x, op.z, op.radius);
+					}
 				}
-				this.host.getGrassField()?.maskRoadCircle(op.x, op.z, op.radius);
+				if (!this.isBatching) {
+					await this.host.getGrassField()?.maskRoadCircle(op.x, op.z, op.radius);
+				}
 				return true;
 			}
 			case "paint-water": {
@@ -307,9 +315,15 @@ export class EditApplier {
 					const mesh = this.host.getTerrainMesh();
 					if (mesh) {
 						this.host.enableTerrainVertexColors();
-						paintTerrainWater(mesh, op.x, op.z, op.radius);
+						if (this.isBatching) {
+							this.queuedPaints.push({ x: op.x, z: op.z, radius: op.radius, type: "water" });
+						} else {
+							paintTerrainWater(mesh, op.x, op.z, op.radius);
+						}
 					}
-					this.host.getGrassField()?.maskRoadCircle(op.x, op.z, op.radius);
+					if (!this.isBatching) {
+						await this.host.getGrassField()?.maskRoadCircle(op.x, op.z, op.radius);
+					}
 				} else {
 					if (!this.spawnWaterSurfaces) {
 						// Edit mode: keep basin only; fill ops applied on Save / exit play.
@@ -680,11 +694,13 @@ export class EditApplier {
 
 		// Clear grass over the basin footprint (circle around AABB is fine for mask).
 		const grassR = Math.max(footprint.width, footprint.depth) * 0.55 + 1;
-		this.host.getGrassField()?.maskRoadCircle(
-			footprint.centerX,
-			footprint.centerZ,
-			grassR
-		);
+		if (!this.isBatching) {
+			await this.host.getGrassField()?.maskRoadCircle(
+				footprint.centerX,
+				footprint.centerZ,
+				grassR
+			);
+		}
 
 		// Shore paint: for exact brush shapes, tint only near the footprint center
 		// at a radius matching the painted extent — not a huge circle beyond it.
@@ -799,12 +815,23 @@ export class EditApplier {
 
 	async applyMany(ops: WorldEditOp[]) {
 		this.deferColliderRebuild = true;
+		this.isBatching = true;
+		this.queuedPaints = [];
 		try {
 			for (const op of ops) {
 				await this.apply(op);
 			}
+			if (this.queuedPaints.length > 0) {
+				const mesh = this.host.getTerrainMesh();
+				if (mesh) {
+					const { paintTerrainBatch } = await import("../worlds/terrainColorBatch");
+					paintTerrainBatch(mesh, this.queuedPaints);
+				}
+			}
 		} finally {
 			this.deferColliderRebuild = false;
+			this.isBatching = false;
+			this.queuedPaints = [];
 		}
 		this.flushCaveTerrain();
 		if (this.colliderDirty) {

@@ -154,11 +154,11 @@ export class TreeInstancedMesh {
 		// 1. Setup Master Arrays
 		this.masterTrunkArray = new Float32Array(this.capacity * 16);
 		this.masterFoliageArray = new Float32Array(foliageCapacity * 16);
-		this.masterFoliageColorArray = new Float32Array(foliageCapacity * 3).fill(1);
+		this.masterFoliageColorArray = new Float32Array(foliageCapacity * 4).fill(1);
 		
 		this.masterTrunkData = new StorageBufferAttribute(this.capacity, 16);
 		this.masterFoliageData = new StorageBufferAttribute(foliageCapacity, 16);
-		this.masterFoliageColorData = new StorageBufferAttribute(foliageCapacity, 3);
+		this.masterFoliageColorData = new StorageBufferAttribute(foliageCapacity, 4);
 		
 		this.masterTrunkData.array = this.masterTrunkArray;
 		this.masterFoliageData.array = this.masterFoliageArray;
@@ -166,16 +166,16 @@ export class TreeInstancedMesh {
 
 		const masterTrunkNode = storage(this.masterTrunkData, 'mat4', this.capacity);
 		const masterFoliageNode = storage(this.masterFoliageData, 'mat4', foliageCapacity);
-		const masterFoliageColorNode = storage(this.masterFoliageColorData, 'vec3', foliageCapacity);
+		const masterFoliageColorNode = storage(this.masterFoliageColorData, 'vec4', foliageCapacity);
 
 		// 2. Setup Culled Buffers
 		const culledTrunkData = new StorageInstancedBufferAttribute(this.capacity, 16);
 		const culledFoliageData = new StorageInstancedBufferAttribute(foliageCapacity, 16);
-		const culledFoliageColorData = new StorageInstancedBufferAttribute(foliageCapacity, 3);
+		const culledFoliageColorData = new StorageInstancedBufferAttribute(foliageCapacity, 4);
 		
 		const culledTrunkNode = storage(culledTrunkData, 'mat4', this.capacity);
 		const culledFoliageNode = storage(culledFoliageData, 'mat4', foliageCapacity);
-		const culledFoliageColorNode = storage(culledFoliageColorData, 'vec3', foliageCapacity);
+		const culledFoliageColorNode = storage(culledFoliageColorData, 'vec4', foliageCapacity);
 
 		// 3. Setup Indirect Buffers
 		const trunkIndexCount = template.trunk.geometry.index ? template.trunk.geometry.index.count : template.trunk.geometry.attributes.position.count;
@@ -396,9 +396,10 @@ export class TreeInstancedMesh {
 			foliageMatrix.toArray(this.masterFoliageArray, foliageIndex * 16);
 			
 			if (leafColor) {
-				this.masterFoliageColorArray[foliageIndex * 3 + 0] = leafColor.r;
-				this.masterFoliageColorArray[foliageIndex * 3 + 1] = leafColor.g;
-				this.masterFoliageColorArray[foliageIndex * 3 + 2] = leafColor.b;
+				this.masterFoliageColorArray[foliageIndex * 4 + 0] = leafColor.r;
+				this.masterFoliageColorArray[foliageIndex * 4 + 1] = leafColor.g;
+				this.masterFoliageColorArray[foliageIndex * 4 + 2] = leafColor.b;
+				this.masterFoliageColorArray[foliageIndex * 4 + 3] = 1;
 			}
 		}
 		
@@ -426,8 +427,8 @@ export class TreeInstancedMesh {
 				for (let j = 0; j < 16; j++) {
 					this.masterFoliageArray[toIndex * 16 + j] = this.masterFoliageArray[fromIndex * 16 + j];
 				}
-				for (let j = 0; j < 3; j++) {
-					this.masterFoliageColorArray[toIndex * 3 + j] = this.masterFoliageColorArray[fromIndex * 3 + j];
+				for (let j = 0; j < 4; j++) {
+					this.masterFoliageColorArray[toIndex * 4 + j] = this.masterFoliageColorArray[fromIndex * 4 + j];
 				}
 			}
 			

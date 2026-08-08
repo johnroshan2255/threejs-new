@@ -1415,15 +1415,17 @@ export class EditModeController {
 		const sampleHeight = target
 			? createHeightSampler(target.heights, target.nrows, target.ncols, target.size)
 			: null;
+			
+		const circles: { x: number; z: number; radius: number }[] = [];
 		for (const op of this.store.toJSON().ops) {
 			if (op.type === "paint-road") {
-				grass.maskRoadCircle(op.x, op.z, op.radius);
+				circles.push({ x: op.x, z: op.z, radius: op.radius });
 			} else if (op.type === "paint-cave") {
 				// Same spine-wide mouth region the carve path clears. Anything narrower
 				// here quietly re-covers far-side exits every time grass is rebuilt.
 				if (sampleHeight) {
-					grass.maskCircles(
-						caveMouthMaskCircles(
+					circles.push(
+						...caveMouthMaskCircles(
 							op.nodes,
 							sampleHeight,
 							terrainCellSize(target!.size, target!.nrows, target!.ncols)
@@ -1436,13 +1438,17 @@ export class EditModeController {
 					op.radius ??
 					Math.max(op.basin?.width ?? 0, op.basin?.depth ?? 0) * 0.55;
 				if (r > 0) {
-					grass.maskRoadCircle(
-						op.basin?.centerX ?? op.x,
-						op.basin?.centerZ ?? op.z,
-						r + 1
-					);
+					circles.push({
+						x: op.basin?.centerX ?? op.x,
+						z: op.basin?.centerZ ?? op.z,
+						radius: r + 1,
+					});
 				}
 			}
+		}
+		
+		if (circles.length > 0) {
+			await grass.maskCircles(circles);
 		}
 	}
 

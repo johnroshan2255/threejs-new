@@ -13,38 +13,65 @@ import {
 	uv,
 	vec2,
 	vec3,
+	attribute,
 } from 'three/tsl';
 
-type ExplosionMaterial = MeshBasicNodeMaterial & { uLife: { value: number } };
-
 export class ExplosionSystem {
-	public mesh: THREE.Group;
-	private explosions: { mesh: THREE.Mesh, material: ExplosionMaterial, life: number, maxLife: number }[] = [];
+	public mesh: THREE.InstancedMesh;
 	private textureLoader = new THREE.TextureLoader();
 	private noiseTexture: THREE.Texture;
+	private maxInstances = 20;
+	private currentIndex = 0;
+	private startTimes: Float32Array;
+	private uTime = uniform(0);
+	private dummy = new THREE.Object3D();
 
 	constructor() {
-		this.mesh = new THREE.Group();
-
 		// Load noise texture for the dissolve effect
 		this.noiseTexture = this.textureLoader.load('/perlinnoise.webp');
 		this.noiseTexture.wrapS = THREE.RepeatWrapping;
 		this.noiseTexture.wrapT = THREE.RepeatWrapping;
+
+		const geometry = new THREE.SphereGeometry(1.0, 32, 32);
+		this.startTimes = new Float32Array(this.maxInstances);
+		this.startTimes.fill(-10000); // Start off dead
+
+		const startTimeAttr = new THREE.InstancedBufferAttribute(this.startTimes, 1);
+		startTimeAttr.setUsage(THREE.DynamicDrawUsage);
+		geometry.setAttribute('aStartTime', startTimeAttr);
+
+		const material = this.createMaterial();
+
+		this.mesh = new THREE.InstancedMesh(geometry, material, this.maxInstances);
+		this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+		this.mesh.count = this.maxInstances;
+		this.mesh.frustumCulled = false;
+		
+		// Initialize matrices to zero/hidden just in case
+		this.dummy.scale.setScalar(0);
+		for (let i = 0; i < this.maxInstances; i++) {
+			this.dummy.updateMatrix();
+			this.mesh.setMatrixAt(i, this.dummy.matrix);
+		}
+		this.mesh.instanceMatrix.needsUpdate = true;
 	}
 
 	/**
-	 * One material per explosion, because `uLife` is per-instance and drives both
-	 * the vertex displacement and the dissolve threshold.
+	 * Compute life entirely on the GPU.
 	 */
-	private createMaterial(): ExplosionMaterial {
-		const uLife = uniform(0);
+	private createMaterial(): MeshBasicNodeMaterial {
 		const tNoise = texture(this.noiseTexture);
 
 		const material = new MeshBasicNodeMaterial({
 			transparent: true,
 			// Ensure we can see the inside of the sphere through the holes.
 			side: THREE.DoubleSide,
-		}) as ExplosionMaterial;
+		});
+
+		const aStartTime = attribute('aStartTime', 'float');
+		const rawLife = this.uTime.sub(aStartTime as any) as any;
+		// clamp life for visual calculations
+		const uLife = rawLife.clamp(0.0, 1.0) as any;
 
 		// Noise lookup drifts with life so the dissolve churns rather than just
 		// eroding a fixed pattern.
@@ -61,7 +88,12 @@ export class ExplosionSystem {
 				.sub(pow(float(1.0).sub(uLife), 3.0))
 				.mul(1.5)
 				.add(0.5);
-			return displaced.mul(scale);
+			
+			// If life is out of bounds (dead), collapse to 0
+			const finalScale = rawLife.greaterThan(1.0).or(rawLife.lessThan(0.0))
+				.select(float(0.0), scale);
+
+			return displaced.mul(finalScale);
 		})();
 
 		material.colorNode = Fn(() => {
@@ -69,7 +101,9 @@ export class ExplosionSystem {
 
 			// Threshold goes from -0.2 to 1.2 to dissolve the sphere.
 			const threshold = uLife.mul(1.4).sub(0.2);
-			n.lessThan(threshold).discard();
+			
+			// Discard if noise < threshold or if dead
+			n.lessThan(threshold).or(rawLife.greaterThan(1.0)).or(rawLife.lessThan(0.0)).discard();
 
 			const edgeDist = n.sub(threshold).toVar();
 
@@ -91,45 +125,27 @@ export class ExplosionSystem {
 			return finalColor;
 		})();
 
-		// The update loop drives life through here; keeping the node on the
-		// material is what lets one shared update path reach every live explosion.
-		material.uLife = uLife;
 		return material;
 	}
 
 	emit(position: THREE.Vector3) {
-		const geometry = new THREE.SphereGeometry(1.0, 32, 32);
-		const material = this.createMaterial();
+		const idx = this.currentIndex;
+		this.currentIndex = (this.currentIndex + 1) % this.maxInstances;
 
-		const expMesh = new THREE.Mesh(geometry, material);
-		expMesh.position.copy(position);
-		// Random rotation so they don't all look identical
-		expMesh.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
+		this.dummy.position.copy(position);
+		this.dummy.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
+		this.dummy.scale.setScalar(1);
+		this.dummy.updateMatrix();
 
-		this.mesh.add(expMesh);
+		this.mesh.setMatrixAt(idx, this.dummy.matrix);
+		this.mesh.instanceMatrix.needsUpdate = true;
 
-		this.explosions.push({
-			mesh: expMesh,
-			material: material,
-			life: 0.0,
-			maxLife: 1.0 // 1 second duration
-		});
+		this.startTimes[idx] = this.uTime.value;
+		const attr = this.mesh.geometry.getAttribute('aStartTime') as THREE.InstancedBufferAttribute;
+		attr.needsUpdate = true;
 	}
 
 	update(dt: number) {
-		for (let i = this.explosions.length - 1; i >= 0; i--) {
-			const exp = this.explosions[i];
-			exp.life += dt;
-
-			if (exp.life >= exp.maxLife) {
-				// Remove dead explosion
-				this.mesh.remove(exp.mesh);
-				exp.mesh.geometry.dispose();
-				exp.material.dispose();
-				this.explosions.splice(i, 1);
-			} else {
-				exp.material.uLife.value = exp.life / exp.maxLife;
-			}
-		}
+		this.uTime.value += dt;
 	}
 }

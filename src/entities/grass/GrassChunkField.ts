@@ -292,15 +292,39 @@ export class GrassChunkField {
 		renderer.compute(this.cullingComputeNode);
 	}
 
-	maskRoadCircle(worldX: number, worldZ: number, radius: number) {
-		this.maskCircles([{ x: worldX, z: worldZ, radius }]);
+	async maskRoadCircle(worldX: number, worldZ: number, radius: number) {
+		await this.maskCircles([{ x: worldX, z: worldZ, radius }]);
 	}
 
-	maskCircles(circles: { x: number; z: number; radius: number }[]) {
+	async maskCircles(circles: { x: number; z: number; radius: number }[]) {
 		if (!circles.length || !this.allMatrices || !this.roadMasked || !this.instanceDataBuffer) return;
 
 		const originX = this.group.position.x;
 		const originZ = this.group.position.z;
+		
+		const { grassMaskClient } = await import("../../workers/grassMaskClient");
+
+		if (grassMaskClient.available) {
+			try {
+				const res = await grassMaskClient.run(
+					{
+						matrices: this.allMatrices,
+						circles,
+						originX,
+						originZ,
+					},
+					[this.allMatrices.buffer]
+				);
+				this.allMatrices = res.matrices;
+				this.instanceDataBuffer.array.set(this.allMatrices);
+				this.instanceDataBuffer.needsUpdate = true;
+				return;
+			} catch (error) {
+				console.warn("[GrassChunkField] mask worker failed, falling back to sync", error);
+			}
+		}
+
+		// Fallback to sync masking if worker is not available or failed
 		const cx = new Float64Array(circles.length);
 		const cz = new Float64Array(circles.length);
 		const cr2 = new Float64Array(circles.length);
