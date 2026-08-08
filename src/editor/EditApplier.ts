@@ -20,6 +20,7 @@ import {
 	digWaterBrush,
 	smoothBasinRim,
 	sculptCaveMouths,
+	flushTerrainUpdate,
 	type TerrainSculptTarget,
 } from "./TerrainSculpt";
 import {
@@ -87,8 +88,19 @@ export class EditApplier {
 	private queuedPaints: import("../worlds/terrainColorCompute").PaintCircle[] = [];
 	/** When false (edit mode), dig basins only — no Pond meshes. */
 	private spawnWaterSurfaces = true;
+	private pendingTerrainUpdate = false;
 
 	constructor(private readonly host: EditApplierHost) {}
+
+	flushTerrain() {
+		if (this.pendingTerrainUpdate) {
+			const target = this.host.getSculptTarget();
+			if (target) {
+				flushTerrainUpdate(target.mesh);
+			}
+			this.pendingTerrainUpdate = false;
+		}
+	}
 
 	setSpawnWaterSurfaces(enabled: boolean) {
 		this.spawnWaterSurfaces = enabled;
@@ -195,6 +207,9 @@ export class EditApplier {
 			case "sculpt": {
 				const target = this.host.getSculptTarget();
 				if (!target) return false;
+				target.deferUpdate = this.isBatching;
+				if (this.isBatching) this.pendingTerrainUpdate = true;
+				
 				applyTerrainBrush(
 					target,
 					op.x,
@@ -211,6 +226,7 @@ export class EditApplier {
 				return true;
 			}
 			case "place-tree": {
+				this.flushTerrain();
 				const tree = await createTree({
 					position: [op.x, 0, op.z],
 					placeOnTerrain: true,
@@ -230,6 +246,7 @@ export class EditApplier {
 				return true;
 			}
 			case "place-mesh": {
+				this.flushTerrain();
 				const catalog = resolveEditMesh(op.meshId);
 				if (catalog.kind === "stone") {
 					const stone = await placeStone({
@@ -267,6 +284,7 @@ export class EditApplier {
 				return true;
 			}
 			case "place-stone": {
+				this.flushTerrain();
 				const stone = await placeStone({
 					position: new THREE.Vector3(op.x, 0, op.z),
 					scale: op.scale,
@@ -308,6 +326,8 @@ export class EditApplier {
 				if (!op.createSurface) {
 					const target = this.host.getSculptTarget();
 					if (target) {
+						target.deferUpdate = this.isBatching;
+						if (this.isBatching) this.pendingTerrainUpdate = true;
 						digWaterBrush(target, op.x, op.z, op.radius);
 						setIslandTerrain(target.mesh);
 						this.colliderDirty = true;
@@ -766,6 +786,10 @@ export class EditApplier {
 		pond.mesh.userData.waterHalfW = footprint.width * 0.5;
 		pond.mesh.userData.waterHalfD = footprint.depth * 0.5;
 		this.tagEntity(pond.mesh, options.entityId);
+
+		// Async compile the water pipeline before adding to scene to prevent main thread freeze
+		await this.host.renderer.compileAsync(pond.mesh, this.host.playCamera, this.host.scene);
+
 		this.host.worldGroup.add(pond.mesh);
 		this.host.addEditorPond(pond);
 		this.entities.set(options.entityId, { kind: "pond", pond });
@@ -786,7 +810,7 @@ export class EditApplier {
 		if (!this.deferColliderRebuild) this.flushCaveTerrain();
 	}
 
-	private flushCaveTerrain() {
+	private async flushCaveTerrain() {
 		if (!this.caveTerrainDirty) return;
 		this.caveTerrainDirty = false;
 
@@ -798,15 +822,13 @@ export class EditApplier {
 		if (!hasCaves() || !target) {
 			restoreTerrainHoles(geometry);
 		} else {
-			punchTerrainHoles(
+			await punchTerrainHoles(
 				geometry,
 				getCaveSpecs(),
-				createHeightSampler(
-					target.heights,
-					target.nrows,
-					target.ncols,
-					target.size
-				),
+				target.heights,
+				target.nrows,
+				target.ncols,
+				target.size,
 				terrainCellSize(target.size, target.nrows, target.ncols)
 			);
 		}
@@ -817,32 +839,76 @@ export class EditApplier {
 		this.deferColliderRebuild = true;
 		this.isBatching = true;
 		this.queuedPaints = [];
+		const t0 = performance.now();
 		try {
+			const pendingHeavy: Promise<boolean>[] = [];
+
+			const tSeqStart = performance.now();
 			for (const op of ops) {
-				await this.apply(op);
+				if (op.type === "paint-cave" || op.type === "paint-water") {
+					// Fire off heavy background tasks to the worker pool / async compiler
+					// but DON'T await them yet, allowing them to run concurrently
+					pendingHeavy.push(this.apply(op));
+				} else {
+					// Run trees, sculpts, etc. sequentially to avoid DDoSing the browser
+					// with thousands of simultaneous asset loads or memory spikes
+					await this.apply(op);
+				}
 			}
+			const tSeqEnd = performance.now();
+			debugLine(`[perf] Sequential tasks + dispatch: ${(tSeqEnd - tSeqStart).toFixed(1)}ms`);
+
+			// Now wait for all the concurrent heavy tasks to finish
+			const tHeavyStart = performance.now();
+			await Promise.all(pendingHeavy);
+			const tHeavyEnd = performance.now();
+			debugLine(`[perf] Concurrent heavy tasks (caves/water): ${(tHeavyEnd - tHeavyStart).toFixed(1)}ms`);
+
 			if (this.queuedPaints.length > 0) {
 				const mesh = this.host.getTerrainMesh();
 				if (mesh) {
+					const tColorStart = performance.now();
 					const { paintTerrainBatch } = await import("../worlds/terrainColorBatch");
 					paintTerrainBatch(mesh, this.queuedPaints);
+					const tColorEnd = performance.now();
+					debugLine(`[perf] paintTerrainBatch: ${(tColorEnd - tColorStart).toFixed(1)}ms`);
 				}
+			}
+			
+			const tFinalFlushStart = performance.now();
+			this.flushTerrain();
+			const tFinalFlushEnd = performance.now();
+			if (tFinalFlushEnd - tFinalFlushStart > 1) {
+				debugLine(`[perf] flushTerrain (final bounding box/BVH): ${(tFinalFlushEnd - tFinalFlushStart).toFixed(1)}ms`);
 			}
 		} finally {
 			this.deferColliderRebuild = false;
 			this.isBatching = false;
 			this.queuedPaints = [];
+			this.pendingTerrainUpdate = false;
+			const target = this.host.getSculptTarget();
+			if (target) target.deferUpdate = false;
 		}
-		this.flushCaveTerrain();
+		
+		const tFlushCaveStart = performance.now();
+		await this.flushCaveTerrain();
+		const tFlushCaveEnd = performance.now();
+		debugLine(`[perf] flushCaveTerrain (hole punch): ${(tFlushCaveEnd - tFlushCaveStart).toFixed(1)}ms`);
+		
 		if (this.colliderDirty) {
+			const tColliderStart = performance.now();
 			this.host.rebuildCollider();
+			const tColliderEnd = performance.now();
+			debugLine(`[perf] rebuildCollider (in applyMany): ${(tColliderEnd - tColliderStart).toFixed(1)}ms`);
 			this.colliderDirty = false;
 		}
+		const tFinal = performance.now();
+		debugLine(`[perf] applyMany inner total: ${(tFinal - t0).toFixed(1)}ms`);
 	}
 
-	flushColliderIfNeeded() {
+	async flushColliderIfNeeded() {
 		// Holes first: the collider is built from the punched terrain geometry.
-		this.flushCaveTerrain();
+		await this.flushCaveTerrain();
 		if (!this.colliderDirty) return;
 		this.host.rebuildCollider();
 		this.colliderDirty = false;

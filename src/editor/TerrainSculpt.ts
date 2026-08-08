@@ -17,7 +17,17 @@ export type TerrainSculptTarget = {
 	nrows: number;
 	ncols: number;
 	size: number;
+	deferUpdate?: boolean;
 };
+
+export function flushTerrainUpdate(mesh: THREE.Mesh) {
+	const geometry = mesh.geometry as THREE.BufferGeometry;
+	geometry.computeVertexNormals();
+	geometry.computeBoundingBox();
+	geometry.computeBoundingSphere();
+	if (geometry.boundsTree) geometry.boundsTree.refit();
+	mesh.updateMatrixWorld(true);
+}
 
 /**
  * Apply a sculpt brush at world (x, z). Mutates mesh Y and heightfield samples.
@@ -28,7 +38,8 @@ export function applyTerrainBrush(
 	worldZ: number,
 	brush: SculptBrush,
 	radius: number,
-	strength: number
+	strength: number,
+	deferUpdate = false
 ) {
 	const { mesh, heights, nrows, ncols, size } = target;
 	const geometry = mesh.geometry as THREE.BufferGeometry;
@@ -99,11 +110,9 @@ export function applyTerrainBrush(
 	}
 
 	positions.needsUpdate = true;
-	geometry.computeVertexNormals();
-	geometry.computeBoundingBox();
-	geometry.computeBoundingSphere();
-	if (geometry.boundsTree) geometry.boundsTree.refit();
-	mesh.updateMatrixWorld(true);
+	if (!target.deferUpdate && !deferUpdate) {
+		flushTerrainUpdate(mesh);
+	}
 }
 
 /** Soft water basin for brush painting (~0.8 m deep, wide gentle banks). */
@@ -111,7 +120,8 @@ export function digWaterBrush(
 	target: TerrainSculptTarget,
 	worldX: number,
 	worldZ: number,
-	radius: number
+	radius: number,
+	deferUpdate = false
 ) {
 	const { mesh, heights, nrows, ncols, size } = target;
 	const geometry = mesh.geometry as THREE.BufferGeometry;
@@ -152,11 +162,9 @@ export function digWaterBrush(
 		}
 	}
 	positions.needsUpdate = true;
-	geometry.computeVertexNormals();
-	geometry.computeBoundingBox();
-	geometry.computeBoundingSphere();
-	if (geometry.boundsTree) geometry.boundsTree.refit();
-	mesh.updateMatrixWorld(true);
+	if (!target.deferUpdate && !deferUpdate) {
+		flushTerrainUpdate(mesh);
+	}
 }
 
 /** Dig a soft-banked pond basin (rounded sides, no sharp cliffs). */
@@ -210,11 +218,9 @@ export function digPondBasin(
 	smoothBasinRim(target, worldX, worldZ, outer * 0.72, outer + pondRadius * 0.4);
 
 	positions.needsUpdate = true;
-	geometry.computeVertexNormals();
-	geometry.computeBoundingBox();
-	geometry.computeBoundingSphere();
-	if (geometry.boundsTree) geometry.boundsTree.refit();
-	mesh.updateMatrixWorld(true);
+	if (!target.deferUpdate) {
+		flushTerrainUpdate(mesh);
+	}
 }
 
 /** Soften basin banks so edit-mode holes don't look faceted. */
@@ -359,9 +365,7 @@ export function sculptCaveMouths(target: TerrainSculptTarget, nodes: CaveNode[])
 	for (const run of runs) processMouth(mouthAnchor(run));
 
 	positions.needsUpdate = true;
-	geometry.computeVertexNormals();
-	geometry.computeBoundingBox();
-	geometry.computeBoundingSphere();
-	if (geometry.boundsTree) geometry.boundsTree.refit();
-	mesh.updateMatrixWorld(true);
+	if (!target.deferUpdate) {
+		flushTerrainUpdate(mesh);
+	}
 }

@@ -1148,8 +1148,8 @@ export class EditModeController {
 
 	private scheduleRemoteColliderFlush() {
 		if (this.remoteColliderTimer != null) window.clearTimeout(this.remoteColliderTimer);
-		this.remoteColliderTimer = window.setTimeout(() => {
-			this.applier.flushColliderIfNeeded();
+		this.remoteColliderTimer = window.setTimeout(async () => {
+			await this.applier.flushColliderIfNeeded();
 			this.rebuildCollider();
 			// Debounce doubles as "remote stroke ended" — one resample per burst,
 			// so a peer's hills do not swallow our grass.
@@ -1221,6 +1221,7 @@ export class EditModeController {
 		this.applyingRemote = true;
 		const generation = ++this.terrainApplyGeneration;
 		try {
+			const t0 = performance.now();
 			this.clearSelection();
 			this.applier.setSpawnWaterSurfaces(!this.enabled);
 			this.applier.clearEntities();
@@ -1229,12 +1230,23 @@ export class EditModeController {
 			this.sessionDocs.set(this.store.worldId, this.store.toJSON());
 			if (!this.terrainBaselineHeights) this.captureTerrainBaseline();
 			this.restoreTerrainBaseline();
+			const t1 = performance.now();
+			debugLine(`[perf] Baseline restore: ${(t1 - t0).toFixed(1)}ms`);
+
 			if (doc.ops.length) {
 				await this.applier.applyMany(doc.ops);
 			}
+			const t2 = performance.now();
+			debugLine(`[perf] Total applyMany: ${(t2 - t1).toFixed(1)}ms`);
+
 			if (generation !== this.terrainApplyGeneration) return;
 			this.rebuildCollider();
+			const t3 = performance.now();
+			debugLine(`[perf] rebuildCollider: ${(t3 - t2).toFixed(1)}ms`);
+
 			this.onTerrainSettled();
+			const t4 = performance.now();
+			debugLine(`[perf] Total applyPublishedDocument: ${(t4 - t0).toFixed(1)}ms`);
 		} finally {
 			this.applyingRemote = false;
 			this.applyingPublished = false;
@@ -1382,8 +1394,8 @@ export class EditModeController {
 		setIslandTerrain(mesh);
 	}
 
-	private commitRebuildCollider() {
-		this.applier.flushColliderIfNeeded();
+	private async commitRebuildCollider() {
+		await this.applier.flushColliderIfNeeded();
 		const op = this.store.createOp({ type: "rebuild-collider" });
 		void this.commitOp(op).then(() => this.onTerrainSettled());
 	}

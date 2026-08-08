@@ -5492,6 +5492,8 @@ export class FluffyGrass {
 	private async switchWorld(target: GameWorldId) {
 		if (target === this.currentWorld || this.isWorldSwitching) return;
 
+		const tStart = performance.now();
+
 		// Drop any hook anchored in the world we are leaving.
 		this.vehicleGrapple?.release();
 
@@ -5500,6 +5502,13 @@ export class FluffyGrass {
 		// Claim the switch before awaiting the DB fetch so no second switch races in.
 		this.isWorldSwitching = true;
 		const targetDef = await this.resolveWorldDefinition(target).catch(() => null);
+		const tDb = performance.now();
+		if (this.editMode) {
+			import("./ui/debugOverlay").then(({ debugLine }) => {
+				debugLine(`[perf] switchWorld -> resolveWorldDefinition (DB fetch): ${(tDb - tStart).toFixed(1)}ms`);
+			});
+		}
+
 		if (!targetDef) {
 			this.isWorldSwitching = false;
 			this.settings.setWorld(previous);
@@ -5523,9 +5532,23 @@ export class FluffyGrass {
 				await this.buildCustomWorld(targetDef);
 			}
 
+			const tBuild = performance.now();
+			if (this.editMode) {
+				import("./ui/debugOverlay").then(({ debugLine }) => {
+					debugLine(`[perf] switchWorld -> buildCustomWorld/terrain: ${(tBuild - tDb).toFixed(1)}ms`);
+				});
+			}
+
 			this.worldLoading.setProgress(65, "Compiling world graphics...");
 			await this.renderer.compileAsync(this.scene, this.camera);
 			await this.nextFrame();
+			
+			const tCompile = performance.now();
+			if (this.editMode) {
+				import("./ui/debugOverlay").then(({ debugLine }) => {
+					debugLine(`[perf] switchWorld -> compileAsync (base shaders): ${(tCompile - tBuild).toFixed(1)}ms`);
+				});
+			}
 
 			this.activeWorldDef = targetDef;
 			// Mask spans the world on XZ, so its extent is per-world. Also clears
@@ -5565,6 +5588,13 @@ export class FluffyGrass {
 				// A failed replay must not roll back an otherwise loaded world.
 				console.warn("[world] Failed to restore saved edits", error);
 			}
+			
+			const tEdits = performance.now();
+			if (this.editMode) {
+				import("./ui/debugOverlay").then(({ debugLine }) => {
+					debugLine(`[perf] switchWorld -> onActiveWorldChanged (Edits): ${(tEdits - tCompile).toFixed(1)}ms`);
+				});
+			}
 
 			this.worldLoading.setProgress(92, "Placing player safely...");
 			this.teleportPlayerToCurrentTerrain(target);
@@ -5575,6 +5605,13 @@ export class FluffyGrass {
 			this.worldLoading.setProgress(100, "Ready");
 			await this.nextFrame();
 			this.worldLoading.hide();
+			
+			const tFinal = performance.now();
+			if (this.editMode) {
+				import("./ui/debugOverlay").then(({ debugLine }) => {
+					debugLine(`[perf] switchWorld -> TOTAL TIME: ${(tFinal - tStart).toFixed(1)}ms`);
+				});
+			}
 		} catch (error) {
 			if (target === "island") this.disposeIslandWorld();
 			else if (target === "valley") this.disposeValleyWorld();

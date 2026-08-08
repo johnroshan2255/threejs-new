@@ -58,13 +58,17 @@ export function buildCaveGeometry(req: CaveMeshRequest): CaveGeometryResult | nu
  *
  * Returns the number of triangles removed.
  */
-export function punchTerrainHoles(
+import { terrainHolesWorker } from "../workers/terrainHolesClient";
+
+export async function punchTerrainHoles(
 	geometry: THREE.BufferGeometry,
 	caves: CaveSpec[],
-	sampleHeight: HeightSampler,
-	/** Terrain cell size — sets how wide a mouth must be to clear a whole triangle. */
+	heights: Float32Array,
+	nrows: number,
+	ncols: number,
+	size: number,
 	cellSize = 0
-): number {
+): Promise<number> {
 	const base = ensureBaseIndex(geometry);
 	if (!base) return 0;
 
@@ -77,86 +81,31 @@ export function punchTerrainHoles(
 		return 0;
 	}
 
-	// Terrain has ~129k triangles at stock resolution, so reject on a flat XZ box
-	// before evaluating any SDF — otherwise every re-punch walks the whole spine.
-	const dilate = punchDilate(cellSize);
-	const regions = active.map((cave) => {
-		// Pad to the region the SDF test actually accepts (plus the noise amplitude),
-		// or the box quietly clips the hole before the test ever runs.
-		const pad = maxCaveRadius(cave.nodes) + dilate + 1.1;
-		let minX = Infinity;
-		let maxX = -Infinity;
-		let minZ = Infinity;
-		let maxZ = -Infinity;
-		for (const n of cave.nodes) {
-			minX = Math.min(minX, n.x);
-			maxX = Math.max(maxX, n.x);
-			minZ = Math.min(minZ, n.z);
-			maxZ = Math.max(maxZ, n.z);
-		}
-		return {
-			nodes: cave.nodes,
-			minX: minX - pad,
-			maxX: maxX + pad,
-			minZ: minZ - pad,
-			maxZ: maxZ + pad,
-		};
-	});
+	const request = {
+		baseIndex: base,
+		positions: position.array as Float32Array,
+		caves: active.map(c => ({ nodes: c.nodes })),
+		heights,
+		nrows,
+		ncols,
+		size,
+		cellSize
+	};
 
-	const kept: number[] = [];
-	let removed = 0;
-	for (let t = 0; t < base.length; t += 3) {
-		const i0 = base[t]!;
-		const i1 = base[t + 1]!;
-		const i2 = base[t + 2]!;
-		// Remove a triangle when ANY corner is in the mouth region, so no shard of
-		// terrain is left jutting across the opening. That lets a triangle reach up to
-		// a cell diagonal past the region, which is exactly what the shell's apron is
-		// sized to cover (see punchOvershoot) — without that pairing this rule is what
-		// shows daylight through the ground beside a cave.
-		let punch = false;
-		for (const region of regions) {
-			let hit = false;
-			for (const vi of [i0, i1, i2]) {
-				const vx = position.getX(vi);
-				const vz = position.getZ(vi);
-				if (
-					vx >= region.minX &&
-					vx <= region.maxX &&
-					vz >= region.minZ &&
-					vz <= region.maxZ &&
-					isMouthColumn(region.nodes, sampleHeight, vx, vz, dilate)
-				) {
-					hit = true;
-					break;
-				}
-			}
-			if (!hit) {
-				// A coarse grid can span the whole mouth with one triangle, every corner
-				// of it outside the region. Without this the mouth stays capped.
-				const cx = (position.getX(i0) + position.getX(i1) + position.getX(i2)) / 3;
-				const cz = (position.getZ(i0) + position.getZ(i1) + position.getZ(i2)) / 3;
-				hit =
-					cx >= region.minX &&
-					cx <= region.maxX &&
-					cz >= region.minZ &&
-					cz <= region.maxZ &&
-					isMouthColumn(region.nodes, sampleHeight, cx, cz, dilate);
-			}
-			if (hit) {
-				punch = true;
-				break;
-			}
+	try {
+		const result = await terrainHolesWorker.run(request);
+		if (result) {
+			applyIndex(geometry, result.newIndex);
+			return result.removedCount;
 		}
-		if (punch) {
-			removed++;
-			continue;
-		}
-		kept.push(i0, i1, i2);
+	} catch (error) {
+		console.warn("[cave] terrainHoles worker failed", error);
+		// If worker fails, fallback to old sync method? Or just don't punch.
+		// For now we just don't punch holes if worker completely fails.
 	}
-
-	applyIndex(geometry, new Uint32Array(kept));
-	return removed;
+	
+	applyIndex(geometry, base);
+	return 0;
 }
 
 /** Put every punched triangle back (before a fresh replay of edit ops). */

@@ -45,9 +45,12 @@ export function createWorkerClient<Req, Res>(
 	factory: () => Worker,
 	label: string
 ): WorkerClient<Req, Res> {
-	let worker: Worker | null = null;
+	const poolSize = typeof navigator !== "undefined" ? Math.max(1, navigator.hardwareConcurrency || 4) : 1;
+	const workers: Worker[] = [];
 	let broken = !workersSupported();
 	let nextId = 1;
+	let nextWorkerIndex = 0;
+	
 	const pending = new Map<
 		number,
 		{ resolve: (value: Res) => void; reject: (error: Error) => void }
@@ -58,36 +61,42 @@ export function createWorkerClient<Req, Res>(
 		pending.clear();
 	};
 
-	const ensure = (): Worker | null => {
+	const getWorker = (): Worker | null => {
 		if (broken) return null;
-		if (worker) return worker;
-		try {
-			worker = factory();
-		} catch (error) {
-			broken = true;
-			console.warn(`[worker:${label}] unavailable, using main thread`, error);
-			return null;
+		
+		if (workers.length < poolSize) {
+			try {
+				const worker = factory();
+				worker.onmessage = (event: MessageEvent<WorkerResponse<Res>>) => {
+					const data = event.data;
+					const entry = pending.get(data.id);
+					if (!entry) return;
+					pending.delete(data.id);
+					if (data.ok) entry.resolve(data.result as Res);
+					else entry.reject(new Error(data.error ?? `[worker:${label}] failed`));
+				};
+				worker.onerror = (event) => {
+					// We just log and remove broken workers. If all fail, it falls back.
+					const error = new Error(`[worker:${label}] ${event.message || "worker error"}`);
+					console.warn(error.message);
+					failAll(error);
+					worker.terminate();
+					const idx = workers.indexOf(worker);
+					if (idx !== -1) workers.splice(idx, 1);
+					if (workers.length === 0) broken = true;
+				};
+				workers.push(worker);
+			} catch (error) {
+				broken = true;
+				console.warn(`[worker:${label}] unavailable, using main thread`, error);
+				return null;
+			}
 		}
-		worker.onmessage = (event: MessageEvent<WorkerResponse<Res>>) => {
-			const data = event.data;
-			const entry = pending.get(data.id);
-			if (!entry) return;
-			pending.delete(data.id);
-			if (data.ok) entry.resolve(data.result as Res);
-			else entry.reject(new Error(data.error ?? `[worker:${label}] failed`));
-		};
-		worker.onerror = (event) => {
-			// A worker that has thrown at module scope will never answer, so mark it
-			// broken and let every caller fall back rather than hanging forever.
-			broken = true;
-			const error = new Error(
-				`[worker:${label}] ${event.message || "worker error"}`
-			);
-			console.warn(error.message);
-			failAll(error);
-			worker?.terminate();
-			worker = null;
-		};
+
+		if (workers.length === 0) return null;
+
+		const worker = workers[nextWorkerIndex % workers.length];
+		nextWorkerIndex++;
 		return worker;
 	};
 
@@ -96,7 +105,7 @@ export function createWorkerClient<Req, Res>(
 			return !broken;
 		},
 		run(payload, transfer) {
-			const active = ensure();
+			const active = getWorker();
 			if (!active) {
 				return Promise.reject(new Error(`[worker:${label}] unavailable`));
 			}
@@ -113,8 +122,8 @@ export function createWorkerClient<Req, Res>(
 		},
 		dispose() {
 			failAll(new Error(`[worker:${label}] disposed`));
-			worker?.terminate();
-			worker = null;
+			for (const worker of workers) worker.terminate();
+			workers.length = 0;
 		},
 	};
 }
