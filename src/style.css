@@ -2543,10 +2543,7 @@ button {
 }
 @media (max-width: 600px) {
   #game-top-nav {
-    justify-content: center;
-    width: 100%;
-    background: linear-gradient(180deg, rgba(0,0,0,0.6) 0%, transparent 100%);
-    padding-top: 15px;
+    display: none !important;
   }
   .game-nav-btn {
     font-size: 0.85rem !important;
@@ -3089,7 +3086,7 @@ input:checked + .toggle-slider:before {
 /* =============================================
    MOBILE FULLSCREEN — hide header, fill screen
    ============================================= */
-@media (hover: none) and (pointer: coarse) {
+@media (max-width: 768px), (hover: none) and (pointer: coarse) {
   /* Force body/html to cover every pixel including notches */
   html, body {
     width: 100%;
@@ -3107,6 +3104,7 @@ input:checked + .toggle-slider:before {
 
   /* Hide the top navigation / header bar on mobile */
   nav,
+  #game-top-nav,
   .game-top-nav,
   .controls-hint {
     display: none !important;
