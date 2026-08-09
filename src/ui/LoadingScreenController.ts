@@ -31,6 +31,7 @@ export class LoadingScreenController {
 				}
 				this.options.onPlay();
 			});
+		}
 
 		createAccountButton?.addEventListener("click", () => {
 			loadingScreen?.classList.add("show-account");
