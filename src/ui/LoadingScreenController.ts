@@ -23,8 +23,14 @@ export class LoadingScreenController {
 			playButton.textContent = "Play";
 			playButton.disabled = false;
 			playButton.classList.add("ready");
-			playButton.addEventListener("click", this.options.onPlay);
-		}
+			playButton.addEventListener("click", () => {
+				const docEl = document.documentElement as any;
+				const requestFullscreen = docEl.requestFullscreen || docEl.webkitRequestFullscreen || docEl.mozRequestFullScreen || docEl.msRequestFullscreen;
+				if (requestFullscreen) {
+					requestFullscreen.call(docEl).catch(() => { /* ignore errors */ });
+				}
+				this.options.onPlay();
+			});
 
 		createAccountButton?.addEventListener("click", () => {
 			loadingScreen?.classList.add("show-account");
