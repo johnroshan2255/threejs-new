@@ -37,6 +37,7 @@ import {
 } from "./entities/car/carHeadlights";
 import { CAR_CONFIG } from "./entities/car/carConfig";
 import { HUMMER_CONFIG } from "./entities/car/hummerConfig";
+import { JEEP_CONFIG } from "./entities/car/jeepConfig";
 import { EngineSound } from "./entities/car/EngineSound";
 import { VehicleGrapple } from "./entities/car/vehicleGrapple";
 import { updateChaseCamera, updateHumanCamera } from "./three/chaseCamera";
@@ -324,7 +325,7 @@ export class FluffyGrass {
 	private shadowQuality: QualityLevel = "High";
 	private resolutionQuality: QualityLevel = "High";
 	private waterQuality: QualityLevel = "High";
-	private vehicleId: any = "none";
+	private vehicleId: any = "jeep";
 	private waterUpdateInterval = 1;
 	private waterFrameCounter = 0;
 	private waterDeltaAccumulator = 0;
@@ -737,7 +738,8 @@ export class FluffyGrass {
 			const proceed = (_action: "play", user: AuthUser | null) => {
 				this.userData = user;
 				this.isGameActive = true;
-				this.engineSound = new EngineSound();
+				const engineType = this.vehicleId === "hummer" ? "hummer" : (this.vehicleId === "jeep" ? "rally" : "diesel");
+				this.engineSound = new EngineSound(false, engineType);
 				this.hornSound = new HornSound();
 				this.nitroSound = new NitroSound();
 
@@ -2194,9 +2196,8 @@ export class FluffyGrass {
 				oldRot = { x: r.x, y: r.y, z: r.z, w: r.w };
 				oldVel = { x: v.x, y: v.y, z: v.z };
 
-				this.scene.remove(this.car.mesh);
-				getWorld().removeRigidBody(this.car.body);
-				getWorld().removeVehicleController(this.car.vehicle);
+				this.vehicleGrapple?.dispose();
+				this.vehicleGrapple = null as any;
 
 				this.carLights.forEach(l => l.dispose());
 				this.carLights = [];
@@ -2214,8 +2215,9 @@ export class FluffyGrass {
 				this.mobileControls?.dispose();
 				this.mobileControls = null as any;
 
-				this.vehicleGrapple?.dispose();
-				this.vehicleGrapple = null as any;
+				this.scene.remove(this.car.mesh);
+				getWorld().removeRigidBody(this.car.body);
+				getWorld().removeVehicleController(this.car.vehicle);
 
 				if (this.carController) {
 					this.carController = null;
@@ -2304,7 +2306,9 @@ export class FluffyGrass {
 			pair.setIntensity(0);
 		}
 
-		this.engineSound = new EngineSound();
+		const engineType = this.vehicleId === "hummer" ? "hummer" : (this.vehicleId === "jeep" ? "rally" : "diesel");
+		this.engineSound = new EngineSound(false, engineType);
+		this.engineSound.init();
 		this.hornSound = new HornSound();
 		this.nitroSound = new NitroSound();
 
@@ -4487,17 +4491,18 @@ export class FluffyGrass {
 
 	/** Returns the live, mutable config object for the given vehicle. */
 	private getActiveConfig(vehicleId: string): any {
-		return vehicleId === "hummer" ? HUMMER_CONFIG : CAR_CONFIG;
+		return vehicleId === "jeep" ? JEEP_CONFIG : (vehicleId === "hummer" ? HUMMER_CONFIG : CAR_CONFIG);
 	}
 
 	/** Returns a frozen snapshot of the original default values for a vehicle.
 	 *  We store these once so "revert" always goes back to the code defaults.  */
 	private static readonly DEFAULT_KENNEY = JSON.parse(JSON.stringify(CAR_CONFIG));
 	private static readonly DEFAULT_HUMMER = JSON.parse(JSON.stringify(HUMMER_CONFIG));
+	private static readonly DEFAULT_JEEP = JSON.parse(JSON.stringify(JEEP_CONFIG));
 	private getDefaultConfig(vehicleId: string): any {
 		return vehicleId === "hummer"
 			? (this.constructor as any).DEFAULT_HUMMER
-			: (this.constructor as any).DEFAULT_KENNEY;
+			: (vehicleId === "jeep" ? (this.constructor as any).DEFAULT_JEEP : (this.constructor as any).DEFAULT_KENNEY);
 	}
 
 	/** Set a value on a nested object using a dot-path key like "drive.engineForce". */

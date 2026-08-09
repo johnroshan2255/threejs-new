@@ -1,7 +1,7 @@
-export const HUMMER_CONFIG = {
+export const JEEP_CONFIG = {
 	/**
-	 * Hummer-only nitro flame locations in chassis-local coordinates.
-	 * Edit these values to place each flame on the Hummer's exhaust pipes.
+	 * Jeep-only nitro flame locations in chassis-local coordinates.
+	 * Edit these values to place each flame on the Jeep's exhaust pipes.
 	 */
 	nitroMounts: {
 		left: { x: -0.6, y: 0.65, z: -2.15 },
@@ -67,12 +67,9 @@ export const HUMMER_CONFIG = {
 	colliderYOffset: -0.05,
 	colliderRoundness: 0.22,
 	colliderHeightScale: 0.5,
-	// Keep the chassis collider fully above the tire contact plane.  When its
-	// lower edge reached below the tires, it hit the terrain first and held the
-	// whole Hummer visibly above the ground.
+	// The Jeep's mesh origin is at the bottom, so shift the collider up.
 	colliderLocalYFactor: 0.8,
-	// Mass sits above the contact plane so braking transfers load toward the
-	// front axle (nose dives) and acceleration squats the rear, as in a real car.
+	// Mass sits above the contact plane so braking transfers load toward the front.
 	centerOfMassY: 0.6,
 	angularDamping: 2.2, // heavier, less prone to spinning easily
 

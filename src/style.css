@@ -3069,10 +3069,20 @@ input:checked + .toggle-slider:before {
   .setting-row label {
     font-size: 0.85rem;
   }
-  .setting-row select {
+  .setting-row select,
+  .setting-row input[type="text"],
+  .setting-row input[type="number"] {
     width: 100%;
-    font-size: 0.85rem;
-    padding: 8px 12px !important;
+    font-size: 16px !important; /* Prevents iOS Safari auto-zoom */
+    padding: 12px 15px !important; /* Larger touch target */
+  }
+  .setting-button-row {
+    flex-direction: row !important;
+    gap: 10px !important;
+  }
+  .setting-button-row button {
+    padding: 14px !important;
+    font-size: 0.95rem !important;
   }
 }
 

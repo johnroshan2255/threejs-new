@@ -1,6 +1,6 @@
 export type QualityLevel = "Low" | "Medium" | "High";
 export type GameWorldId = string;
-export type VehicleId = "none" | "kenney_suv" | "hummer";
+export type VehicleId = "none" | "kenney_suv" | "hummer" | "jeep";
 
 type DayPeriod = "morning" | "noon" | "evening" | /* "sunset" | */ "night";
 
@@ -341,6 +341,7 @@ export class GameSettings {
 							<div class="setting-row">
 								<label for="set-vehicle">Vehicle Type</label>
 								<select id="set-vehicle">
+									<option value="jeep">Nissan Patrol</option>
 									<option value="kenney_suv">Kenney SUV</option>
 									<option value="hummer">Hummer</option>
 								</select>
@@ -350,7 +351,7 @@ export class GameSettings {
 							<div id="car-tuning-sliders">
 								<!-- Dynamically populated per-vehicle tuning sliders -->
 							</div>
-							<div class="setting-row" style="margin-top: 12px; display: flex; gap: 8px;">
+							<div class="setting-row setting-button-row" style="margin-top: 12px; display: flex; gap: 8px;">
 								<button id="btn-save-car" style="flex:1; padding:10px; background:linear-gradient(135deg,#27ae60,#2ecc71); color:#fff; border:none; border-radius:6px; cursor:pointer; font-weight:bold; letter-spacing:1px; text-transform:uppercase; transition: opacity 0.2s;">Save & Apply</button>
 								<button id="btn-revert-car" style="flex:1; padding:10px; background:linear-gradient(135deg,#c0392b,#e74c3c); color:#fff; border:none; border-radius:6px; cursor:pointer; font-weight:bold; letter-spacing:1px; text-transform:uppercase; transition: opacity 0.2s;">Revert</button>
 							</div>

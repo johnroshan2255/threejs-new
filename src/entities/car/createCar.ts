@@ -7,8 +7,10 @@ import { getWorldTerrainY } from "../../terrain/islandHeight";
 import { getWorld } from "../../physics/world";
 import { CAR_CONFIG } from "./carConfig";
 import { HUMMER_CONFIG } from "./hummerConfig";
+import { JEEP_CONFIG } from "./jeepConfig";
 import { loadKenneySuvVisual } from "./kenneyCarVisual";
 import { loadHummerVisual } from "./hummerCarVisual";
+import { loadJeepVisual } from "./jeepCarVisual";
 import { computeGrappleMountLocal } from "./vehicleGrapple";
 import { createFpvInterior } from "./createFpvInterior";
 
@@ -34,7 +36,7 @@ export type CarEntity = {
 	config: typeof CAR_CONFIG;
 };
 
-export type VehicleId = "kenney_suv" | "hummer";
+export type VehicleId = "kenney_suv" | "hummer" | "jeep";
 
 export async function createCar(
 	manager?: THREE.LoadingManager,
@@ -42,7 +44,7 @@ export async function createCar(
 ): Promise<CarEntity> {
 	const world = getWorld();
 	
-	const activeConfig = vehicleId === "hummer" ? HUMMER_CONFIG : CAR_CONFIG;
+	const activeConfig = vehicleId === "jeep" ? JEEP_CONFIG : (vehicleId === "hummer" ? HUMMER_CONFIG : CAR_CONFIG);
 	
 	const {
 		driveFrontAxleIndices,
@@ -61,14 +63,16 @@ export async function createCar(
 		nitroMounts,
 	} = activeConfig as any;
 
-	const layout = activeConfig === HUMMER_CONFIG 
-		? await loadHummerVisual(colliderYOffset, manager)
-		: await loadKenneySuvVisual(colliderYOffset, manager);
+	const layout = activeConfig === JEEP_CONFIG
+		? await loadJeepVisual(colliderYOffset, manager)
+		: (activeConfig === HUMMER_CONFIG 
+			? await loadHummerVisual(colliderYOffset, manager)
+			: await loadKenneySuvVisual(colliderYOffset, manager));
 
 	// The user expects the "Elevation" slider to literally lift the car body higher relative to the wheels.
 	// Since physics suspension can sometimes compress down and hide the lift, we guarantee 
 	// the visual lift by physically raising the visual chassis mesh by the excess suspension length.
-	const defaultRestLength = vehicleId === "hummer" ? 0.65 : 0.55;
+	const defaultRestLength = vehicleId === "jeep" ? 0.65 : (vehicleId === "hummer" ? 0.65 : 0.55);
 	const visualLiftOffset = Math.max(0, activeConfig.suspension.restLength - defaultRestLength);
 	
 	// Shift the visual chassis group (which is the first child of the body wrapper) UP by the lift offset.
@@ -78,7 +82,7 @@ export async function createCar(
 	}
 		
 	// Determine how much the user scaled the tire size (wheelWidth) vs the default
-	const defaultWheelWidth = activeConfig === HUMMER_CONFIG ? 0.85 : 0.7;
+	const defaultWheelWidth = activeConfig === JEEP_CONFIG ? 0.85 : (activeConfig === HUMMER_CONFIG ? 0.85 : 0.7);
 	const wheelScaleMultiplier = activeConfig.wheelWidth / defaultWheelWidth;
 	const dynamicWheelRadius = layout.wheelRadius * wheelScaleMultiplier;
 
@@ -210,7 +214,7 @@ export async function createCar(
 
 	const wheels = physicsWheelPositions.map((pos, i) => {
 		let wheel: THREE.Group;
-		if (activeConfig === HUMMER_CONFIG) {
+		if (activeConfig === HUMMER_CONFIG || activeConfig === JEEP_CONFIG) {
 			wheel = (layout as any).visualWheels[i];
 		} else {
 			wheel = (layout as any).wheelTemplate.clone(true);
