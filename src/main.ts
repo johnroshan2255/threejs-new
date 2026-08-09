@@ -609,7 +609,7 @@ export class FluffyGrass {
 		// saturation-preserving curve instead, and needs linear HDR to reach it.
 		this.renderer.toneMapping = THREE.NoToneMapping;
 		this.renderer.setSize(window.innerWidth, window.innerHeight);
-		this.renderer.setPixelRatio(isMobileDevice() ? 1.0 : Math.min(window.devicePixelRatio, 2));
+		this.renderer.setPixelRatio(isMobileDevice() ? 1.25 : Math.min(window.devicePixelRatio, 2));
 		this.scene.frustumCulled = true;
 
 		this.sunMesh = new THREE.Mesh(
