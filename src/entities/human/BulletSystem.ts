@@ -146,7 +146,7 @@ export class BulletSystem {
 		const flashScale = float(0.35).add(float(1.0).sub(flashT).mul(0.5));
 		
 		const aCenterPosFlash = attribute('aCenterPos', 'vec3');
-		flashMat.positionNode = aCenterPosFlash.add(positionLocal.mul(flashScale).mul(0.55));
+		flashMat.positionNode = (aCenterPosFlash as any).add(positionLocal.mul(flashScale).mul(0.55));
 		flashMat.opacityNode = float(1.0).sub(flashT);
 		flashMat.colorNode = Fn(() => {
 			rawLifeFlash.greaterThan(0.06).or(rawLifeFlash.lessThan(0.0)).discard();
@@ -186,7 +186,7 @@ export class BulletSystem {
 		const impactScale = float(0.35).add(impactU.mul(1.1));
 		
 		const aCenterPosImpact = attribute('aCenterPos', 'vec3');
-		impactMat.positionNode = aCenterPosImpact.add(positionLocal.mul(impactScale).mul(0.4));
+		impactMat.positionNode = (aCenterPosImpact as any).add(positionLocal.mul(impactScale).mul(0.4));
 		impactMat.opacityNode = float(1.0).sub(impactU);
 		impactMat.colorNode = Fn(() => {
 			rawLifeImpact.greaterThan(0.18).or(rawLifeImpact.lessThan(0.0)).discard();

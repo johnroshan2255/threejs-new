@@ -95,7 +95,7 @@ export class ExplosionSystem {
 
 			// Instead of instanceMatrix, add the custom aCenterPos
 			const aCenterPos = attribute('aCenterPos', 'vec3');
-			return aCenterPos.add(displaced.mul(finalScale));
+			return (aCenterPos as any).add(displaced.mul(finalScale));
 		})();
 
 		material.colorNode = Fn(() => {
