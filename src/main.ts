@@ -1977,14 +1977,14 @@ export class FluffyGrass {
 			const grassScene = await this.loadGltf("/grassLODs.glb");
 			let foundGrass = false;
 			grassScene.traverse((child) => {
-				if (child instanceof THREE.Mesh && child.name.includes("LOD00")) {
+				if (child instanceof THREE.Mesh && child.name.includes("LOD02")) {
 					child.geometry.scale(10, 10, 10);
 					this.grassGeometry = child.geometry;
 					foundGrass = true;
 				}
 			});
 			if (!foundGrass) {
-				throw new Error("grassLODs.glb: GrassLOD00 mesh not found");
+				throw new Error("grassLODs.glb: GrassLOD02 mesh not found");
 			}
 		}
 

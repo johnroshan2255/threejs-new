@@ -41,7 +41,7 @@ export async function loadHummerVisual(
 	const size = new THREE.Vector3();
 	_box.getSize(size);
 	
-	const targetLength = 4.8; 
+	const targetLength = 6.9696; // Increased by another 20% from 5.808
 	const scale = targetLength / size.z;
 	model.scale.setScalar(scale);
 	model.updateMatrixWorld(true);
