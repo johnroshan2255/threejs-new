@@ -6,6 +6,7 @@ THREE.Mesh.prototype.raycast = acceleratedRaycast;
 
 import Stats from "stats-gl";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { DRACOLoader } from "three/examples/jsm/loaders/DRACOLoader.js";
 import RAPIER from "@dimforge/rapier3d-compat";
 import type { Socket } from "socket.io-client";
 
@@ -30,11 +31,12 @@ import { CarInput } from "./entities/car/carInput";
 import { resetCarUpright, respawnCarAtStart, isCarOutsideWorld } from "./entities/car/resetCar";
 import { syncCar } from "./entities/car/syncCar";
 import {
-	createCarHeadlights,
+	createCarLightPair,
 	assignCarLightingLayer,
-	type CarHeadlights,
+	type CarLightPair,
 } from "./entities/car/carHeadlights";
 import { CAR_CONFIG } from "./entities/car/carConfig";
+import { HUMMER_CONFIG } from "./entities/car/hummerConfig";
 import { EngineSound } from "./entities/car/EngineSound";
 import { VehicleGrapple } from "./entities/car/vehicleGrapple";
 import { updateChaseCamera, updateHumanCamera } from "./three/chaseCamera";
@@ -114,6 +116,10 @@ import {
 	uniform,
 	uv,
 	vec4,
+	vec2,
+	dot,
+	fract,
+	sin,
 } from "three/tsl";
 import { bloom } from "three/addons/tsl/display/BloomNode.js";
 import { godrays } from "three/addons/tsl/display/GodraysNode.js";
@@ -143,6 +149,7 @@ import { GameNavigation } from "./ui/GameNavigation";
 import { LoadingScreenController } from "./ui/LoadingScreenController";
 import {
 	GameSettings,
+	type CarTuningDef,
 	type GameWorldId,
 	type QualityLevel,
 } from "./ui/GameSettings";
@@ -317,6 +324,7 @@ export class FluffyGrass {
 	private shadowQuality: QualityLevel = "High";
 	private resolutionQuality: QualityLevel = "High";
 	private waterQuality: QualityLevel = "High";
+	private vehicleId: any = "none";
 	private waterUpdateInterval = 1;
 	private waterFrameCounter = 0;
 	private waterDeltaAccumulator = 0;
@@ -353,7 +361,7 @@ export class FluffyGrass {
 
 	private audioListener: THREE.AudioListener | null = null;
 
-	private activePlayer: "car" | "human" = "car";
+	private activePlayer: "car" | "human" = "human";
 	private carFpvMode = false;
 	private human: HumanEntity | null = null;
 	private humanInput: HumanInput | null = null;
@@ -373,9 +381,9 @@ export class FluffyGrass {
 	private readonly characterRoots: THREE.Object3D[] = [];
 
 	private readonly gunMuzzleLocal = new THREE.Vector3(0.02, 0.05, 0.42);
-	private readonly gunOffsetPos = new THREE.Vector3(0.05, 0.02, 0.08);
+	private readonly gunOffsetPos = new THREE.Vector3(0.00, 0.0, 0.00);
 	private readonly gunOffsetQuat = new THREE.Quaternion().setFromEuler(
-		new THREE.Euler(-Math.PI * 0.5, Math.PI, 0.2)
+		new THREE.Euler(-Math.PI * 0.5, Math.PI, 1.2)
 	);
 	private readonly _shotOrigin = new THREE.Vector3();
 	private readonly _shotDir = new THREE.Vector3();
@@ -428,7 +436,7 @@ export class FluffyGrass {
 	private nitroSystem: NitroSystem | null = null;
 	private mobileControls: MobileControls | null = null;
 	private orientationGate: OrientationGate | null = null;
-	private carHeadlights: CarHeadlights | null = null;
+	private carLights: CarLightPair[] = [];
 	private dayNightGui = {
 		period: "morning" as DayPeriod,
 		auto: true,
@@ -545,6 +553,9 @@ export class FluffyGrass {
 		this.textureLoader = new THREE.TextureLoader(this.loadingManager);
 
 		this.gltfLoader = new GLTFLoader(this.loadingManager);
+		const dracoLoader = new DRACOLoader();
+		dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.7/');
+		this.gltfLoader.setDRACOLoader(dracoLoader);
 
 		this.canvas = _canvas;
 		this.stats = new Stats({
@@ -600,7 +611,7 @@ export class FluffyGrass {
 		this.renderer.setPixelRatio(isMobileDevice() ? 1.0 : Math.min(window.devicePixelRatio, 2));
 		this.scene.frustumCulled = true;
 
-				this.sunMesh = new THREE.Mesh(
+		this.sunMesh = new THREE.Mesh(
 			new THREE.SphereGeometry(30, 32, 32),
 			new THREE.MeshBasicMaterial({ color: 0xffffee, fog: false })
 		);
@@ -613,7 +624,7 @@ export class FluffyGrass {
 			shininess: 0,
 			flatShading: true,
 			vertexColors: false,
-	
+
 			side: THREE.DoubleSide,
 		});
 		// Snow patching lives in the terrain builders (createLargeTerrain /
@@ -2161,9 +2172,103 @@ export class FluffyGrass {
 		});
 		this.worldGroup.add(this.fireflies.points);
 	}
+	private isSwitchingCar = false;
+	private async switchCar(vehicleId: any) {
+		if (this.isSwitchingCar) return;
+		this.isSwitchingCar = true;
+
+		try {
+			this.worldLoading.showTask("Vehicle", "Loading vehicle model...");
+			// Yield to the event loop so the UI updates before the main thread blocks
+			await new Promise(r => setTimeout(r, 50));
+
+			let oldTrans: any = null;
+			let oldRot: any = null;
+			let oldVel: any = null;
+
+			if (this.car) {
+				const t = this.car.body.translation();
+				const r = this.car.body.rotation();
+				const v = this.car.body.linvel();
+				oldTrans = { x: t.x, y: t.y, z: t.z };
+				oldRot = { x: r.x, y: r.y, z: r.z, w: r.w };
+				oldVel = { x: v.x, y: v.y, z: v.z };
+
+				this.scene.remove(this.car.mesh);
+				getWorld().removeRigidBody(this.car.body);
+				getWorld().removeVehicleController(this.car.vehicle);
+
+				this.carLights.forEach(l => l.dispose());
+				this.carLights = [];
+
+				this.engineSound?.dispose();
+				this.hornSound?.stop();
+				this.nitroSound?.stop();
+
+				this.carInput?.dispose();
+				this.carInput = null as any;
+
+				this.chaseCameraInput?.dispose();
+				this.chaseCameraInput = null as any;
+
+				this.mobileControls?.dispose();
+				this.mobileControls = null as any;
+
+				this.vehicleGrapple?.dispose();
+				this.vehicleGrapple = null as any;
+
+				if (this.carController) {
+					this.carController = null;
+				}
+
+				this.car = null;
+			} else if (this.human && this.human.mesh.visible) {
+				oldTrans = this.human.mesh.position.clone();
+				oldRot = this.human.mesh.quaternion.clone();
+			}
+
+			this.vehicleId = vehicleId;
+			await this.setupCar();
+
+			if (oldTrans) {
+				if (this.car) {
+					// Spawn exactly 5 meters above the terrain to prevent falling through
+					oldTrans.y = getWorldTerrainY(oldTrans.x, oldTrans.z) + 5.0;
+					this.car.body.setTranslation(oldTrans, true);
+					if (oldRot) this.car.body.setRotation(oldRot, true);
+					if (oldVel) this.car.body.setLinvel(oldVel, true);
+
+					// Hide the human properly since we are taking control of a car
+					this.activePlayer = "car";
+					if (this.carInput) this.carInput.isEnabled = true;
+					if (this.humanInput) this.humanInput.isEnabled = false;
+					this.mobileControls?.setMode("car");
+					if (this.human) {
+						this.human.body.setTranslation(new THREE.Vector3(0, -100, 0), true);
+						this.human.mesh.visible = false;
+					}
+				} else if (vehicleId === "none" && this.human) {
+					// If we switched to no car, teleport human to the old spot so they don't get lost
+					oldTrans.y = getWorldTerrainY(oldTrans.x, oldTrans.z) + 1.4;
+					this.human.body.setTranslation(oldTrans, true);
+				}
+			}
+
+			this.worldLoading.hide();
+		} finally {
+			this.isSwitchingCar = false;
+		}
+	}
 
 	private async setupCar() {
-		const car = await createCar(this.loadingManager);
+		if (this.vehicleId === "none") {
+			this.activePlayer = "human";
+			if (this.humanInput) this.humanInput.isEnabled = true;
+			this.mobileControls?.setMode(this.activePlayer);
+			return;
+		}
+
+		const car = await createCar(this.loadingManager, this.vehicleId as any);
 		this.car = car;
 
 		this.scene.add(car.mesh);
@@ -2174,15 +2279,30 @@ export class FluffyGrass {
 		// Car on its own light layer so headlights only hit grass/terrain
 		assignCarLightingLayer(car.mesh);
 
-		this.carHeadlights = createCarHeadlights(car.mesh, CAR_CONFIG.scale);
-		car.mesh.add(this.carHeadlights.group);
-		// Keep beams on world layer even though the group is parented under the car
-		this.carHeadlights.group.traverse((obj) => {
-			if (obj instanceof THREE.Light) {
-				obj.layers.set(0);
+		this.carLights.forEach(l => l.dispose());
+		this.carLights = [];
+
+		const lightConfigs = (car.config as any).lights || [];
+		if (lightConfigs.length === 0) {
+			const pair = createCarLightPair(car.mesh, {});
+			this.carLights.push(pair);
+		} else {
+			for (const lConf of lightConfigs) {
+				const pair = createCarLightPair(car.mesh, lConf);
+				this.carLights.push(pair);
 			}
-		});
-		this.carHeadlights.setIntensity(0);
+		}
+
+		for (const pair of this.carLights) {
+			car.mesh.add(pair.group);
+			// Keep beams on world layer even though the group is parented under the car
+			pair.group.traverse((obj) => {
+				if (obj instanceof THREE.Light) {
+					obj.layers.set(0);
+				}
+			});
+			pair.setIntensity(0);
+		}
 
 		this.engineSound = new EngineSound();
 		this.hornSound = new HornSound();
@@ -2193,7 +2313,8 @@ export class FluffyGrass {
 			car.vehicle,
 			car.driveFrontAxleIndices,
 			car.driveRearAxleIndices,
-			car.steeringWheelIndices
+			car.steeringWheelIndices,
+			car.config
 		);
 
 		this.carInput = new CarInput(this.carController, () => {
@@ -2226,6 +2347,7 @@ export class FluffyGrass {
 				!isKeyboardCapturedByUi() &&
 				!isTextEntryFocused() &&
 				!isMobileDevice(),
+			isScopeMode: () => Boolean(this.humanInput?.isScopeMode()),
 		});
 		syncCar(car);
 	}
@@ -2253,6 +2375,13 @@ export class FluffyGrass {
 		this.humanInput = new HumanInput(this.human);
 		if (this.mobileControls) {
 			this.humanInput.setMobileControls(this.mobileControls);
+		}
+
+		// If the game started without a car, teleport the human above ground
+		if (this.activePlayer === "human") {
+			this.human.mesh.visible = true;
+			const spawnY = getWorldTerrainY(0, 0) + 1.4;
+			this.human.body.setTranslation(new THREE.Vector3(0, spawnY, 0), true);
 		}
 
 		// Free gun — kept in scene (world space), snapped to the right hand each
@@ -2284,7 +2413,7 @@ export class FluffyGrass {
 			rawBox.getSize(rawSize);
 			const longest = Math.max(rawSize.x, rawSize.y, rawSize.z, 1e-3);
 			// World-space length ~0.5m (not affected by humanScale)
-			gunVisual.scale.setScalar(0.5 / longest);
+			gunVisual.scale.setScalar(1.9 / longest);
 			rawBox.setFromObject(gunVisual);
 			const center = new THREE.Vector3();
 			rawBox.getCenter(center);
@@ -2308,7 +2437,7 @@ export class FluffyGrass {
 			if (!this.gunMesh || !this.humanInput) return;
 			const hasGun = this.humanInput.shouldShowGun();
 			this.gunMesh.visible = hasGun;
-			
+
 			if (this.mobileControls) {
 				this.mobileControls.setButtonText("mouse-2", hasGun ? "AIM" : "KICK");
 			}
@@ -3453,7 +3582,7 @@ export class FluffyGrass {
 			// Composite grade — exposure, tone curve, split-tone, bloom. The
 			// editor's top-down view gets a neutral pass-through instead: a
 			// stylised grade there fights readability, same reason fog is off.
-			
+
 
 			// Keep the ±90 m shadow frustum centred on whoever we're following,
 			// otherwise it stays stranded at the world origin.
@@ -3495,7 +3624,14 @@ export class FluffyGrass {
 			if (hour >= 19.5 || hour < 5.5) {
 				headAmount = 1;
 			}
-			this.carHeadlights?.setIntensity(headAmount);
+			const isBraking = this.carController?.isBraking() ?? false;
+			for (const pair of this.carLights) {
+				if (pair.config.isTaillight) {
+					pair.setIntensity(isBraking ? 1 : 0);
+				} else {
+					pair.setIntensity(headAmount);
+				}
+			}
 			this.frameFireflyIntensity = fireflyIntensity;
 			this.frameHeadAmount = headAmount;
 
@@ -3511,14 +3647,14 @@ export class FluffyGrass {
 			if (playAllowed) {
 				if (this.activePlayer === "car") {
 					this.carInput.applyInput(dt);
-					
+
 					if (this.carInput.consumeFpvToggle()) {
 						this.carFpvMode = !this.carFpvMode;
 						if (this.car.fpvInterior) {
 							this.car.fpvInterior.visible = this.carFpvMode;
 						}
 					}
-					
+
 					if (this.vehicleGrapple) {
 						const justPressed = this.carInput.consumeGrapplePress();
 						const detachPressed = this.carInput.consumeGrappleDetach();
@@ -3626,7 +3762,7 @@ export class FluffyGrass {
 						if (this.carInput && this.activePlayer === "car") {
 							this.carInput.isEnabled = true;
 						}
-						
+
 						const spawnY = getWorldTerrainY(0, 0) + 1.4;
 						this.car.body.setTranslation({ x: 0, y: spawnY, z: 0 }, true);
 						this.car.body.setRotation({ x: 0, y: 0, z: 0, w: 1 }, true);
@@ -3719,13 +3855,21 @@ export class FluffyGrass {
 					updateChaseCamera(this.camera, this.car, this.chaseCameraInput, dt, this.carFpvMode);
 				} else {
 					const aimMode = Boolean(this.humanInput?.isAimingGun());
+					const scopeMode = Boolean(this.humanInput?.isScopeMode());
 					updateHumanCamera(
 						this.camera,
 						this.human,
 						this.chaseCameraInput,
 						dt,
-						{ aimMode }
+						{ aimMode, scopeMode }
 					);
+
+					// Hide the local human model while scoping for a clear first-person view
+					this.human.mesh.visible = !scopeMode;
+					if (this.gunMesh) {
+						this.gunMesh.visible = scopeMode ? false : this.humanInput!.shouldShowGun();
+					}
+
 					this.syncGunToHand();
 				}
 			}
@@ -3735,7 +3879,7 @@ export class FluffyGrass {
 			// Update car entry/exit UI prompt
 			if (this.interactionPrompt) {
 				const isMobile = !!this.mobileControls;
-				
+
 				if (this.activePlayer === "car") {
 					// Hide while in car
 					this.interactionPrompt.style.display = "none";
@@ -3751,7 +3895,7 @@ export class FluffyGrass {
 						this.mobileControls!.setButtonVisible("KeyT", false);
 						this.mobileControls!.setButtonVisible("KeyH", false);
 					}
-					
+
 					const distToCar = this.human.mesh.position.distanceTo(this.car.mesh.position);
 
 					let nearestBombDist = Infinity;
@@ -4011,10 +4155,10 @@ export class FluffyGrass {
 				});
 			const vehicleTargets = [];
 			if (this.car && this.car.mesh) {
-				vehicleTargets.push({ 
-					id: "car-local", 
-					position: this.car.mesh.position.clone().add(new THREE.Vector3(0, 1.0, 0)), 
-					radius: 2.5 
+				vehicleTargets.push({
+					id: "car-local",
+					position: this.car.mesh.position.clone().add(new THREE.Vector3(0, 1.0, 0)),
+					radius: 2.5
 				});
 			}
 			this.bulletSystem.update(dt, targets, bombTargets, vehicleTargets);
@@ -4134,8 +4278,8 @@ export class FluffyGrass {
 				const triStr = tris >= 1_000_000
 					? `${(tris / 1_000_000).toFixed(2)}M`
 					: tris >= 1_000
-					? `${(tris / 1_000).toFixed(1)}K`
-					: `${tris}`;
+						? `${(tris / 1_000).toFixed(1)}K`
+						: `${tris}`;
 				gpuPanel.innerHTML = `GPU LOAD<br/>Draws: ${draws}<br/>Tris: ${triStr}`;
 			}
 		}
@@ -4163,6 +4307,7 @@ export class FluffyGrass {
 				if (parsed.shadowQuality) this.shadowQuality = parsed.shadowQuality;
 				if (parsed.resolutionQuality) this.resolutionQuality = parsed.resolutionQuality;
 				if (parsed.waterQuality) this.waterQuality = parsed.waterQuality;
+				if (parsed.vehicleId) this.vehicleId = parsed.vehicleId;
 				if (parsed.postFxEnabled !== undefined) this.postFxEnabled = parsed.postFxEnabled;
 				if (parsed.showStatsEnabled !== undefined) this.showStatsEnabled = parsed.showStatsEnabled;
 				if (parsed.period) this.dayNightGui.period = parsed.period;
@@ -4190,6 +4335,7 @@ export class FluffyGrass {
 				shadowQuality: this.shadowQuality,
 				resolutionQuality: this.resolutionQuality,
 				waterQuality: this.waterQuality,
+				vehicleId: this.vehicleId,
 				postFxEnabled: this.postFxEnabled,
 				showStatsEnabled: this.showStatsEnabled,
 				period: this.dayNightGui.period,
@@ -4227,6 +4373,7 @@ export class FluffyGrass {
 			grassDensity: this.grassDensity,
 			grassCullDistance: this.grassCullDistance,
 			carPower: CAR_CONFIG.drive.engineForce,
+			vehicle: this.vehicleId,
 			world: this.currentWorld,
 			worldOptions: this.getWorldSelectOptions(),
 			onShadowQualityChange: (quality) => { this.applyShadowQuality(quality); this.saveSettings(); },
@@ -4256,11 +4403,81 @@ export class FluffyGrass {
 			},
 			onGrassDensityChange: (percent) => { this.setGrassDensity(percent); this.saveSettings(); },
 			onGrassCullDistanceChange: (meters) => { this.setGrassCullDistance(meters); this.saveSettings(); },
-			onCarPowerChange: (power) => {
-				CAR_CONFIG.drive.engineForce = power;
+			onCarPowerChange: (_power) => {
+				// Legacy — now handled by per-vehicle tuning
+			},
+			onVehicleChange: async (vehicle) => {
+				this.vehicleId = vehicle;
 				this.saveSettings();
+				await this.switchCar(vehicle);
+			},
+			onGodRayIntensityChange: (intensity) => {
+				this.godRayWeight.value = intensity;
+			},
+			onSunGlowMultiplierChange: (multiplier) => {
+				if (this.dayNight) {
+					this.dayNight.setSunGlowMultiplier(multiplier);
+				}
 			},
 			onWorldChange: (world) => this.switchWorld(world),
+
+			// ── Per-vehicle tuning ──
+			getCarTuningDefs: (vehicleId): CarTuningDef[] => {
+				if (vehicleId === "none") return [];
+				const cfg = this.getActiveConfig(vehicleId);
+				const def = this.getDefaultConfig(vehicleId);
+				return [
+					{ key: "suspension.restLength", label: "Elevation (Suspension)", min: 0.1, max: 1.5, step: 0.05, defaultValue: def.suspension.restLength, currentValue: cfg.suspension.restLength },
+					{ key: "suspension.stiffness", label: "Suspension Stiffness", min: 10, max: 200, step: 1, defaultValue: def.suspension.stiffness, currentValue: cfg.suspension.stiffness },
+					{ key: "wheelWidth", label: "Tire Size", min: 0.3, max: 2.0, step: 0.05, defaultValue: def.wheelWidth, currentValue: cfg.wheelWidth },
+					{ key: "drive.engineForce", label: "Engine Power", min: 100, max: 5000, step: 50, defaultValue: def.drive.engineForce, currentValue: cfg.drive.engineForce },
+					{ key: "drive.maxSpeed", label: "Max Speed", min: 5, max: 50, step: 1, defaultValue: def.drive.maxSpeed, currentValue: cfg.drive.maxSpeed },
+					{ key: "mass", label: "Mass", min: 50, max: 500, step: 10, defaultValue: def.mass, currentValue: cfg.mass },
+					{ key: "drive.brakeForce", label: "Brake Force", min: 5, max: 100, step: 1, defaultValue: def.drive.brakeForce, currentValue: cfg.drive.brakeForce },
+				];
+			},
+			onCarTuningChange: (vehicleId, key, value) => {
+				const cfg = this.getActiveConfig(vehicleId);
+				const def = this.getDefaultConfig(vehicleId);
+				this.setNestedValue(cfg, key, value);
+
+				// Automatically scale maxTravel and stiffness so the heavy car doesn't crush the long springs back to the floor
+				if (key === "suspension.restLength") {
+					const ratio = value / def.suspension.restLength;
+					cfg.suspension.maxTravel = def.suspension.maxTravel * ratio;
+					// Quadruple the stiffness scale to fight the massive gravity leverage
+					cfg.suspension.stiffness = def.suspension.stiffness * ratio * ratio;
+				}
+				// We no longer apply changes live immediately here because modifying 
+				// physical mass or colliders while the car is spawned causes severe 
+				// physics instability (world vibrating). Changes are saved on "Save & Apply".
+			},
+			onCarTuningSave: async (vehicleId) => {
+				this.saveSettings();
+				if (this.vehicleId === vehicleId) {
+					// Cleanly respawn the car so all physics (colliders, mass, suspension)
+					// are built correctly with the new config values.
+					await this.switchCar(vehicleId);
+				}
+			},
+			onCarTuningRevert: async (vehicleId) => {
+				const def = this.getDefaultConfig(vehicleId);
+				const cfg = this.getActiveConfig(vehicleId);
+				// Deep-copy scalar fields we expose for tuning
+				cfg.suspension.restLength = def.suspension.restLength;
+				cfg.suspension.maxTravel = def.suspension.maxTravel;
+				cfg.suspension.stiffness = def.suspension.stiffness;
+				cfg.wheelWidth = def.wheelWidth;
+				cfg.drive.engineForce = def.drive.engineForce;
+				cfg.drive.maxSpeed = def.drive.maxSpeed;
+				cfg.mass = def.mass;
+				cfg.drive.brakeForce = def.drive.brakeForce;
+
+				this.saveSettings();
+				if (this.vehicleId === vehicleId) {
+					await this.switchCar(vehicleId);
+				}
+			},
 		});
 		this.applyShadowQuality(this.shadowQuality);
 		this.applyResolutionQuality(this.resolutionQuality);
@@ -4268,7 +4485,33 @@ export class FluffyGrass {
 		this.setPostFxEnabled(this.postFxEnabled);
 	}
 
-		private applyShadowQuality(quality: QualityLevel) {
+	/** Returns the live, mutable config object for the given vehicle. */
+	private getActiveConfig(vehicleId: string): any {
+		return vehicleId === "hummer" ? HUMMER_CONFIG : CAR_CONFIG;
+	}
+
+	/** Returns a frozen snapshot of the original default values for a vehicle.
+	 *  We store these once so "revert" always goes back to the code defaults.  */
+	private static readonly DEFAULT_KENNEY = JSON.parse(JSON.stringify(CAR_CONFIG));
+	private static readonly DEFAULT_HUMMER = JSON.parse(JSON.stringify(HUMMER_CONFIG));
+	private getDefaultConfig(vehicleId: string): any {
+		return vehicleId === "hummer"
+			? (this.constructor as any).DEFAULT_HUMMER
+			: (this.constructor as any).DEFAULT_KENNEY;
+	}
+
+	/** Set a value on a nested object using a dot-path key like "drive.engineForce". */
+	private setNestedValue(obj: any, path: string, value: number): void {
+		const parts = path.split(".");
+		let cur = obj;
+		for (let i = 0; i < parts.length - 1; i++) {
+			cur = cur[parts[i]];
+			if (!cur) return;
+		}
+		cur[parts[parts.length - 1]] = value;
+	}
+
+	private applyShadowQuality(quality: QualityLevel) {
 		this.shadowQuality = quality;
 		const shadowsEnabled = quality !== "Low";
 		this.renderer.shadowMap.enabled = shadowsEnabled;
@@ -4423,11 +4666,15 @@ export class FluffyGrass {
 			.mul(0.5)
 			.add(0.5);
 
-		// 3. Add bloom to the tonemapped output, then apply vignette.
-		const graded: any = tonemappedRays.add(bloomNode).mul(vignetteFactor);
+		// 3. Apply vignette to the tonemapped output (bloom disabled).
+		let graded: any = tonemappedRays.mul(vignetteFactor);
+
+		// 4. Dithering to prevent color banding in dark gradients
+		const noise = fract(sin(dot(uv(), vec2(12.9898, 78.233))).mul(43758.5453));
+		graded = graded.add(noise.sub(0.5).mul(1.5 / 255.0));
 
 		this.postProcessing = new PostProcessing(this.renderer);
-		// Since we already tonemapped, outputNode is just the graded result!
+		// Since we already tonemapped and graded, outputNode is just the graded result!
 		this.postProcessing.outputNode = graded;
 	}
 
@@ -4462,8 +4709,8 @@ export class FluffyGrass {
 		}
 	}
 
-	
-	
+
+
 	private syncVolumetricFogQuality() {
 		// WebGPU resolves alpha-to-coverage against the *target's* sample count.
 		// With `antialias: true` the canvas and the PostProcessing pass target both
@@ -4473,9 +4720,9 @@ export class FluffyGrass {
 		setFoliageAlphaToCoverage(multisampled, this.scene);
 	}
 
-	
+
 	private syncVolumetricFogFrame(timeSec: number) {
-		
+
 		if (!this.dayNight) return;
 
 		// Always center the fog ring on the player.
@@ -4508,7 +4755,7 @@ export class FluffyGrass {
 		const key = this.dayNight.lights.keyLight;
 		const sunDir = this.dayNight.getSunDirection();
 
-		
+
 
 		// Almost no global FogExp2 — volume is local to the player ring.
 		if (this.scene.fog instanceof THREE.FogExp2) {
@@ -5542,7 +5789,7 @@ export class FluffyGrass {
 			this.worldLoading.setProgress(65, "Compiling world graphics...");
 			await this.renderer.compileAsync(this.scene, this.camera);
 			await this.nextFrame();
-			
+
 			const tCompile = performance.now();
 			if (this.editMode) {
 				import("./ui/debugOverlay").then(({ debugLine }) => {
@@ -5588,7 +5835,7 @@ export class FluffyGrass {
 				// A failed replay must not roll back an otherwise loaded world.
 				console.warn("[world] Failed to restore saved edits", error);
 			}
-			
+
 			const tEdits = performance.now();
 			if (this.editMode) {
 				import("./ui/debugOverlay").then(({ debugLine }) => {
@@ -5605,7 +5852,7 @@ export class FluffyGrass {
 			this.worldLoading.setProgress(100, "Ready");
 			await this.nextFrame();
 			this.worldLoading.hide();
-			
+
 			const tFinal = performance.now();
 			if (this.editMode) {
 				import("./ui/debugOverlay").then(({ debugLine }) => {
@@ -5820,7 +6067,7 @@ export class FluffyGrass {
 			this.scene.background.setHex(0x3d3d3d);
 		}
 		if (this.volumetricFog) this.volumetricFog.group.visible = false;
-		
+
 	}
 
 	private applyEditMapAtmosphere(enabled: boolean) {
@@ -6214,7 +6461,7 @@ export class FluffyGrass {
 		const pr = this.renderer.getPixelRatio();
 
 		// A resize can move the target across the MSAA budget in either direction.
-		
+
 	}
 }
 

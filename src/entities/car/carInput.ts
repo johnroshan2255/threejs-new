@@ -41,6 +41,13 @@ export class CarInput {
 		window.addEventListener("blur", this.clearKeys);
 	}
 
+	public dispose() {
+		window.removeEventListener("keydown", this.onKeyDown);
+		window.removeEventListener("keyup", this.onKeyUp);
+		window.removeEventListener("blur", this.clearKeys);
+		this.horn.stop();
+	}
+
 	public get isHonking() {
 		return this.horn.isPlaying;
 	}

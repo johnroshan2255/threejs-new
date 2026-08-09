@@ -8,37 +8,34 @@ export const WORLD_LAYER = 0;
 /** Kenney colormap UV of the yellow circular headlamps (not the white bumper dots). */
 const HEADLIGHT_UV = { u: 0.21875, vMin: 0.02, vMax: 0.28, uTol: 0.035 };
 
-export type HeadlightConfig = {
-	/** Fine-tune from auto-detected lamp positions. */
-	x: number;
-	y: number;
-	z: number;
-	aimDistance: number;
-	aimY: number;
-	/** Tiny nudge ahead of the lens so the cone clears the bumper mesh. */
-	forwardBias: number;
+export type CarLightConfig = {
+	color: number | string;
+	lensColor: string;
+	markerColor: string;
+	lensSize: number;
 	spotIntensity: number;
-	showMarkers: boolean;
+	distance: number;
+	angle: number;
+	forwardBias: number;
+	isTaillight?: boolean;
+	mounts?: {
+		left: { x: number; y: number; z: number };
+		right: { x: number; y: number; z: number };
+	};
+	showMarkers?: boolean;
+	hideLens?: boolean;
 };
 
-export const DEFAULT_HEADLIGHT_CONFIG: HeadlightConfig = {
-	// Approx after Kenney scale 1.6 — replaced at runtime by yellow-lamp detection
-	x: 0.66,
-	y: 1.04,
-	z: 2.0,
-	aimDistance: 14,
-	aimY: -0.5,
-	forwardBias: 0.05,
-	spotIntensity: 16,
+export const DEFAULT_HEADLIGHT_CONFIG: Partial<CarLightConfig> = {
 	showMarkers: false,
 };
 
-export type CarHeadlights = {
+export type CarLightPair = {
 	group: THREE.Group;
-	config: HeadlightConfig;
+	config: CarLightConfig;
 	setIntensity: (amount: number) => void;
-	applyConfig: (partial?: Partial<HeadlightConfig>) => void;
-	getConfig: () => HeadlightConfig;
+	applyConfig: (partial?: Partial<CarLightConfig>) => void;
+	getConfig: () => CarLightConfig;
 	dispose: () => void;
 };
 
@@ -105,29 +102,36 @@ export function findKenneyHeadlightLocals(
  * Spot beams from the Kenney yellow headlamps onto grass only (WORLD_LAYER).
  * Glowing lenses sit on the yellow circles so light clearly starts there.
  */
-export function createCarHeadlights(
+export function createCarLightPair(
 	carMesh: THREE.Object3D,
-	_scale = 1,
-	initial?: Partial<HeadlightConfig>
-): CarHeadlights {
+	initial?: Partial<CarLightConfig>
+): CarLightPair {
 	const group = new THREE.Group();
-	group.name = "car-headlights";
+	group.name = initial?.isTaillight ? "car-taillights" : "car-headlights";
 
-	const detected = findKenneyHeadlightLocals(carMesh);
-	const fromModel: Partial<HeadlightConfig> = detected
+	const detected = !initial?.mounts ? findKenneyHeadlightLocals(carMesh) : null;
+	const mounts = initial?.mounts || (detected 
 		? {
-				x: Math.abs(detected.right.x),
-				y: (detected.left.y + detected.right.y) * 0.5,
-				z: (detected.left.z + detected.right.z) * 0.5,
-			}
-		: {};
+			left: { x: -Math.abs(detected.left.x), y: detected.left.y, z: detected.left.z },
+			right: { x: Math.abs(detected.right.x), y: detected.right.y, z: detected.right.z }
+		}
+		: {
+			left: { x: -0.66, y: 1.04, z: 2.0 },
+			right: { x: 0.66, y: 1.04, z: 2.0 }
+		});
 
-	const config: HeadlightConfig = {
+	const config: CarLightConfig = {
+		color: 0xffe0a0,
+		lensColor: "#ffc61c",
+		markerColor: "#ffdd44",
+		lensSize: 0.17,
+		spotIntensity: 16,
+		distance: 24,
+		angle: Math.PI / 3.2,
+		forwardBias: 0.05,
+		mounts,
 		...DEFAULT_HEADLIGHT_CONFIG,
-		...fromModel,
 		...initial,
-		// Always prefer real yellow-lamp seats when detection succeeds
-		...fromModel,
 	};
 
 	const spots: THREE.SpotLight[] = [];
@@ -135,22 +139,22 @@ export function createCarHeadlights(
 	const markers: THREE.Mesh[] = [];
 
 	const lensMat = new THREE.MeshBasicMaterial({
-		color: "#ffc61c",
+		color: config.lensColor,
 		transparent: true,
 		opacity: 0,
 		depthWrite: false,
 	});
 	const markerMat = new THREE.MeshBasicMaterial({
-		color: "#ffdd44",
+		color: config.markerColor,
 		depthTest: false,
 	});
 
 	for (let i = 0; i < 2; i++) {
 		const spot = new THREE.SpotLight(
-			0xffe0a0,
+			config.color,
 			0,
-			24,
-			Math.PI / 3.2,
+			config.distance,
+			config.angle,
 			0.8,
 			1.7
 		);
@@ -158,9 +162,9 @@ export function createCarHeadlights(
 		spot.layers.set(WORLD_LAYER);
 		spot.target.layers.set(WORLD_LAYER);
 
-		// Soft glowing disc over the yellow headlamp
+		// Soft glowing disc over the lamp
 		const lens = new THREE.Mesh(
-			new THREE.CircleGeometry(0.17, 24),
+			new THREE.CircleGeometry(config.lensSize, 24),
 			lensMat.clone()
 		);
 		lens.renderOrder = 8;
@@ -188,26 +192,28 @@ export function createCarHeadlights(
 
 	function layout() {
 		spots.forEach((spot, i) => {
-			const side = i === 0 ? -1 : 1;
-			const x = side * config.x;
-			const y = config.y;
-			const z = config.z;
+			const mount = i === 0 ? config.mounts!.left : config.mounts!.right;
+			const x = mount.x;
+			const y = mount.y;
+			const z = mount.z;
 
-			// Lens sits on the yellow headlamp paint
-			lenses[i].position.set(x, y, z + 0.02);
-			lenses[i].lookAt(x, y, z + 1);
+			const forwardDir = config.isTaillight ? -1 : 1;
+
+			// Lens sits slightly proud
+			lenses[i].position.set(x, y, z + (0.02 * forwardDir));
+			lenses[i].lookAt(x, y, z + (1 * forwardDir));
 
 			const beamZ = z + config.forwardBias;
 			spot.position.set(x, y, beamZ);
 			spot.target.position.set(
 				x * 0.1,
-				y + config.aimY,
-				beamZ + config.aimDistance
+				y - 0.5, // aimY roughly -0.5
+				beamZ + (14 * forwardDir)
 			);
 			spot.target.updateMatrixWorld(true);
 
 			markers[i].position.set(x, y, z);
-			markers[i].visible = config.showMarkers;
+			markers[i].visible = !!config.showMarkers;
 		});
 	}
 
@@ -219,7 +225,7 @@ export function createCarHeadlights(
 		for (const lens of lenses) {
 			const mat = lens.material as THREE.MeshBasicMaterial;
 			mat.opacity = a * 0.95;
-			lens.visible = a > 0.02;
+			lens.visible = config.hideLens ? false : (a > 0.02);
 		}
 		// The group deliberately stays visible even at zero intensity.
 		//
@@ -235,7 +241,7 @@ export function createCarHeadlights(
 		// should not be.
 		group.visible = true;
 		for (const marker of markers) {
-			marker.visible = config.showMarkers;
+			marker.visible = !!config.showMarkers;
 		}
 	}
 
@@ -260,15 +266,23 @@ export function createCarHeadlights(
 		},
 		applyConfig(partial) {
 			Object.assign(config, partial);
+			if (partial?.color) {
+				spots.forEach((s) => s.color.set(partial.color!));
+			}
+			if (partial?.lensColor) {
+				lenses.forEach((l) => (l.material as THREE.MeshBasicMaterial).color.set(partial.lensColor!));
+			}
+			if (partial?.markerColor) {
+				markers.forEach((m) => (m.material as THREE.MeshBasicMaterial).color.set(partial.markerColor!));
+			}
 			layout();
 			refreshIntensity();
 		},
-		getConfig() {
-			return { ...config };
-		},
+		getConfig: () => config,
 		dispose() {
-			group.removeFromParent();
-			for (const spot of spots) spot.dispose();
+			lensMat.dispose();
+			markerMat.dispose();
+			spots.forEach((s) => s.dispose());
 			for (const lens of lenses) {
 				lens.geometry.dispose();
 				(lens.material as THREE.Material).dispose();

@@ -2209,8 +2209,12 @@ body.edit-mode-active .edit-mode-toggle {
 	gap: 2px;
 	padding: 0;
 	font-family: inherit;
-	transform: translate(-50%, -50%) translate(var(--ww-x, 0px), var(--ww-y, 0px));
+	transform: translate(-50%, -50%) translate(var(--ww-x, 0px), var(--ww-y, 0px)) !important;
 	transition: border-color 0.1s ease, background 0.1s ease, transform 0.1s ease;
+}
+
+.weapon-wheel .ww-slot:active {
+	transform: translate(-50%, -50%) translate(var(--ww-x, 0px), var(--ww-y, 0px)) scale(1.02) !important;
 }
 
 .weapon-wheel .ww-slot .ww-icon {
@@ -2230,7 +2234,7 @@ body.edit-mode-active .edit-mode-toggle {
 	border-color: rgba(170, 220, 120, 0.95);
 	background: rgba(40, 70, 40, 0.95);
 	transform: translate(-50%, -50%) translate(var(--ww-x, 0px), var(--ww-y, 0px))
-		scale(1.08);
+		scale(1.08) !important;
 }
 
 .weapon-wheel .ww-slot.is-equipped:not(.is-highlighted) {
@@ -2250,7 +2254,7 @@ body.ui-cursor-capture .weapon-wheel .ww-slot {
 .gun-crosshair {
 	position: fixed;
 	left: 50%;
-	top: 50%;
+	top: 45%;
 	width: 22px;
 	height: 22px;
 	transform: translate(-50%, -50%);
@@ -2264,6 +2268,50 @@ body.ui-cursor-capture .weapon-wheel .ww-slot {
 .gun-crosshair.is-visible {
 	opacity: 1;
 	visibility: visible;
+}
+
+/* Sniper Scope Overlay */
+.scope-overlay {
+	position: fixed;
+	top: 0;
+	left: 0;
+	width: 100vw;
+	height: 100vh;
+	z-index: 890;
+	pointer-events: none;
+	opacity: 0;
+	visibility: hidden;
+	transition: opacity 0.15s ease;
+	/* Center the gradient at the same 45% top offset as the crosshair */
+	background: radial-gradient(circle at 50% 45%, transparent 35%, rgba(0, 0, 0, 0.8) 55%, #000 100%);
+}
+
+.scope-overlay.is-visible {
+	opacity: 1;
+	visibility: visible;
+}
+
+/* Scope reticle lines */
+.scope-overlay::before {
+	content: "";
+	position: absolute;
+	top: 45%;
+	left: 0;
+	width: 100%;
+	height: 2px;
+	background: rgba(0, 0, 0, 0.5);
+	transform: translateY(-50%);
+}
+
+.scope-overlay::after {
+	content: "";
+	position: absolute;
+	top: 0;
+	left: 50%;
+	width: 2px;
+	height: 100%;
+	background: rgba(0, 0, 0, 0.5);
+	transform: translateX(-50%);
 }
 
 .gun-crosshair .gc-h,
@@ -2417,8 +2465,8 @@ button:active:not(:disabled) {
   flex-direction: row;
   justify-content: center;
   align-items: center;
-  /* Premium backdrop */
-  background: radial-gradient(circle at center, rgba(14, 22, 16, 0.8) 0%, rgba(5, 8, 5, 0.95) 100%) !important;
+  /* Premium backdrop without concentric banding rings */
+  background: linear-gradient(to bottom, rgba(14, 22, 16, 0.8) 0%, rgba(5, 8, 5, 0.95) 100%) !important;
 }
 
 @media (max-width: 768px) {

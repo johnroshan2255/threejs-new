@@ -4,6 +4,25 @@ export const CAR_CONFIG = {
 	mass: 180,
 	wheelWidth: 0.7,
 
+	lights: [
+		{
+			// Front yellow headlights (Kenney default)
+			color: 0xffe0a0,
+			lensColor: "#ffc61c",
+			markerColor: "#ffdd44",
+			lensSize: 0.17,
+			spotIntensity: 16,
+			distance: 24,
+			angle: Math.PI / 3.2,
+			forwardBias: 0.05,
+			mounts: {
+				left: { x: -0.66, y: 1.04, z: 2.0 },
+				right: { x: 0.66, y: 1.04, z: 2.0 },
+			},
+		},
+
+	],
+
 	/** Main engine torque (Kenney back axle, hood / -Z). */
 	driveFrontAxleIndices: [0, 1],
 	driveRearAxleIndices: [2, 3],
@@ -14,7 +33,9 @@ export const CAR_CONFIG = {
 	colliderRoundness: 0.22,
 	colliderHeightScale: 0.48,
 	colliderLocalYFactor: -0.45,
-	centerOfMassY: -1.9,
+	// Above the contact plane so braking dives the nose / acceleration squats
+	// the rear instead of inverting the pitch.
+	centerOfMassY: 0.5,
 	angularDamping: 1.8,
 
 	spawn: { x: 0, z: 0, clearance: 1.4 },
@@ -101,4 +122,7 @@ export const CAR_CONFIG = {
 		ropeColor: 0x2a241c,
 		hookColor: 0x6a6e74,
 	},
+
+	/** Explicit grapple hook mount point relative to physics center */
+	grappleMount: { x: 0, y: 0.0, z: 2.1 },
 };

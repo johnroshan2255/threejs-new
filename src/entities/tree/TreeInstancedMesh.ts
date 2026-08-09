@@ -1,5 +1,7 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { getWorld } from "../../physics/world";
+import RAPIER from "@dimforge/rapier3d-compat";
 import { createFoliageMaterial, setFoliageInstanceSource, setFoliageLeafColor, type FoliageMaterial } from "./foliageMaterial";
 import { applySnowToMaterial } from "../../terrain/snowShading";
 import {
@@ -109,6 +111,7 @@ export class TreeInstancedMesh {
 	
 	private idToIndex = new Map<string, number>();
 	private indexToId = new Map<number, string>();
+	private treeColliders = new Map<string, RAPIER.RigidBody>();
 	
 	private leafLayers: number;
 	private initialized = false;
@@ -376,6 +379,23 @@ export class TreeInstancedMesh {
 		matrix.toArray(this.masterTrunkArray, index * 16);
 		this.masterTrunkData.needsUpdate = true;
 		
+		const world = getWorld();
+		if (world) {
+			let body = this.treeColliders.get(id);
+			if (!body) {
+				const bodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(position.x, position.y, position.z);
+				body = world.createRigidBody(bodyDesc);
+				const halfHeight = 2.0 * scale;
+				const radius = 0.35 * scale;
+				const colliderDesc = RAPIER.ColliderDesc.cylinder(halfHeight, radius)
+					.setTranslation(0, halfHeight, 0); // Model origin is at the base
+				world.createCollider(colliderDesc, body);
+				this.treeColliders.set(id, body);
+			} else {
+				body.setTranslation({ x: position.x, y: position.y, z: position.z }, true);
+			}
+		}
+
 		const baseFoliageIndex = index * this.leafLayers;
 		const leafColor = leafColorHex ? new THREE.Color(leafColorHex).convertLinearToSRGB() : null;
 		
@@ -442,6 +462,15 @@ export class TreeInstancedMesh {
 		this.count--;
 		this.countUniform.value = this.count;
 		
+		const world = getWorld();
+		if (world) {
+			const body = this.treeColliders.get(id);
+			if (body) {
+				world.removeRigidBody(body);
+				this.treeColliders.delete(id);
+			}
+		}
+
 		this.masterTrunkData.needsUpdate = true;
 		this.masterFoliageData.needsUpdate = true;
 		this.masterFoliageColorData.needsUpdate = true;
@@ -452,6 +481,14 @@ export class TreeInstancedMesh {
 		if (this.countUniform) this.countUniform.value = 0;
 		this.idToIndex.clear();
 		this.indexToId.clear();
+		
+		const world = getWorld();
+		if (world) {
+			for (const body of this.treeColliders.values()) {
+				world.removeRigidBody(body);
+			}
+			this.treeColliders.clear();
+		}
 	}
 
 	getIdFromInstanceId(instanceId: number, mesh: THREE.Object3D): string | null {

@@ -1,5 +1,7 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { getWorld } from "../../physics/world";
+import RAPIER from "@dimforge/rapier3d-compat";
 import { getWorldTerrainY } from "../../terrain/islandHeight";
 import {
 	createFoliageMaterial,
@@ -159,6 +161,17 @@ export async function createTree(
 
 	let dummyFoliageMaterial: FoliageMaterial = {} as FoliageMaterial;
 	let trunk: THREE.Mesh | null = null;
+	let rigidBody: RAPIER.RigidBody | null = null;
+
+	const world = getWorld();
+	if (world) {
+		const bodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(x0, y, z0);
+		rigidBody = world.createRigidBody(bodyDesc);
+		const halfHeight = 2.0 * scale;
+		const radius = 0.35 * scale;
+		const colliderDesc = RAPIER.ColliderDesc.cylinder(halfHeight, radius).setTranslation(0, halfHeight, 0);
+		world.createCollider(colliderDesc, rigidBody);
+	}
 
 	if (!useInstancing) {
 		trunk = template.trunk.clone(true);
@@ -203,12 +216,23 @@ export async function createTree(
 		},
 		setPosition(x, nextY, z) {
 			group.position.set(x, nextY, z);
+			if (rigidBody) {
+				rigidBody.setTranslation({ x, y: nextY, z }, true);
+			}
 		},
 		snapToTerrain() {
 			const { x, z } = group.position;
-			group.position.y = getWorldTerrainY(x, z);
+			const nextY = getWorldTerrainY(x, z);
+			group.position.y = nextY;
+			if (rigidBody) {
+				rigidBody.setTranslation({ x, y: nextY, z }, true);
+			}
 		},
-		dispose() {
+		dispose: () => {
+			if (rigidBody) {
+				const w = getWorld();
+				if (w) w.removeRigidBody(rigidBody);
+			}
 			group.removeFromParent();
 			if (!useInstancing && trunk) {
 				(trunk.material as THREE.Material).dispose();

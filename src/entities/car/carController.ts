@@ -1,7 +1,7 @@
 import type { DynamicRayCastVehicleController } from "@dimforge/rapier3d-compat";
 import type RAPIER from "@dimforge/rapier3d-compat";
 import * as THREE from "three";
-import { CAR_CONFIG } from "./carConfig";
+import type { CAR_CONFIG } from "./carConfig";
 
 export type DriveInput = {
 	throttle: number;
@@ -28,7 +28,8 @@ export class CarController {
 		private vehicle: DynamicRayCastVehicleController,
 		private driveFrontAxleIndices: number[],
 		private driveRearAxleIndices: number[],
-		private steeringWheelIndices: number[]
+		private steeringWheelIndices: number[],
+		private config: typeof CAR_CONFIG
 	) {}
 
 	isBraking(): boolean {
@@ -65,7 +66,7 @@ export class CarController {
 		}
 		this.smokeAccum +=
 			dt *
-			CAR_CONFIG.drift.smokeRate *
+			this.config.drift.smokeRate *
 			this.driftFactor *
 			Math.min(1, this.throttle);
 		if (this.smokeAccum < 1) return false;
@@ -88,9 +89,9 @@ export class CarController {
 		this.steerInput = input.steer;
 		this.nitroActive = input.nitro ?? false;
 
-		const { drive, drift } = CAR_CONFIG;
+		const { drive, drift } = this.config;
 
-		// W + Space = front brake + rear spin drift.
+		// W + Space = all-wheel service braking with rear-drive drift grip.
 		const wantDrift = input.braking && input.throttle > 0.12;
 		const driftTarget = wantDrift ? 1 : 0;
 		const driftBlend = 1 - Math.exp(-drift.blendSpeed * dt);
@@ -148,7 +149,7 @@ export class CarController {
 			}
 		}
 
-		this.applyFrontBrakesOnly();
+		this.applyAllWheelBrakes();
 		this.applyDriftYaw(dt);
 
 		if (this.nitroActive) {
@@ -162,7 +163,7 @@ export class CarController {
 	}
 
 	private applyDriftGrip() {
-		const { drift } = CAR_CONFIG;
+		const { drift } = this.config;
 		const f = this.driftFactor;
 		const rear = new Set(this.rearWheelIndices());
 
@@ -189,16 +190,11 @@ export class CarController {
 		}
 	}
 
-	/** Space = front brakes only. Rear never brakes (free to spin). */
-	private applyFrontBrakesOnly() {
-		const { drive, drift } = CAR_CONFIG;
-		const rear = new Set(this.rearWheelIndices());
+	/** Service brake acts on every tire. */
+	private applyAllWheelBrakes() {
+		const { drive, drift } = this.config;
 
 		for (let i = 0; i < this.vehicle.numWheels(); i++) {
-			if (rear.has(i)) {
-				this.vehicle.setWheelBrake(i, 0);
-				continue;
-			}
 			if (!this.braking) {
 				this.vehicle.setWheelBrake(i, 0);
 				continue;
@@ -211,17 +207,17 @@ export class CarController {
 	private applyDriftYaw(dt: number) {
 		if (this.driftFactor < 0.15 || Math.abs(this.steerInput) < 0.12) return;
 
-		const { drift } = CAR_CONFIG;
+		const { drift } = this.config;
 		const yaw =
 			this.steerInput * drift.yawTorque * this.driftFactor * dt;
 		this.body.applyTorqueImpulse({ x: 0, y: yaw, z: 0 }, true);
 	}
 
-	afterPhysics(dt: number) {
+		afterPhysics(dt: number) {
 		this.vehicle.updateVehicle(dt);
 		this.applyAntiRollStabilization();
 		
-		let maxSpeed = this.drifting ? CAR_CONFIG.drift.maxDriftSpeed : CAR_CONFIG.drive.maxSpeed;
+		let maxSpeed = this.drifting ? this.config.drift.maxDriftSpeed : this.config.drive.maxSpeed;
 		if (this.nitroActive) {
 			maxSpeed *= 2.5; // 150% speed boost limit during nitro
 		}
@@ -254,7 +250,7 @@ export class CarController {
 		this.drifting = false;
 		this.smokeAccum = 0;
 
-		const { drift } = CAR_CONFIG;
+		const { drift } = this.config;
 		for (let i = 0; i < this.vehicle.numWheels(); i++) {
 			this.vehicle.setWheelSteering(i, 0);
 			this.vehicle.setWheelEngineForce(i, 0);
@@ -267,7 +263,7 @@ export class CarController {
 	private computeEngineForce(): number {
 		if (Math.abs(this.throttle) < 0.02) return 0;
 
-		const { engineForce, reverseForce } = CAR_CONFIG.drive;
+		const { engineForce, reverseForce } = this.config.drive;
 		const t = this.throttle;
 		const mag = t > 0 ? engineForce * t : reverseForce * Math.abs(t);
 		return -Math.sign(t) * mag;

@@ -67,7 +67,7 @@ export function updateChaseCamera(
 		// Driver seat is typically slightly behind the center of the car (-Z) and to the left (-X)
 		const headOffset = new THREE.Vector3(-0.35, 0.85, -0.4);
 		_targetCam.copy(headOffset).applyMatrix4(car.mesh.matrixWorld);
-		
+
 		// Snap fast to FPV
 		const blendFpv = 1 - Math.exp(-20 * dt);
 		camera.position.lerp(_targetCam, blendFpv);
@@ -81,7 +81,7 @@ export function updateChaseCamera(
 		_lookAt.copy(_targetCam).add(lookDir.multiplyScalar(5));
 
 		// In FPV, we don't aggressively auto-center. The player has full control of their head!
-		
+
 		camera.lookAt(_lookAt);
 		return;
 	}
@@ -134,10 +134,10 @@ const _aimDir = new THREE.Vector3();
 const _aimRight = new THREE.Vector3();
 const _aimUp = new THREE.Vector3(0, 1, 0);
 
-export type HumanCameraOptions = {
-	/** GTA ADS: hold RMB — over-shoulder free look; crosshair = screen center. */
+export interface HumanCameraOptions {
 	aimMode?: boolean;
-};
+	scopeMode?: boolean;
+}
 
 /**
  * Third-person human camera.
@@ -171,9 +171,11 @@ export function updateHumanCamera(
 			_aimRight.set(Math.cos(yaw), 0, -Math.sin(yaw));
 		}
 
-		const back = 3.2;
-		const up = 1.55;
-		const shoulder = 0.7;
+		const scopeMode = Boolean(options.scopeMode);
+		// In scope mode, the human mesh is hidden, so we place the camera directly at eye-level!
+		const back = scopeMode ? 0 : 3.2; 
+		const up = scopeMode ? 1.65 : 1.55;  
+		const shoulder = scopeMode ? 0 : 0.7; 
 
 		_humanTargetCam
 			.copy(_humanPos)
@@ -187,7 +189,22 @@ export function updateHumanCamera(
 
 		_lookAt.copy(camera.position).addScaledVector(_aimDir, 40);
 		camera.lookAt(_lookAt);
+
+		// Zoom FOV for scope effect
+		const targetFov = scopeMode ? input.scopeFov : 75;
+		if (Math.abs(camera.fov - targetFov) > 0.1) {
+			camera.fov += (targetFov - camera.fov) * (1 - Math.exp(-CAM_SMOOTH * dt * 3.0));
+			camera.updateProjectionMatrix();
+		}
+
 		return;
+	}
+
+	// Restore default FOV when not aiming
+	const defaultFov = 75;
+	if (Math.abs(camera.fov - defaultFov) > 0.1) {
+		camera.fov += (defaultFov - camera.fov) * (1 - Math.exp(-CAM_SMOOTH * dt * 3.0));
+		camera.updateProjectionMatrix();
 	}
 
 	// —— Normal (unarmed) chase cam ——

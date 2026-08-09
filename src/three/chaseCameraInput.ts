@@ -18,6 +18,8 @@ export type ChaseCameraInputOptions = {
 	 * steer the camera (false in the lobby, in edit mode, on touch devices).
 	 */
 	isFreeLookAllowed?: () => boolean;
+	/** Whether the player is currently aiming down sights */
+	isScopeMode?: () => boolean;
 };
 
 /**
@@ -34,6 +36,7 @@ export class ChaseCameraInput {
 	yaw = 0;
 	pitch = 0.22;
 	distance = 8;
+	scopeFov = 45;
 
 	private dragging = false;
 	private lastX = 0;
@@ -90,6 +93,28 @@ export class ChaseCameraInput {
 		domElement.addEventListener("wheel", this.onWheel, { passive: false });
 		domElement.style.cursor = "grab";
 		domElement.style.touchAction = "none";
+	}
+
+	public dispose() {
+		this.domElement.removeEventListener("pointerdown", this.onPointerDown);
+		window.removeEventListener("pointermove", this.onPointerMove);
+		window.removeEventListener("pointerup", this.onPointerUp);
+		window.removeEventListener("pointercancel", this.onPointerUp);
+		window.removeEventListener("pointerout", this.onPointerOut);
+		window.removeEventListener("blur", this.onWindowBlur);
+		window.removeEventListener("keydown", this.onKeyDown);
+		window.removeEventListener("keyup", this.onKeyUp);
+		document.removeEventListener("visibilitychange", this.onWindowBlur);
+		document.removeEventListener("pointerlockchange", this.onPointerLockChange);
+		document.removeEventListener("pointerlockerror", this.onPointerLockChange);
+
+		this.domElement.removeEventListener("touchstart", this.onTouchStart);
+		window.removeEventListener("touchmove", this.onTouchMove);
+		window.removeEventListener("touchend", this.onTouchEnd);
+		window.removeEventListener("touchcancel", this.onTouchEnd);
+
+		this.domElement.removeEventListener("wheel", this.onWheel);
+		this.exitPointerLock();
 	}
 
 	private isUiTarget(target: EventTarget | null): boolean {
@@ -464,7 +489,12 @@ export class ChaseCameraInput {
 
 	private onWheel = (e: WheelEvent) => {
 		e.preventDefault();
-		this.distance += e.deltaY * 0.01;
-		this.distance = Math.max(MIN_DISTANCE, Math.min(MAX_DISTANCE, this.distance));
+		if (this.options.isScopeMode?.()) {
+			this.scopeFov += e.deltaY * 0.05;
+			this.scopeFov = Math.max(10, Math.min(75, this.scopeFov));
+		} else {
+			this.distance += e.deltaY * 0.01;
+			this.distance = Math.max(MIN_DISTANCE, Math.min(MAX_DISTANCE, this.distance));
+		}
 	};
 }

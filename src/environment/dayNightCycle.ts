@@ -23,7 +23,7 @@ import {
 	vec3,
 } from "three/tsl";
 
-export type DayPeriod = "morning" | "noon" | "evening" | "sunset" | "night";
+export type DayPeriod = "morning" | "noon" | "evening" | /* "sunset" | */ "night";
 
 export type DayNightLights = {
 	ambient: THREE.AmbientLight;
@@ -130,7 +130,7 @@ export const DAY_PERIODS: Record<DayPeriod, PeriodKey> = {
 		moonIntensity: 0,
 		fireflies: 0,
 		grassLight: 0.78,
-		exposure: 1.05,
+		exposure: 1.3,
 		shoulder: 0.7,
 		contrast: 1.1,
 		saturation: 1.14,
@@ -167,8 +167,8 @@ export const DAY_PERIODS: Record<DayPeriod, PeriodKey> = {
 		moonColor: "#9fc0ff",
 		moonIntensity: 0,
 		fireflies: 0,
-		grassLight: 0.9,
-		exposure: 1.0,
+		grassLight: 0.8,
+		exposure: 1.25,
 		shoulder: 0.72,
 		contrast: 1.08,
 		saturation: 1.16,
@@ -205,8 +205,8 @@ export const DAY_PERIODS: Record<DayPeriod, PeriodKey> = {
 		moonColor: "#9fc0ff",
 		moonIntensity: 0,
 		fireflies: 0,
-		grassLight: 0.86,
-		exposure: 1.04,
+		grassLight: 0.8,
+		exposure: 1.29,
 		shoulder: 0.7,
 		contrast: 1.1,
 		saturation: 1.18,
@@ -226,6 +226,7 @@ export const DAY_PERIODS: Record<DayPeriod, PeriodKey> = {
 		cloudLight: "#fff4e4",
 		cloudDark: "#bfcde2",
 	},
+	/*
 	sunset: {
 		hour: 17.85,
 		zenith: "#3f5fa4",
@@ -244,7 +245,7 @@ export const DAY_PERIODS: Record<DayPeriod, PeriodKey> = {
 		moonIntensity: 0,
 		fireflies: 0.12,
 		grassLight: 0.72,
-		exposure: 1.08,
+		exposure: 1.33,
 		shoulder: 0.66,
 		contrast: 1.12,
 		saturation: 1.2,
@@ -264,16 +265,17 @@ export const DAY_PERIODS: Record<DayPeriod, PeriodKey> = {
 		cloudLight: "#ffd0a4",
 		cloudDark: "#8f7ba8",
 	},
+	*/
 	night: {
 		hour: 22.5,
-		zenith: "#0a1330",
-		horizon: "#17284e",
-		fog: "#1a2230",
+		zenith: "#030612",
+		horizon: "#070c1a",
+		fog: "#0a0c14",
 		fogDensity: 0.007,
-		ambientColor: "#525c6e",
+		ambientColor: "#222a36",
 		ambientIntensity: 0.3,
-		hemiSky: "#5b6678",
-		hemiGround: "#161a1e",
+		hemiSky: "#2b3442",
+		hemiGround: "#101316",
 		hemiIntensity: 0.4,
 		sunColor: "#ffd2a1",
 		sunIntensity: 0,
@@ -282,7 +284,7 @@ export const DAY_PERIODS: Record<DayPeriod, PeriodKey> = {
 		moonIntensity: 1.7,
 		fireflies: 1,
 		grassLight: 0.42,
-		exposure: 1.1,
+		exposure: 0.9,
 		shoulder: 0.85,
 		contrast: 1.05,
 		saturation: 0.88,
@@ -308,7 +310,7 @@ const PERIOD_ORDER: DayPeriod[] = [
 	"morning",
 	"noon",
 	"evening",
-	"sunset",
+	// "sunset",
 	"night",
 ];
 
@@ -599,7 +601,7 @@ function createSkyMaterial() {
 		const sky = mix(uniforms.uHorizon, uniforms.uZenith, hMix).toVar();
 
 		const sunElev = sun.y;
-		// Only kick in strong warm glow when the sun is near the horizon.
+		// Only kick in strong warm glow on the horizon when the sun is low.
 		const lowSun = smoothstep(0.28, 0.02, sunElev);
 		const sunDot = max(dot(dir, sun), 0.0).toVar();
 
@@ -608,15 +610,17 @@ function createSkyMaterial() {
 		// Tight azimuth around the sun — stops a fire band across the sky.
 		const towardSun = pow(max(dot(dirFlat, sunFlat), 0.0), 8.0);
 		const horizonArc = exp(abs(elev.sub(max(sunElev, 0.0))).mul(-16.0));
+		
 		const sunHalo = pow(sunDot, 32.0).mul(uniforms.uSunGlow);
 		const mie = pow(sunDot, 14.0).mul(uniforms.uSunGlow).mul(0.18);
-		const warm = horizonArc
-			.mul(towardSun)
-			.mul(0.35)
-			.add(sunHalo)
-			.add(mie)
-			.mul(lowSun)
-			.mul(clamp(uniforms.uSunGlow, 0.0, 2.0));
+		
+		// The sunset band is tied to low sun
+		const sunsetBand = horizonArc.mul(towardSun).mul(0.35).mul(lowSun);
+		
+		// The sun's halo and mie scattering should exist all day to give the sun presence
+		const glowAndMie = sunHalo.add(mie);
+		
+		const warm = sunsetBand.add(glowAndMie).mul(clamp(uniforms.uSunGlow, 0.0, 2.0));
 		sky.addAssign(uniforms.uSunColor.mul(warm).mul(0.55));
 
 		// Soft pale rim for evening (high sun) — tiny, not an orange wash.
@@ -749,6 +753,7 @@ export type DayNightCycle = {
 	 * decides how crisp that coverage is.
 	 */
 	setShadowQuality: (mapSize: number, extent: number) => void;
+	setSunGlowMultiplier: (v: number) => void;
 	dispose: () => void;
 	overrideColors: boolean;
 	/** Multiplier on ambient + hemisphere intensity. 1 = as authored. */
@@ -902,6 +907,7 @@ export function createDayNightCycle(
 	let period: DayPeriod = "morning";
 	let fireflyIntensity = 0;
 	let grassLight = 1;
+	let sunGlowMultiplier = 1.0;
 	/** Wall-clock seconds driving cloud drift. */
 	let skyTime = 0;
 
@@ -1019,7 +1025,7 @@ export function createDayNightCycle(
 		skyMat.uniforms.uHorizon.value.copy(sample.horizon);
 		skyMat.uniforms.uSunColor.value.copy(sample.sun);
 		skyMat.uniforms.uMoonColor.value.copy(sample.moon);
-		skyMat.uniforms.uSunGlow.value = sample.sunGlow;
+		skyMat.uniforms.uSunGlow.value = sample.sunGlow * sunGlowMultiplier;
 		skyMat.uniforms.uSunIntensity.value = sample.sunIntensity;
 		skyMat.uniforms.uMoonIntensity.value = sample.moonIntensity;
 		skyMat.uniforms.uCloudCoverage.value = sample.cloudCoverage;
@@ -1150,6 +1156,10 @@ export function createDayNightCycle(
 				keyLight.shadow.map = null as unknown as THREE.WebGLRenderTarget;
 			}
 			positionKeyLight();
+		},
+		setSunGlowMultiplier(v) {
+			sunGlowMultiplier = v;
+			apply();
 		},
 		dispose() {
 			group.removeFromParent();

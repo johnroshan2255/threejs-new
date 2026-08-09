@@ -1,0 +1,62 @@
+[vite] connecting...
+THREE.Clock: This module has been deprecated. Please use THREE.Timer instead.
+[FluffyGrass] loading
+[vite] connecting...
+[vite] connected.
+THREE.Clock: This module has been deprecated. Please use THREE.Timer instead.
+[FluffyGrass] loading
+using deprecated parameters for the initialization function; pass a single object instead
+THREE.PostProcessing: "PostProcessing" has been renamed to "RenderPipeline". Please update your code to use "THREE.RenderPipeline" instead.
+[FluffyGrass] terrain 200×200, grass=50000
+[HumanEntity] Combat bones: [object Object]
+[HumanEntity] Available animations:
+ - Armature|Being Carried
+ - Armature|Carry Idle
+ - Armature|Carry Walk
+ - Armature|Drop Kick
+ - Armature|Fall Down
+ - Armature|Gunplay
+ - Armature|Idle
+ - Armature|Lift
+ - Armature|Punch One
+ - Armature|Punch Two
+ - Armature|Rifle Idle
+ - Armature|Rifle Walk
+ - Armature|Run
+ - Armature|Sit To Stand
+ - Armature|Sitting
+ - Armature|Stand To Sit
+ - Armature|Stand Up
+ - Armature|Sweep Fall
+ - Armature|Swim
+ - Armature|Throw
+ - Armature|Walk
+ - Being Carried
+ - Carry Idle
+ - Carry Walk
+ - Drop Kick
+ - Dying
+ - Fall Down
+ - Falling
+ - Gunplay
+ - Hit On Side Of Body
+ - Idle
+ - Jumbing
+ - Lift
+ - Punch One
+ - Punch Two
+ - Receiving An Uppercut
+ - Rifle Idle
+ - Rifle Walk
+ - Run
+ - Running Jumb
+ - Sit To Stand
+ - Sitting
+ - Stand To Sit
+ - Stand Up
+ - Sweep Fall
+ - Swim
+ - Throw
+ - Walk
+[setupHuman] Gun ready in world space, scale 0.3817
+[FluffyGrass] ready

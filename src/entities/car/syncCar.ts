@@ -20,12 +20,29 @@ export function syncCar(car: CarEntity) {
 		const connection = vehicle.wheelChassisConnectionPointCs(i);
 		const suspension = vehicle.wheelSuspensionLength(i);
 		if (!connection) return;
+		const suspensionLength = Math.max(suspension ?? 0, 0.06);
+
+		if (i === 0 && (window as any).debugSuspension) {
+			console.log(`[syncCar] wheel 0: connection.y=${connection.y.toFixed(3)}, suspensionLength=${suspensionLength.toFixed(3)}, pos.y=${(connection.y - suspensionLength).toFixed(3)}`);
+		}
 
 		wheel.position.set(
 			connection.x,
-			connection.y - (suspension ?? 0),
+			connection.y - suspensionLength,
 			connection.z
 		);
+
+		// Damper visibly compress under braking / acceleration and over bumps.
+		const shock = (car as any).shocks?.[i];
+		if (shock) {
+			const sleeveLength = Math.max(0.12, suspensionLength * 0.58);
+			const rodLength = Math.max(0.08, suspensionLength - sleeveLength + 0.08);
+			shock.group.position.set(connection.x, connection.y, connection.z);
+			shock.sleeve.scale.y = sleeveLength;
+			shock.sleeve.position.y = -sleeveLength * 0.5;
+			shock.rod.scale.y = rodLength;
+			shock.rod.position.y = -sleeveLength - rodLength * 0.5 + 0.04;
+		}
 
 		const steering = car.steeringWheelIndices.includes(i) ? frontSteer : 0;
 		const rotation = vehicle.wheelRotation(i) ?? 0;

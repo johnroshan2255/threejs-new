@@ -54,8 +54,10 @@ export class HumanInput {
     /** Fists vs free gun — bomb is a temporary world pickup. */
     public readonly inventory = new WeaponInventory();
     private weaponWheel: WeaponWheel | null = null;
-    /** GTA toggle aim — RMB click locks/unlocks ADS (not hold). */
-    private aimLocked = false;
+    /** Explicit toggle state for aiming (Right Click) */
+    public aimLocked = false;
+    /** Explicit toggle for scope view (Right Click) */
+    public scopeLocked = false;
     private isShooting = false;
     private shootTimer = 0;
     private shootDuration = 0;
@@ -73,6 +75,7 @@ export class HumanInput {
     private readonly aimPoint = new THREE.Vector3();
     private readonly camWorldPos = new THREE.Vector3();
     private crosshairEl: HTMLElement | null = null;
+    private scopeEl: HTMLElement | null = null;
     /** Last camera passed to update — used when firing from mousedown. */
     private lastCamera: THREE.PerspectiveCamera | null = null;
     
@@ -197,8 +200,13 @@ export class HumanInput {
         this.crosshairEl.className = "gun-crosshair";
         this.crosshairEl.setAttribute("aria-hidden", "true");
         this.crosshairEl.innerHTML =
-            '<span class="gc-h"></span><span class="gc-v"></span><span class="gc-dot"></span>';
+            '<div class="gc-h"></div><div class="gc-v"></div><div class="gc-dot"></div>';
         document.body.appendChild(this.crosshairEl);
+
+        this.scopeEl = document.createElement("div");
+        this.scopeEl.className = "scope-overlay";
+        this.scopeEl.setAttribute("aria-hidden", "true");
+        document.body.appendChild(this.scopeEl);
 
         window.addEventListener("keydown", this.onKeyDown);
         window.addEventListener("keyup", this.onKeyUp);
@@ -217,6 +225,8 @@ export class HumanInput {
         this.weaponWheel = null;
         this.crosshairEl?.remove();
         this.crosshairEl = null;
+        this.scopeEl?.remove();
+        this.scopeEl = null;
         this.onWeaponWheelToggle?.(false);
     }
 
@@ -254,6 +264,10 @@ export class HumanInput {
         return this.gunModeActive() && this.aimLocked;
     }
 
+    public isScopeMode(): boolean {
+        return this.gunModeActive() && this.scopeLocked;
+    }
+
     /** True while spraying with LMB in ADS (for network tick sync). */
     public isFiringGun(): boolean {
         return this.isAimingGun() && this.isLeftMouseDown;
@@ -286,7 +300,10 @@ export class HumanInput {
     }
 
     private syncAimUi() {
-        this.crosshairEl?.classList.toggle("is-visible", this.isAimingGun());
+        const isAiming = this.isAimingGun();
+        const isScope = this.isScopeMode();
+        this.crosshairEl?.classList.toggle("is-visible", isAiming);
+        this.scopeEl?.classList.toggle("is-visible", isScope);
     }
 
     private openWeaponWheel() {
@@ -394,9 +411,10 @@ export class HumanInput {
         if (this.hitReactionTimer > 0) return;
 
         if (this.gunModeActive()) {
-            // RMB: toggle aim lock only (no fire)
+            // RMB: toggle aim lock AND scope lock
             if (e.button === 2) {
-                this.aimLocked = !this.aimLocked;
+                this.scopeLocked = !this.scopeLocked;
+                this.aimLocked = this.scopeLocked;
                 if (!this.aimLocked) {
                     this.isShooting = false;
                     this.shootTimer = 0;
@@ -457,20 +475,21 @@ export class HumanInput {
         if (!camera) return;
         camera.updateMatrixWorld(true);
         camera.getWorldPosition(this.camWorldPos);
-        camera.getWorldDirection(this.shootDir);
+        this.shootDir.set(0, 0.1, 0.5).unproject(camera).sub(this.camWorldPos).normalize();
 
-        // Always aim through exact screen-center crosshair — no target snap.
+        // Always aim through offset screen crosshair — no target snap.
         this.aimPoint
             .copy(this.camWorldPos)
             .addScaledVector(this.shootDir, HumanInput.SHOOT_RANGE);
 
         const muzzle = this.getMuzzleWorldPosition?.();
-        if (muzzle) {
+        if (muzzle && !this.isScopeMode()) {
             this.shootOrigin.copy(muzzle);
         } else {
+            // In scope mode, the gun is invisible and the bullet fires straight out of the camera/eye
             this.shootOrigin
                 .copy(this.camWorldPos)
-                .addScaledVector(this.shootDir, 1.2);
+                .addScaledVector(this.shootDir, 0.4);
         }
 
         this.shootDir.copy(this.aimPoint).sub(this.shootOrigin);
@@ -766,10 +785,10 @@ export class HumanInput {
         if (!this.isAimingGun()) return;
         if (!immediate && !this.isShooting) return;
 
-        // Hitscan along camera forward (= screen-center crosshair while ADS)
+        // Hitscan along camera forward (= offset screen crosshair while ADS)
         camera.updateMatrixWorld(true);
         this.shootOrigin.setFromMatrixPosition(camera.matrixWorld);
-        camera.getWorldDirection(this.shootDir);
+        this.shootDir.set(0, 0.1, 0.5).unproject(camera).sub(this.shootOrigin).normalize();
 
         const targets = this.getPunchTargets();
         let bestId: string | null = null;
@@ -850,8 +869,19 @@ export class HumanInput {
             }
         }
 
-        // Gun out: walk only. Extra slow while ADS (GTA-like).
-        const wantsRun = Boolean(this.keys["shift"]) && !this.gunModeActive();
+        let wantsRun = Boolean(this.keys["shift"]);
+        
+        // Cannot sprint while actively shooting
+        if (wantsRun && this.gunModeActive() && this.isLeftMouseDown) {
+            wantsRun = false;
+        }
+
+        if (wantsRun && (this.scopeLocked || this.aimLocked)) {
+            this.scopeLocked = false;
+            this.aimLocked = false;
+            this.syncAimUi();
+        }
+
         const isRunning = wantsRun;
         const currentSpeed = this.isAimingGun()
             ? this.walkSpeed * 0.55
@@ -1109,11 +1139,18 @@ export class HumanInput {
             }
         }
 
-        // Hold LMB: auto-ADS + looping Gunplay + fire (also while moving / rifle walk)
+        // Hold LMB: auto-ADS + looping Gunplay + fire
         if (this.gunModeActive() && this.isLeftMouseDown) {
             this.ensureAimForFire();
             this.isShooting = true;
-            this.human.playAnimation("gunplay", 0.12, false, "repeat");
+            
+            // If moving and not scoping, play rifle walk, otherwise play gunplay
+            if (this.moveDir.lengthSq() > 0.01 && !this.isScopeMode()) {
+                this.human.playAnimation("rifle walk", 0.12, false, "repeat");
+            } else {
+                this.human.playAnimation("gunplay", 0.12, false, "repeat");
+            }
+            
             this.fireBullet(camera);
         } else if (this.isShooting) {
             this.isShooting = false;
@@ -1122,7 +1159,7 @@ export class HumanInput {
 
         // Animation state machine
         if (this.gunModeActive() && this.isLeftMouseDown) {
-            // Gunplay held above — do not fall through to rifle walk/idle
+            // Animation already handled above based on movement — do not fall through
         } else if (this.attackTimer > 0 && !this.gunModeActive()) {
             this.attackTimer -= dt;
             this.tryPunchHits();
@@ -1142,7 +1179,13 @@ export class HumanInput {
             if (this.isCarryingPlayer) {
                 this.human.playAnimation("carry walk");
             } else if (this.gunModeActive()) {
-                this.human.playAnimation("rifle walk");
+                if (this.isScopeMode()) {
+                    this.human.playAnimation("gunplay");
+                } else if (isRunning) {
+                    this.human.playAnimation("run");
+                } else {
+                    this.human.playAnimation("rifle walk");
+                }
             } else {
                 this.human.playAnimation(isRunning ? "run" : "walk");
             }
@@ -1150,7 +1193,11 @@ export class HumanInput {
             if (this.isCarryingPlayer) {
                 this.human.playAnimation("carry idle");
             } else if (this.gunModeActive()) {
-                this.human.playAnimation("rifle idle");
+                if (this.isScopeMode()) {
+                    this.human.playAnimation("gunplay");
+                } else {
+                    this.human.playAnimation("rifle idle");
+                }
             } else {
                 this.human.playAnimation("idle");
             }

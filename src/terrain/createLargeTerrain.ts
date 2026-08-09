@@ -107,11 +107,13 @@ export function sampleTerrainHeight(x: number, z: number): number {
 	if (distToPond <= 10) {
 		// Inside the water: smooth bowl dropping from -0.5m at the shore to -6m at the center.
 		const norm = distToPond / 10.0;
-		basin = -6.0 + 5.5 * (norm * norm * norm); // cubic dropoff for a nice deep center
+		const t = norm * norm * (3 - 2 * norm); // smoothstep
+		basin = -6.0 + 5.5 * t;
 	} else if (distToPond <= 13) {
 		// Shoreline: gently slope from the water's edge (-0.5m) up to the flat rim (0m).
 		const norm = (distToPond - 10) / 3.0;
-		basin = -0.5 * (1 - norm);
+		const t = norm * norm * (3 - 2 * norm); // smoothstep to perfectly blend the edge!
+		basin = -0.5 * (1 - t);
 	}
 	
 	return base + hill + basin;

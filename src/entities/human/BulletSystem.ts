@@ -15,8 +15,8 @@ export type BombTarget = {
 };
 
 type Bullet = {
-	mesh: THREE.Mesh;
-	glow: THREE.Mesh;
+	pos: THREE.Vector3;
+	quat: THREE.Quaternion;
 	vel: THREE.Vector3;
 	prev: THREE.Vector3;
 	life: number;
@@ -27,11 +27,7 @@ type Bullet = {
 	ownerId: string | null;
 };
 
-type FlashLight = {
-	light: THREE.PointLight;
-	life: number;
-	maxLife: number;
-};
+
 
 /**
  * Visual projectiles with muzzle flash / fire trail.
@@ -50,7 +46,6 @@ export class BulletSystem {
 	public getGroundY: ((x: number, z: number) => number) | null = null;
 
 	private bullets: Bullet[] = [];
-	private flashLights: FlashLight[] = [];
 	private uTime = uniform(0);
 
 	private static readonly SPEED = 120;
@@ -67,6 +62,10 @@ export class BulletSystem {
 
 	private bulletMat: MeshStandardNodeMaterial;
 	private glowMat: MeshBasicNodeMaterial;
+
+	private maxBullets = 150;
+	private bulletMesh: THREE.InstancedMesh;
+	private glowMesh: THREE.InstancedMesh;
 
 	private flashMesh: THREE.InstancedMesh;
 	private flashStartTimes: Float32Array;
@@ -110,11 +109,32 @@ export class BulletSystem {
 		const timeMs = this.uTime.mul(1000.0) as any;
 		this.glowMat.opacityNode = add(0.45, mul(sin(mul(timeMs, 0.04)), 0.15));
 
-		// Flashes InstancedMesh
+		// Bullet & Glow InstancedMeshes
+		this.bulletMesh = new THREE.InstancedMesh(this.bulletGeo, this.bulletMat, this.maxBullets);
+		this.bulletMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+		this.bulletMesh.frustumCulled = false;
+		this.bulletMesh.count = 0;
+		this.group.add(this.bulletMesh);
+
+		this.glowMesh = new THREE.InstancedMesh(this.glowGeo, this.glowMat, this.maxBullets);
+		this.glowMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+		this.glowMesh.frustumCulled = false;
+		this.glowMesh.count = 0;
+		this.glowMesh.visible = false; // user requested to hide the bullet light
+		this.group.add(this.glowMesh);
+
+		// Bullet & Glow InstancedMeshes
 		this.flashStartTimes = new Float32Array(this.maxFlashes).fill(-10000);
 		const flashStartTimeAttr = new THREE.InstancedBufferAttribute(this.flashStartTimes, 1);
 		flashStartTimeAttr.setUsage(THREE.DynamicDrawUsage);
 		this.flashGeo.setAttribute('aStartTime', flashStartTimeAttr);
+
+		const flashPositions = new Float32Array(this.maxFlashes * 3);
+		for(let i = 0; i < this.maxFlashes; i++) flashPositions[i*3 + 1] = -1000;
+		const flashPosAttr = new THREE.InstancedBufferAttribute(flashPositions, 3);
+		flashPosAttr.setUsage(THREE.DynamicDrawUsage);
+		this.flashGeo.setAttribute('aCenterPos', flashPosAttr);
+
 		const flashMat = new MeshBasicNodeMaterial({
 			transparent: true,
 			depthWrite: false,
@@ -124,7 +144,9 @@ export class BulletSystem {
 		const rawLifeFlash = this.uTime.sub(aStartTimeFlash as any) as any;
 		const flashT = max(0.0, rawLifeFlash.div(0.06).clamp(0.0, 1.0)); // 0 to 1
 		const flashScale = float(0.35).add(float(1.0).sub(flashT).mul(0.5));
-		flashMat.positionNode = positionLocal.mul(flashScale).mul(0.55);
+		
+		const aCenterPosFlash = attribute('aCenterPos', 'vec3');
+		flashMat.positionNode = aCenterPosFlash.add(positionLocal.mul(flashScale).mul(0.55));
 		flashMat.opacityNode = float(1.0).sub(flashT);
 		flashMat.colorNode = Fn(() => {
 			rawLifeFlash.greaterThan(0.06).or(rawLifeFlash.lessThan(0.0)).discard();
@@ -132,11 +154,12 @@ export class BulletSystem {
 		})();
 
 		this.flashMesh = new THREE.InstancedMesh(this.flashGeo, flashMat, this.maxFlashes);
-		this.flashMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
 		this.flashMesh.count = this.maxFlashes;
 		this.flashMesh.frustumCulled = false;
+		
+		const identity = new THREE.Matrix4();
 		for (let i = 0; i < this.maxFlashes; i++) {
-			this.flashMesh.setMatrixAt(i, new THREE.Matrix4().makeScale(0, 0, 0));
+			this.flashMesh.setMatrixAt(i, identity);
 		}
 		this.group.add(this.flashMesh);
 
@@ -145,6 +168,13 @@ export class BulletSystem {
 		const impactStartTimeAttr = new THREE.InstancedBufferAttribute(this.impactStartTimes, 1);
 		impactStartTimeAttr.setUsage(THREE.DynamicDrawUsage);
 		this.impactGeo.setAttribute('aStartTime', impactStartTimeAttr);
+
+		const impactPositions = new Float32Array(this.maxImpacts * 3);
+		for(let i = 0; i < this.maxImpacts; i++) impactPositions[i*3 + 1] = -1000;
+		const impactPosAttr = new THREE.InstancedBufferAttribute(impactPositions, 3);
+		impactPosAttr.setUsage(THREE.DynamicDrawUsage);
+		this.impactGeo.setAttribute('aCenterPos', impactPosAttr);
+
 		const impactMat = new MeshBasicNodeMaterial({
 			transparent: true,
 			depthWrite: false,
@@ -154,7 +184,9 @@ export class BulletSystem {
 		const rawLifeImpact = this.uTime.sub(aStartTimeImpact as any) as any;
 		const impactU = rawLifeImpact.div(0.18).clamp(0.0, 1.0); // 0 to 1
 		const impactScale = float(0.35).add(impactU.mul(1.1));
-		impactMat.positionNode = positionLocal.mul(impactScale).mul(0.4);
+		
+		const aCenterPosImpact = attribute('aCenterPos', 'vec3');
+		impactMat.positionNode = aCenterPosImpact.add(positionLocal.mul(impactScale).mul(0.4));
 		impactMat.opacityNode = float(1.0).sub(impactU);
 		impactMat.colorNode = Fn(() => {
 			rawLifeImpact.greaterThan(0.18).or(rawLifeImpact.lessThan(0.0)).discard();
@@ -162,11 +194,11 @@ export class BulletSystem {
 		})();
 
 		this.impactMesh = new THREE.InstancedMesh(this.impactGeo, impactMat, this.maxImpacts);
-		this.impactMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
 		this.impactMesh.count = this.maxImpacts;
 		this.impactMesh.frustumCulled = false;
+		
 		for (let i = 0; i < this.maxImpacts; i++) {
-			this.impactMesh.setMatrixAt(i, new THREE.Matrix4().makeScale(0, 0, 0));
+			this.impactMesh.setMatrixAt(i, identity);
 		}
 		this.group.add(this.impactMesh);
 	}
@@ -184,28 +216,22 @@ export class BulletSystem {
 
 		this.spawnMuzzleFlash(origin);
 
-		const mesh = new THREE.Mesh(this.bulletGeo, this.bulletMat);
-		mesh.castShadow = false;
-
-		const glow = new THREE.Mesh(this.glowGeo, this.glowMat);
-		mesh.add(glow);
-
 		this._quat.setFromUnitVectors(this._up, this._dir);
-		mesh.quaternion.copy(this._quat);
-		mesh.position.copy(origin).addScaledVector(this._dir, 0.55);
+		const pos = origin.clone().addScaledVector(this._dir, 0.55);
 
-		this.group.add(mesh);
-
-		this.bullets.push({
-			mesh,
-			glow,
-			vel: this._dir.clone().multiplyScalar(BulletSystem.SPEED),
-			prev: mesh.position.clone(),
-			life: BulletSystem.MAX_LIFE,
-			hitRadius: 0.08,
-			dealDamage,
-			ownerId,
-		});
+		// Prevent exceeding array size if we shoot continuously
+		if (this.bullets.length < this.maxBullets) {
+			this.bullets.push({
+				pos,
+				quat: this._quat.clone(),
+				vel: this._dir.clone().multiplyScalar(BulletSystem.SPEED),
+				prev: pos.clone(),
+				life: BulletSystem.MAX_LIFE,
+				hitRadius: 0.08,
+				dealDamage,
+				ownerId,
+			});
+		}
 	}
 
 	update(
@@ -215,78 +241,77 @@ export class BulletSystem {
 		vehicleTargets: { id: string; position: THREE.Vector3; radius: number }[] = []
 	) {
 		this.uTime.value += dt;
-		this.updateFlashes(dt);
 
 		for (let i = this.bullets.length - 1; i >= 0; i--) {
 			const b = this.bullets[i];
 			b.life -= dt;
-			b.prev.copy(b.mesh.position);
+			b.prev.copy(b.pos);
 
-			b.mesh.position.addScaledVector(b.vel, dt);
+			b.pos.addScaledVector(b.vel, dt);
 			this._dir.copy(b.vel).normalize();
-			b.mesh.quaternion.setFromUnitVectors(this._up, this._dir);
+			b.quat.setFromUnitVectors(this._up, this._dir);
 
 			let hitId: string | null = null;
 			let hitPart: "head" | "body" = "body";
 			let hitBombId: number | null = null;
 			let hitDist = Infinity;
-			const segLen = Math.max(b.prev.distanceTo(b.mesh.position), 1e-4);
+			const segLen = Math.max(b.prev.distanceTo(b.pos), 1e-4);
 
 			for (const t of targets) {
 				if (b.ownerId && t.id === b.ownerId) continue;
 
-				const dHead = this.segmentSphereHit(b.prev, b.mesh.position, t.head, BulletSystem.HEAD_RADIUS);
+				const dHead = this.segmentSphereHit(b.prev, b.pos, t.head, BulletSystem.HEAD_RADIUS);
 				if (dHead !== null && dHead < hitDist) {
 					hitDist = dHead;
 					hitId = t.id;
 					hitPart = "head";
 					hitBombId = null;
-					this._hitPoint.copy(b.prev).lerp(b.mesh.position, dHead / segLen);
+					this._hitPoint.copy(b.prev).lerp(b.pos, dHead / segLen);
 				}
 
-				const dSpine = this.segmentSphereHit(b.prev, b.mesh.position, t.spine, BulletSystem.BODY_RADIUS);
+				const dSpine = this.segmentSphereHit(b.prev, b.pos, t.spine, BulletSystem.BODY_RADIUS);
 				if (dSpine !== null && dSpine < hitDist) {
 					hitDist = dSpine;
 					hitId = t.id;
 					hitPart = "body";
 					hitBombId = null;
-					this._hitPoint.copy(b.prev).lerp(b.mesh.position, dSpine / segLen);
+					this._hitPoint.copy(b.prev).lerp(b.pos, dSpine / segLen);
 				}
 
 				this._torso.set(t.position.x, t.position.y + 1.05, t.position.z);
-				const dTorso = this.segmentSphereHit(b.prev, b.mesh.position, this._torso, BulletSystem.TORSO_RADIUS);
+				const dTorso = this.segmentSphereHit(b.prev, b.pos, this._torso, BulletSystem.TORSO_RADIUS);
 				if (dTorso !== null && dTorso < hitDist) {
 					hitDist = dTorso;
 					hitId = t.id;
 					hitPart = "body";
 					hitBombId = null;
-					this._hitPoint.copy(b.prev).lerp(b.mesh.position, dTorso / segLen);
+					this._hitPoint.copy(b.prev).lerp(b.pos, dTorso / segLen);
 				}
 			}
 
 			for (const bomb of bombs) {
-				const dBomb = this.segmentSphereHit(b.prev, b.mesh.position, bomb.position, BulletSystem.BOMB_RADIUS);
+				const dBomb = this.segmentSphereHit(b.prev, b.pos, bomb.position, BulletSystem.BOMB_RADIUS);
 				if (dBomb !== null && dBomb < hitDist) {
 					hitDist = dBomb;
 					hitBombId = bomb.id;
 					hitId = null;
-					this._hitPoint.copy(b.prev).lerp(b.mesh.position, dBomb / segLen);
+					this._hitPoint.copy(b.prev).lerp(b.pos, dBomb / segLen);
 				}
 			}
 
 			for (const v of vehicleTargets) {
-				const d = this.segmentSphereHit(b.prev, b.mesh.position, v.position, v.radius);
+				const d = this.segmentSphereHit(b.prev, b.pos, v.position, v.radius);
 				if (d !== null && d < hitDist) {
 					hitDist = d;
 					hitId = v.id;
 					hitPart = "body";
 					hitBombId = null;
-					this._hitPoint.copy(b.prev).lerp(b.mesh.position, d / segLen);
+					this._hitPoint.copy(b.prev).lerp(b.pos, d / segLen);
 				}
 			}
 
 			if (hitBombId !== null) {
-				b.mesh.position.copy(this._hitPoint);
+				b.pos.copy(this._hitPoint);
 				this.spawnImpact(this._hitPoint);
 				if (b.dealDamage) this.onBombHit?.(hitBombId, this._hitPoint);
 				this.disposeBullet(i);
@@ -294,7 +319,7 @@ export class BulletSystem {
 			}
 
 			if (hitId) {
-				b.mesh.position.copy(this._hitPoint);
+				b.pos.copy(this._hitPoint);
 				this.spawnImpact(this._hitPoint);
 				if (b.dealDamage) this.onHit?.(hitId, this._hitPoint, hitPart);
 				this.disposeBullet(i);
@@ -302,14 +327,14 @@ export class BulletSystem {
 			}
 
 			if (this.getGroundY) {
-				const gy = this.getGroundY(b.mesh.position.x, b.mesh.position.z);
+				const gy = this.getGroundY(b.pos.x, b.pos.z);
 				const prevGy = this.getGroundY(b.prev.x, b.prev.z);
-				const crossed = b.prev.y > prevGy + 0.08 && b.mesh.position.y <= gy + 0.08;
-				if (crossed || b.mesh.position.y <= gy + 0.08) {
-					const t = b.prev.y === b.mesh.position.y ? 1 : THREE.MathUtils.clamp((b.prev.y - (prevGy + 0.05)) / (b.prev.y - b.mesh.position.y), 0, 1);
-					this._hitPoint.copy(b.prev).lerp(b.mesh.position, t);
+				const crossed = b.prev.y > prevGy + 0.08 && b.pos.y <= gy + 0.08;
+				if (crossed || b.pos.y <= gy + 0.08) {
+					const t = b.prev.y === b.pos.y ? 1 : THREE.MathUtils.clamp((b.prev.y - (prevGy + 0.05)) / (b.prev.y - b.pos.y), 0, 1);
+					this._hitPoint.copy(b.prev).lerp(b.pos, t);
 					this._hitPoint.y = gy + 0.05;
-					b.mesh.position.copy(this._hitPoint);
+					b.pos.copy(this._hitPoint);
 					this.spawnImpact(this._hitPoint);
 					this.disposeBullet(i);
 					continue;
@@ -320,11 +345,25 @@ export class BulletSystem {
 				this.disposeBullet(i);
 			}
 		}
+
+		// Sync alive bullets to InstancedMesh
+		this.bulletMesh.count = this.bullets.length;
+		this.glowMesh.count = this.bullets.length;
+		for (let i = 0; i < this.bullets.length; i++) {
+			const b = this.bullets[i];
+			this.dummy.position.copy(b.pos);
+			this.dummy.quaternion.copy(b.quat);
+			this.dummy.scale.setScalar(1);
+			this.dummy.updateMatrix();
+			this.bulletMesh.setMatrixAt(i, this.dummy.matrix);
+			this.glowMesh.setMatrixAt(i, this.dummy.matrix);
+		}
+		this.bulletMesh.instanceMatrix.needsUpdate = true;
+		this.glowMesh.instanceMatrix.needsUpdate = true;
 	}
 
 	dispose() {
-		while (this.bullets.length) this.disposeBullet(0);
-		while (this.flashLights.length) this.disposeFlashLight(0);
+		this.bullets.length = 0;
 		
 		this.bulletGeo.dispose();
 		this.glowGeo.dispose();
@@ -335,6 +374,8 @@ export class BulletSystem {
 		
 		(this.flashMesh.material as THREE.Material).dispose();
 		(this.impactMesh.material as THREE.Material).dispose();
+		(this.bulletMesh.material as THREE.Material).dispose();
+		(this.glowMesh.material as THREE.Material).dispose();
 	}
 
 	private segmentSphereHit(
@@ -359,21 +400,12 @@ export class BulletSystem {
 	}
 
 	private spawnMuzzleFlash(origin: THREE.Vector3) {
-		const light = new THREE.PointLight(0xffaa33, 4.5, 6, 2);
-		light.position.copy(origin);
-		this.group.add(light);
-		this.flashLights.push({ light, life: 0.06, maxLife: 0.06 });
-
 		const idx = this.flashIdx;
 		this.flashIdx = (this.flashIdx + 1) % this.maxFlashes;
 
-		this.dummy.position.copy(origin);
-		this.dummy.rotation.set(0, 0, 0); // Sprite conceptually, rotation doesn't matter much for a sphere
-		this.dummy.scale.setScalar(1);
-		this.dummy.updateMatrix();
-
-		this.flashMesh.setMatrixAt(idx, this.dummy.matrix);
-		this.flashMesh.instanceMatrix.needsUpdate = true;
+		const posAttr = this.flashMesh.geometry.getAttribute('aCenterPos') as THREE.InstancedBufferAttribute;
+		posAttr.setXYZ(idx, origin.x, origin.y, origin.z);
+		posAttr.needsUpdate = true;
 
 		this.flashStartTimes[idx] = this.uTime.value;
 		const attr = this.flashMesh.geometry.getAttribute('aStartTime') as THREE.InstancedBufferAttribute;
@@ -384,38 +416,16 @@ export class BulletSystem {
 		const idx = this.impactIdx;
 		this.impactIdx = (this.impactIdx + 1) % this.maxImpacts;
 
-		this.dummy.position.copy(point);
-		this.dummy.rotation.set(0, 0, 0);
-		this.dummy.scale.setScalar(1);
-		this.dummy.updateMatrix();
-
-		this.impactMesh.setMatrixAt(idx, this.dummy.matrix);
-		this.impactMesh.instanceMatrix.needsUpdate = true;
+		const posAttr = this.impactMesh.geometry.getAttribute('aCenterPos') as THREE.InstancedBufferAttribute;
+		posAttr.setXYZ(idx, point.x, point.y, point.z);
+		posAttr.needsUpdate = true;
 
 		this.impactStartTimes[idx] = this.uTime.value;
 		const attr = this.impactMesh.geometry.getAttribute('aStartTime') as THREE.InstancedBufferAttribute;
 		attr.needsUpdate = true;
 	}
 
-	private updateFlashes(dt: number) {
-		for (let i = this.flashLights.length - 1; i >= 0; i--) {
-			const f = this.flashLights[i];
-			f.life -= dt;
-			const t = Math.max(0, f.life / f.maxLife);
-			f.light.intensity = 4.5 * t;
-			if (f.life <= 0) this.disposeFlashLight(i);
-		}
-	}
-
 	private disposeBullet(index: number) {
-		const b = this.bullets[index];
-		this.group.remove(b.mesh);
 		this.bullets.splice(index, 1);
-	}
-
-	private disposeFlashLight(index: number) {
-		const f = this.flashLights[index];
-		this.group.remove(f.light);
-		this.flashLights.splice(index, 1);
 	}
 }

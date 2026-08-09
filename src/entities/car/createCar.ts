@@ -1,11 +1,14 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { DRACOLoader } from "three/examples/jsm/loaders/DRACOLoader.js";
 import RAPIER from "@dimforge/rapier3d-compat";
 import type { DynamicRayCastVehicleController } from "@dimforge/rapier3d-compat";
 import { getWorldTerrainY } from "../../terrain/islandHeight";
 import { getWorld } from "../../physics/world";
 import { CAR_CONFIG } from "./carConfig";
+import { HUMMER_CONFIG } from "./hummerConfig";
 import { loadKenneySuvVisual } from "./kenneyCarVisual";
+import { loadHummerVisual } from "./hummerCarVisual";
 import { computeGrappleMountLocal } from "./vehicleGrapple";
 import { createFpvInterior } from "./createFpvInterior";
 
@@ -28,12 +31,19 @@ export type CarEntity = {
 	hasExploded: boolean;
 	leftExhaust: THREE.Object3D;
 	rightExhaust: THREE.Object3D;
+	config: typeof CAR_CONFIG;
 };
 
+export type VehicleId = "kenney_suv" | "hummer";
+
 export async function createCar(
-	manager?: THREE.LoadingManager
+	manager?: THREE.LoadingManager,
+	vehicleId: VehicleId = "kenney_suv"
 ): Promise<CarEntity> {
 	const world = getWorld();
+	
+	const activeConfig = vehicleId === "hummer" ? HUMMER_CONFIG : CAR_CONFIG;
+	
 	const {
 		driveFrontAxleIndices,
 		driveRearAxleIndices,
@@ -47,37 +57,70 @@ export async function createCar(
 		angularDamping,
 		mass,
 		suspension,
-	} = CAR_CONFIG;
+		exhaustMeshMounts,
+		nitroMounts,
+	} = activeConfig as any;
 
-	const layout = await loadKenneySuvVisual(colliderYOffset, manager);
-	const { chassisSize, physicsWheelPositions, wheelRadius } = layout;
+	const layout = activeConfig === HUMMER_CONFIG 
+		? await loadHummerVisual(colliderYOffset, manager)
+		: await loadKenneySuvVisual(colliderYOffset, manager);
+
+	// The user expects the "Elevation" slider to literally lift the car body higher relative to the wheels.
+	// Since physics suspension can sometimes compress down and hide the lift, we guarantee 
+	// the visual lift by physically raising the visual chassis mesh by the excess suspension length.
+	const defaultRestLength = vehicleId === "hummer" ? 0.65 : 0.55;
+	const visualLiftOffset = Math.max(0, activeConfig.suspension.restLength - defaultRestLength);
+	
+	// Shift the visual chassis group (which is the first child of the body wrapper) UP by the lift offset.
+	// This separates it from the wheels visually without changing the physics center of gravity or colliders!
+	if (layout.body.children.length > 0) {
+		layout.body.children[0].position.y += visualLiftOffset;
+	}
+		
+	// Determine how much the user scaled the tire size (wheelWidth) vs the default
+	const defaultWheelWidth = activeConfig === HUMMER_CONFIG ? 0.85 : 0.7;
+	const wheelScaleMultiplier = activeConfig.wheelWidth / defaultWheelWidth;
+	const dynamicWheelRadius = layout.wheelRadius * wheelScaleMultiplier;
+
+	const { chassisSize, physicsWheelPositions } = layout;
 
 	const fpvInterior = createFpvInterior();
 	fpvInterior.visible = false;
 	layout.body.add(fpvInterior);
 
+	// The logical mounts for the nitro flames
+	const nl = nitroMounts?.left || { x: -0.6, y: -0.65, z: -2.15 };
+	const nr = nitroMounts?.right || { x: 0.6, y: -0.65, z: -2.15 };
+
 	const leftExhaust = new THREE.Object3D();
-	leftExhaust.position.set(-0.6, -0.65, -2.15);
+	leftExhaust.position.set(nl.x, nl.y + visualLiftOffset, nl.z);
 	layout.body.add(leftExhaust);
 
 	const rightExhaust = new THREE.Object3D();
-	rightExhaust.position.set(0.6, -0.65, -2.15);
+	rightExhaust.position.set(nr.x, nr.y + visualLiftOffset, nr.z);
 	layout.body.add(rightExhaust);
 
 
 	const gltfLoader = new GLTFLoader(manager);
+	const dracoLoader = new DRACOLoader();
+	dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.7/');
+	gltfLoader.setDRACOLoader(dracoLoader);
 	try {
 		const blasterGltf = await gltfLoader.loadAsync("/blaster.glb");
 		const blasterMesh = blasterGltf.scene;
 
+		// The visual meshes for the exhaust tips
+		const el = exhaustMeshMounts?.left || { x: -0.6, y: -0.65, z: -2.15 };
+		const er = exhaustMeshMounts?.right || { x: 0.6, y: -0.65, z: -2.15 };
+
 		const leftBlaster = blasterMesh.clone();
-		leftBlaster.position.set(-0.6, -0.65, -2.15);
+		leftBlaster.position.set(el.x, el.y + visualLiftOffset, el.z);
 		leftBlaster.rotation.y = Math.PI; // point backwards
 		leftBlaster.scale.setScalar(0.4);
 		layout.body.add(leftBlaster);
 
 		const rightBlaster = blasterMesh.clone();
-		rightBlaster.position.set(0.6, -0.65, -2.15);
+		rightBlaster.position.set(er.x, er.y + visualLiftOffset, er.z);
 		rightBlaster.rotation.y = Math.PI;
 		rightBlaster.scale.setScalar(0.4);
 		layout.body.add(rightBlaster);
@@ -85,7 +128,7 @@ export async function createCar(
 		console.error("Failed to load blaster.glb", e);
 	}
 
-	const spawnY = getWorldTerrainY(spawn.x, spawn.z) + spawn.clearance;
+	const spawnY = getWorldTerrainY(spawn.x, spawn.z) + 5.0;
 
 	const hx = Math.max(0.1, (chassisSize.x / 2) - colliderRoundness);
 	const hy = chassisSize.y / 2;
@@ -131,15 +174,26 @@ export async function createCar(
 	const suspensionDirection = { x: 0, y: -1, z: 0 };
 	const axleDirection = { x: 1, y: 0, z: 0 };
 
-	for (const [index, position] of physicsWheelPositions.entries()) {
+	for (let i = 0; i < physicsWheelPositions.length; i++) {
+		const rawPos = physicsWheelPositions[i] as any;
+		const px = Array.isArray(rawPos) ? rawPos[0] : rawPos.x;
+		const py = Array.isArray(rawPos) ? rawPos[1] : rawPos.y;
+		const pz = Array.isArray(rawPos) ? rawPos[2] : rawPos.z;
+		
+		if (isNaN(px) || isNaN(py) || isNaN(pz) || isNaN(dynamicWheelRadius) || isNaN(suspension.restLength)) {
+			console.error("NaN detected in Rapier params", {rawPos, dynamicWheelRadius, suspension});
+			throw new Error("NaN detected in Rapier params");
+		}
+		
 		vehicle.addWheel(
-			{ x: position[0], y: position[1], z: position[2] },
+			{ x: px, y: py, z: pz },
 			suspensionDirection,
 			axleDirection,
 			suspension.restLength,
-			wheelRadius
+			dynamicWheelRadius
 		);
 
+		const index = i;
 		vehicle.setWheelSuspensionStiffness(index, suspension.stiffness);
 		vehicle.setWheelMaxSuspensionTravel(index, suspension.maxTravel);
 		vehicle.setWheelSuspensionCompression(index, suspension.compression);
@@ -154,9 +208,18 @@ export async function createCar(
 		world.step();
 	}
 
-	const wheels = physicsWheelPositions.map((pos) => {
-		const wheel = layout.wheelTemplate.clone(true);
-		if (pos[0] < 0) {
+	const wheels = physicsWheelPositions.map((pos, i) => {
+		let wheel: THREE.Group;
+		if (activeConfig === HUMMER_CONFIG) {
+			wheel = (layout as any).visualWheels[i];
+		} else {
+			wheel = (layout as any).wheelTemplate.clone(true);
+		}
+		
+		// Apply dynamic tire size scaling visually
+		wheel.scale.set(wheelScaleMultiplier, wheelScaleMultiplier, wheelScaleMultiplier);
+		
+		if (Array.isArray(pos) ? pos[0] < 0 : pos.x < 0) {
 			wheel.scale.x = -Math.abs(wheel.scale.x);
 		}
 		wheel.traverse((child) => {
@@ -174,6 +237,17 @@ export async function createCar(
 		return wheel;
 	});
 
+	let gmLocal: THREE.Vector3;
+	if (activeConfig.grappleMount) {
+		gmLocal = new THREE.Vector3(
+			activeConfig.grappleMount.x,
+			activeConfig.grappleMount.y + visualLiftOffset,
+			activeConfig.grappleMount.z
+		);
+	} else {
+		gmLocal = computeGrappleMountLocal(chassisSize, activeConfig, layout.body);
+	}
+
 	return {
 		body,
 		collider,
@@ -183,7 +257,7 @@ export async function createCar(
 		driveFrontAxleIndices,
 		driveRearAxleIndices,
 		steeringWheelIndices,
-		grappleMountLocal: computeGrappleMountLocal(chassisSize, layout.body),
+		grappleMountLocal: gmLocal,
 		fpvInterior,
 		health: 100,
 		maxHealth: 100,
@@ -192,5 +266,6 @@ export async function createCar(
 		hasExploded: false,
 		leftExhaust,
 		rightExhaust,
+		config: activeConfig,
 	};
 }

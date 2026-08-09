@@ -40,20 +40,20 @@ export class ExplosionSystem {
 		startTimeAttr.setUsage(THREE.DynamicDrawUsage);
 		geometry.setAttribute('aStartTime', startTimeAttr);
 
+		const positions = new Float32Array(this.maxInstances * 3);
+		// Initialize them far away to prevent flashes at origin
+		for(let i = 0; i < this.maxInstances; i++) {
+			positions[i*3 + 1] = -1000;
+		}
+		const centerPosAttr = new THREE.InstancedBufferAttribute(positions, 3);
+		centerPosAttr.setUsage(THREE.DynamicDrawUsage);
+		geometry.setAttribute('aCenterPos', centerPosAttr);
+
 		const material = this.createMaterial();
 
 		this.mesh = new THREE.InstancedMesh(geometry, material, this.maxInstances);
-		this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
 		this.mesh.count = this.maxInstances;
 		this.mesh.frustumCulled = false;
-		
-		// Initialize matrices to zero/hidden just in case
-		this.dummy.scale.setScalar(0);
-		for (let i = 0; i < this.maxInstances; i++) {
-			this.dummy.updateMatrix();
-			this.mesh.setMatrixAt(i, this.dummy.matrix);
-		}
-		this.mesh.instanceMatrix.needsUpdate = true;
 	}
 
 	/**
@@ -93,7 +93,9 @@ export class ExplosionSystem {
 			const finalScale = rawLife.greaterThan(1.0).or(rawLife.lessThan(0.0))
 				.select(float(0.0), scale);
 
-			return displaced.mul(finalScale);
+			// Instead of instanceMatrix, add the custom aCenterPos
+			const aCenterPos = attribute('aCenterPos', 'vec3');
+			return aCenterPos.add(displaced.mul(finalScale));
 		})();
 
 		material.colorNode = Fn(() => {
@@ -132,17 +134,13 @@ export class ExplosionSystem {
 		const idx = this.currentIndex;
 		this.currentIndex = (this.currentIndex + 1) % this.maxInstances;
 
-		this.dummy.position.copy(position);
-		this.dummy.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
-		this.dummy.scale.setScalar(1);
-		this.dummy.updateMatrix();
-
-		this.mesh.setMatrixAt(idx, this.dummy.matrix);
-		this.mesh.instanceMatrix.needsUpdate = true;
+		const posAttr = this.mesh.geometry.getAttribute('aCenterPos') as THREE.InstancedBufferAttribute;
+		posAttr.setXYZ(idx, position.x, position.y, position.z);
+		posAttr.needsUpdate = true;
 
 		this.startTimes[idx] = this.uTime.value;
-		const attr = this.mesh.geometry.getAttribute('aStartTime') as THREE.InstancedBufferAttribute;
-		attr.needsUpdate = true;
+		const timeAttr = this.mesh.geometry.getAttribute('aStartTime') as THREE.InstancedBufferAttribute;
+		timeAttr.needsUpdate = true;
 	}
 
 	update(dt: number) {

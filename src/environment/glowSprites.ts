@@ -104,7 +104,7 @@ export function createGlowSprites(options: {
 		transparent: true,
 		opacity: 0,
 		depthWrite: false,
-		depthTest: false,
+		depthTest: true,
 		blending: THREE.AdditiveBlending,
 	});
 	const offsetNode: any = attribute("aOffset", "vec3");

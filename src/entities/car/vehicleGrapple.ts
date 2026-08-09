@@ -38,7 +38,7 @@ export class VehicleGrapple {
 	private savedAngularDamping: number | null = null;
 
 	constructor(private car: CarEntity) {
-		const { grapple } = CAR_CONFIG;
+		const { grapple } = car.config;
 
 		this.group = new THREE.Group();
 		this.group.name = "vehicle-grapple";
@@ -160,7 +160,7 @@ export class VehicleGrapple {
 	private tryAttach() {
 		if (this.attached) return;
 
-		const { grapple } = CAR_CONFIG;
+		const { grapple } = this.car.config;
 		this.getMountWorld(_mountWorld);
 
 		_forward.copy(getCarForward3D(this.car.body));
@@ -289,7 +289,7 @@ export class VehicleGrapple {
 	 * Strong enough for any hill: speed is forced, not spring-pulled.
 	 */
 	private applyReelVelocity(dt: number) {
-		const { grapple } = CAR_CONFIG;
+		const { grapple } = this.car.config;
 		this.getMountWorld(_mountWorld);
 
 		_pull.copy(this.anchor).sub(_mountWorld);
@@ -381,7 +381,7 @@ export class VehicleGrapple {
 			vel.y - _pull.y * along,
 			vel.z - _pull.z * along
 		);
-		_lateral.multiplyScalar(Math.exp(-CAR_CONFIG.grapple.lateralDamp * dt));
+		_lateral.multiplyScalar(Math.exp(-this.car.config.grapple.lateralDamp * dt));
 
 		this.car.body.setLinvel(
 			{
@@ -398,7 +398,7 @@ export class VehicleGrapple {
 		if (this.savedAngularDamping != null) return;
 		this.savedAngularDamping = this.car.body.angularDamping();
 		this.car.body.setAngularDamping(
-			this.savedAngularDamping + CAR_CONFIG.grapple.angularDampBoost
+			this.savedAngularDamping + this.car.config.grapple.angularDampBoost
 		);
 	}
 
@@ -456,7 +456,7 @@ export class VehicleGrapple {
 	}
 
 	private buildWinch(): THREE.Group {
-		const { grapple } = CAR_CONFIG;
+		const { grapple } = this.car.config;
 		const root = new THREE.Group();
 		root.name = "grapple-winch";
 
@@ -504,12 +504,13 @@ export class VehicleGrapple {
 /** Bumper / number-plate mount — prefers mesh detection, falls back to chassis size. */
 export function computeGrappleMountLocal(
 	chassisSize: { x: number; y: number; z: number },
+	config: typeof CAR_CONFIG,
 	carRoot?: THREE.Object3D
 ): THREE.Vector3 {
 	const detected = carRoot ? findFrontNumberPlateLocal(carRoot) : null;
 	if (detected) return detected;
 
-	const { grapple } = CAR_CONFIG;
+	const { grapple } = config;
 	return new THREE.Vector3(
 		0,
 		chassisSize.y * grapple.mountYFactor + grapple.mountYNudge,

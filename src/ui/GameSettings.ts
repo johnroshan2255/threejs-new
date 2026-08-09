@@ -1,7 +1,19 @@
 export type QualityLevel = "Low" | "Medium" | "High";
 export type GameWorldId = string;
+export type VehicleId = "none" | "kenney_suv" | "hummer";
 
-type DayPeriod = "morning" | "noon" | "evening" | "sunset" | "night";
+type DayPeriod = "morning" | "noon" | "evening" | /* "sunset" | */ "night";
+
+/** Describes a single tunable car parameter shown in the UI. */
+export type CarTuningDef = {
+	key: string;       // dot-path into the config, e.g. "suspension.restLength"
+	label: string;     // human-readable label
+	min: number;
+	max: number;
+	step: number;
+	defaultValue: number;
+	currentValue: number;
+};
 
 type GameSettingsOptions = {
 	shadowQuality: QualityLevel;
@@ -15,6 +27,7 @@ type GameSettingsOptions = {
 	grassDensity: number;
 	grassCullDistance: number;
 	carPower: number;
+	vehicle: VehicleId;
 	world: GameWorldId;
 	worldOptions?: Record<string, string>;
 	onShadowQualityChange: (quality: QualityLevel) => void;
@@ -28,7 +41,18 @@ type GameSettingsOptions = {
 	onGrassDensityChange: (percent: number) => void;
 	onGrassCullDistanceChange: (meters: number) => void;
 	onCarPowerChange: (power: number) => void;
+	onVehicleChange: (vehicle: VehicleId) => void;
+	onGodRayIntensityChange: (intensity: number) => void;
+	onSunGlowMultiplierChange: (multiplier: number) => void;
 	onWorldChange: (world: GameWorldId) => Promise<void>;
+	/** Called when the user adjusts a per-vehicle tuning slider. */
+	onCarTuningChange?: (vehicleId: VehicleId, key: string, value: number) => void;
+	/** Called when the user clicks "Revert to Defaults" for the current vehicle. */
+	onCarTuningRevert?: (vehicleId: VehicleId) => void;
+	/** Called when the user clicks "Save & Apply" for the current vehicle. */
+	onCarTuningSave?: (vehicleId: VehicleId) => void;
+	/** Returns the tuning definitions for a given vehicle (current + default values). */
+	getCarTuningDefs?: (vehicleId: VehicleId) => CarTuningDef[];
 };
 
 export class GameSettings {
@@ -49,11 +73,17 @@ export class GameSettings {
 			grassDensity: options.grassDensity,
 			grassCullDistance: options.grassCullDistance,
 			carPower: options.carPower,
+			godRayIntensity: 0.1,
+			sunGlowMultiplier: 0.1,
+			vehicle: options.vehicle,
 			world: options.world,
 		};
 
 		this.overlay = this.buildDOM();
 		document.body.appendChild(this.overlay);
+
+		// Populate per-vehicle tuning sliders after overlay is attached
+		this.populateTuningSliders(this.state.vehicle);
 
 		this.bindToggle();
 	}
@@ -186,6 +216,7 @@ export class GameSettings {
 						<button data-target="settings-graphics" class="active">GRAPHICS</button>
 						<button data-target="settings-daynight">DAY / NIGHT</button>
 						<button data-target="settings-grass">GRASS</button>
+						<button data-target="settings-atmospherics">ATMOSPHERE</button>
 						<button data-target="settings-car">CAR</button>
 						<button data-target="settings-world">WORLD</button>
 						<button data-target="settings-system">SYSTEM</button>
@@ -243,7 +274,7 @@ export class GameSettings {
 									<option value="morning">Morning</option>
 									<option value="noon">Noon</option>
 									<option value="evening">Evening</option>
-									<option value="sunset">Sunset</option>
+									<!-- <option value="sunset">Sunset</option> -->
 									<option value="night">Night</option>
 								</select>
 							</div>
@@ -285,15 +316,43 @@ export class GameSettings {
 							</div>
 						</div>
 
+						<!-- ATMOSPHERE -->
+						<div id="settings-atmospherics" class="settings-pane">
+							<h3>ATMOSPHERICS</h3>
+							<div class="setting-row">
+								<label for="set-godrays">God Rays Weight</label>
+								<div class="slider-container">
+									<input type="range" id="set-godrays" min="0" max="3" step="0.1" />
+									<span class="slider-value">0.1</span>
+								</div>
+							</div>
+							<div class="setting-row">
+								<label for="set-sunglow">Sun Glow Amount</label>
+								<div class="slider-container">
+									<input type="range" id="set-sunglow" min="0" max="3" step="0.1" />
+									<span class="slider-value">0.1</span>
+								</div>
+							</div>
+						</div>
+
 						<!-- CAR -->
 						<div id="settings-car" class="settings-pane">
 							<h3>VEHICLE SETTINGS</h3>
 							<div class="setting-row">
-								<label for="set-car-power">Engine Power</label>
-								<div class="slider-container">
-									<input type="range" id="set-car-power" min="100" max="1200" step="10" />
-									<span class="slider-value">400</span>
-								</div>
+								<label for="set-vehicle">Vehicle Type</label>
+								<select id="set-vehicle">
+									<option value="kenney_suv">Kenney SUV</option>
+									<option value="hummer">Hummer</option>
+								</select>
+							</div>
+							<hr style="border-color: rgba(255,255,255,0.1); margin: 12px 0;" />
+							<h4 id="car-tuning-title" style="margin:0 0 8px; font-size:13px; text-transform:uppercase; letter-spacing:1px; color:#aaa;">TUNING</h4>
+							<div id="car-tuning-sliders">
+								<!-- Dynamically populated per-vehicle tuning sliders -->
+							</div>
+							<div class="setting-row" style="margin-top: 12px; display: flex; gap: 8px;">
+								<button id="btn-save-car" style="flex:1; padding:10px; background:linear-gradient(135deg,#27ae60,#2ecc71); color:#fff; border:none; border-radius:6px; cursor:pointer; font-weight:bold; letter-spacing:1px; text-transform:uppercase; transition: opacity 0.2s;">Save & Apply</button>
+								<button id="btn-revert-car" style="flex:1; padding:10px; background:linear-gradient(135deg,#c0392b,#e74c3c); color:#fff; border:none; border-radius:6px; cursor:pointer; font-weight:bold; letter-spacing:1px; text-transform:uppercase; transition: opacity 0.2s;">Revert</button>
 							</div>
 						</div>
 
@@ -401,13 +460,51 @@ export class GameSettings {
 			this.options.onGrassCullDistanceChange(val);
 		});
 
-		const cPowInp = overlay.querySelector("#set-car-power") as HTMLInputElement;
-		cPowInp.value = this.state.carPower.toString();
-		cPowInp.nextElementSibling!.textContent = this.state.carPower.toString();
-		cPowInp.addEventListener("input", (e) => {
+		const vSel = overlay.querySelector("#set-vehicle") as HTMLSelectElement;
+		vSel.value = this.state.vehicle;
+		vSel.addEventListener("change", (e) => {
+			const val = (e.target as HTMLSelectElement).value as VehicleId;
+			this.state.vehicle = val;
+			this.options.onVehicleChange(val);
+			// Re-populate tuning sliders for the new vehicle
+			setTimeout(() => this.populateTuningSliders(val), 200);
+		});
+
+		// Save button
+		const saveBtn = overlay.querySelector("#btn-save-car") as HTMLButtonElement;
+		if (saveBtn) {
+			saveBtn.addEventListener("click", () => {
+				this.options.onCarTuningSave?.(this.state.vehicle);
+			});
+		}
+
+		// Revert button
+		const revertBtn = overlay.querySelector("#btn-revert-car") as HTMLButtonElement;
+		if (revertBtn) {
+			revertBtn.addEventListener("click", () => {
+				this.options.onCarTuningRevert?.(this.state.vehicle);
+				this.populateTuningSliders(this.state.vehicle);
+			});
+		}
+
+		const godRaysInp = overlay.querySelector("#set-godrays") as HTMLInputElement;
+		godRaysInp.value = this.state.godRayIntensity.toString();
+		godRaysInp.nextElementSibling!.textContent = this.state.godRayIntensity.toFixed(1);
+		godRaysInp.addEventListener("input", (e) => {
 			const val = parseFloat((e.target as HTMLInputElement).value);
-			cPowInp.nextElementSibling!.textContent = val.toString();
-			this.options.onCarPowerChange(val);
+			godRaysInp.nextElementSibling!.textContent = val.toFixed(1);
+			this.state.godRayIntensity = val;
+			this.options.onGodRayIntensityChange(val);
+		});
+
+		const sunGlowInp = overlay.querySelector("#set-sunglow") as HTMLInputElement;
+		sunGlowInp.value = this.state.sunGlowMultiplier.toString();
+		sunGlowInp.nextElementSibling!.textContent = this.state.sunGlowMultiplier.toFixed(1);
+		sunGlowInp.addEventListener("input", (e) => {
+			const val = parseFloat((e.target as HTMLInputElement).value);
+			sunGlowInp.nextElementSibling!.textContent = val.toFixed(1);
+			this.state.sunGlowMultiplier = val;
+			this.options.onSunGlowMultiplierChange(val);
 		});
 
 		this.worldSelect = overlay.querySelector("#set-world") as HTMLSelectElement;
@@ -428,5 +525,59 @@ export class GameSettings {
 		});
 
 		return overlay;
+	}
+
+	/** Dynamically populate the per-vehicle tuning sliders in the CAR pane. */
+	private populateTuningSliders(vehicleId: VehicleId): void {
+		const container = this.overlay.querySelector("#car-tuning-sliders") as HTMLDivElement;
+		if (!container) return;
+		container.innerHTML = "";
+
+		const defs = this.options.getCarTuningDefs?.(vehicleId);
+		if (!defs || defs.length === 0) {
+			container.innerHTML = `<p style="color:#888; font-size:12px; margin:4px 0;">No vehicle selected.</p>`;
+			return;
+		}
+
+		for (const def of defs) {
+			const row = document.createElement("div");
+			row.className = "setting-row";
+
+			const label = document.createElement("label");
+			label.textContent = def.label;
+			label.setAttribute("for", `tune-${def.key}`);
+
+			const sliderWrap = document.createElement("div");
+			sliderWrap.className = "slider-container";
+
+			const input = document.createElement("input");
+			input.type = "range";
+			input.id = `tune-${def.key}`;
+			input.min = def.min.toString();
+			input.max = def.max.toString();
+			input.step = def.step.toString();
+			input.value = def.currentValue.toString();
+
+			const valueSpan = document.createElement("span");
+			valueSpan.className = "slider-value";
+			valueSpan.textContent = def.currentValue.toFixed(def.step < 1 ? 2 : 0);
+
+			input.addEventListener("input", () => {
+				const val = parseFloat(input.value);
+				valueSpan.textContent = val.toFixed(def.step < 1 ? 2 : 0);
+				this.options.onCarTuningChange?.(vehicleId, def.key, val);
+			});
+
+			sliderWrap.appendChild(input);
+			sliderWrap.appendChild(valueSpan);
+			row.appendChild(label);
+			row.appendChild(sliderWrap);
+			container.appendChild(row);
+		}
+	}
+
+	/** Re-populate tuning sliders (e.g. after a vehicle switch completes). */
+	refreshTuningSliders(): void {
+		this.populateTuningSliders(this.state.vehicle);
 	}
 }
