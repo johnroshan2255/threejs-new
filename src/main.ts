@@ -108,7 +108,7 @@ import {
 	fogFollowsPlayer,
 	fogRadiusForWorld,
 } from "./environment/VolumetricFogPass";
-import { WebGPURenderer, PostProcessing } from "three/webgpu";
+import { WebGPURenderer, PostProcessing, MeshPhongNodeMaterial } from "three/webgpu";
 import {
 	pass,
 	blendScreen,
@@ -632,7 +632,11 @@ export class FluffyGrass {
 		this.scene.add(this.sunMesh);
 
 		this.grassMaterial = new GrassMaterial();
-		this.terrainMat = new THREE.MeshPhongMaterial({
+		// MeshPhongNodeMaterial, not MeshPhongMaterial: `applySnowToMaterial`
+		// works by assigning `colorNode`, which a stock material silently ignores
+		// — the snow tool whitened grass and foliage (real node materials) while
+		// the ground stayed green.
+		this.terrainMat = new MeshPhongNodeMaterial({
 			color: this.sceneProps.terrainColor,
 			shininess: 0,
 			flatShading: true,
@@ -5458,7 +5462,11 @@ export class FluffyGrass {
 	private async buildCustomWorld(def: WorldDefinition) {
 		this.disposeCustomWorld();
 		// Same green look as island until roads need vertex colors.
-		const mat = new THREE.MeshPhongMaterial({
+		// MeshPhongNodeMaterial, not MeshPhongMaterial: `applySnowToMaterial`
+		// works by assigning `colorNode`, which a stock material silently ignores
+		// — the snow tool whitened grass and foliage (real node materials) while
+		// the ground stayed green.
+		const mat = new MeshPhongNodeMaterial({
 			color: this.sceneProps.terrainColor,
 			shininess: 0,
 			flatShading: true,
@@ -6412,7 +6420,11 @@ export class FluffyGrass {
 		}
 		geometry.computeVertexNormals();
 
-		const material = new THREE.MeshPhongMaterial({
+		// MeshPhongNodeMaterial, not MeshPhongMaterial: `applySnowToMaterial`
+		// works by assigning `colorNode`, which a stock material silently ignores
+		// — the snow tool whitened grass and foliage (real node materials) while
+		// the ground stayed green.
+		const material = new MeshPhongNodeMaterial({
 			color: 0x799894, // Pale desaturated teal
 			shininess: 0,
 			flatShading: true,

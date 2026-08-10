@@ -1,5 +1,6 @@
 import * as THREE from "three";
 import { attribute, clamp, materialColor, mix, uniform } from "three/tsl";
+import { MeshPhongNodeMaterial } from "three/webgpu";
 import { buildCaveGeometry, geometryFromCaveMeshData } from "../../terrain/caveMesh";
 import type { CaveGeometryResult } from "../../terrain/caveMesh";
 import type { CaveMeshRequest } from "../../terrain/caveMeshCore";
@@ -19,7 +20,7 @@ export type CaveHandle = {
 	dispose: () => void;
 };
 
-let sharedRockMaterial: THREE.MeshPhongMaterial | null = null;
+let sharedRockMaterial: MeshPhongNodeMaterial | null = null;
 /**
  * Ground colour the mouth fades into. Lives outside the material so a world
  * switch can retint every existing cave without rebuilding shaders.
@@ -41,9 +42,11 @@ export function setCaveTerrainColor(color: THREE.ColorRepresentation) {
  * the grass as a hard brown ring — a real mouth has the ground cover thinning
  * into the rock instead.
  */
-function rockMaterial(): THREE.MeshPhongMaterial {
+function rockMaterial(): MeshPhongNodeMaterial {
 	if (!sharedRockMaterial) {
-		sharedRockMaterial = new THREE.MeshPhongMaterial({
+		// Node material: the mouth blend below is a `colorNode`, which a stock
+		// MeshPhongMaterial ignores outright.
+		sharedRockMaterial = new MeshPhongNodeMaterial({
 			color: 0x5d564e,
 			specular: 0x141210,
 			shininess: 6,

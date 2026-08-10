@@ -23,7 +23,7 @@ import {
 	Loop,
 	int,
 } from "three/tsl";
-import { StorageBufferAttribute, StorageInstancedBufferAttribute, IndirectStorageBufferAttribute } from "three/webgpu";
+import { StorageBufferAttribute, StorageInstancedBufferAttribute, IndirectStorageBufferAttribute, MeshStandardNodeMaterial } from "three/webgpu";
 
 const TREE_URL = "/models/tree/tree.glb";
 const FOLIAGE_ALPHA_URL = "/models/tree/foliage_alpha3.png";
@@ -164,7 +164,8 @@ export class TreeInstancedMesh {
 		
 		const template = await loadTreeTemplate(this.manager);
 		
-		const trunkMaterial = new THREE.MeshStandardMaterial({
+		// Node material so `applySnowToMaterial`'s `colorNode` actually applies.
+		const trunkMaterial = new MeshStandardNodeMaterial({
 			color: new THREE.Color("#3b2a1a"),
 			roughness: 0.92,
 			metalness: 0,

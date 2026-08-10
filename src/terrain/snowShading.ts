@@ -107,6 +107,19 @@ export function applySnowToMaterial(material: THREE.Material) {
 	if (m[SNOW_PATCH_FLAG]) return;
 	m[SNOW_PATCH_FLAG] = true;
 
+	// A stock material accepts `colorNode` as an ordinary property and then
+	// ignores it, so snow silently does nothing and the surface just never turns
+	// white. That is exactly how terrain, cave rock and tree trunks lost their
+	// snow: grass and foliage are node materials and kept working, which made it
+	// look like a snow-mask bug rather than a material-type one.
+	if (!m.isNodeMaterial) {
+		console.warn(
+			`[snow] ${material.type} "${material.name || "unnamed"}" is not a node ` +
+				"material; colorNode is ignored and it will never show snow. Construct " +
+				"it as the Mesh*NodeMaterial equivalent from 'three/webgpu'."
+		);
+	}
+
 	m.colorNode = mix(
 		stockAlbedoNode(m),
 		snowUniforms.uSnowColor,
