@@ -20,9 +20,19 @@ export class LoadingScreenController {
 		const message = document.getElementById("account-success-msg");
 
 		if (playButton) {
-			playButton.textContent = "Play";
+			// The button is a row of spans (caret / label / shortcut), so only the
+			// label is replaced — writing `textContent` would flatten the markup.
+			const label = playButton.querySelector<HTMLElement>("[data-label]");
+			if (label) label.textContent = "Play";
+			else playButton.textContent = "Play";
 			playButton.disabled = false;
 			playButton.classList.add("ready");
+
+			// The status strip starts pessimistic so it reads correctly during the
+			// load; flip it once the button is actually live.
+			const statusLabel = document.getElementById("status-label");
+			if (statusLabel) statusLabel.textContent = "Ready to drive";
+			document.getElementById("status-dot")?.classList.remove("is-off");
 			playButton.addEventListener("click", () => {
 				const docEl = document.documentElement as any;
 				const requestFullscreen = docEl.requestFullscreen || docEl.webkitRequestFullscreen || docEl.mozRequestFullScreen || docEl.msRequestFullscreen;

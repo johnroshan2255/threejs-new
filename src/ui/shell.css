@@ -1,0 +1,1467 @@
+/*
+ * Game shell — start screen, multiplayer panels and the settings overlay.
+ *
+ * Deliberately a separate sheet from `style.css`. That file is ~3k lines and
+ * owns the editor, the mobile controls and the in-game HUD; the shell is the
+ * part being restyled, so keeping it here means the redesign cannot regress any
+ * of that. Loaded *after* style.css so it wins on equal specificity.
+ *
+ * Only `.slider` collided with the old sheet, hence `.ui-slider` below. Every
+ * other class name here is new.
+ */
+
+/* ── tokens ─────────────────────────────────────────────── */
+:root {
+	--ink: #070908;
+	--chalk: #e7ede6;
+	--slate: #8b968c;
+	--slate-dim: #6b756d;
+	--lime: #a9ea5c;
+	--lime-dim: #5d8a2f;
+	--amber: #f0b429;
+	--danger: #d9614f;
+
+	/* Panel fills. Lower the alpha to show more of the scene through the UI. */
+	--glass: rgba(11, 15, 14, 0.82);
+	--glass-compact: rgba(9, 13, 12, 0.6);
+	--scrim: rgba(3, 5, 4, 0.55);
+	--scrim-compact: rgba(2, 4, 3, 0.22);
+
+	--fill: rgba(255, 255, 255, 0.06);
+	--fill-2: rgba(255, 255, 255, 0.11);
+	--hair: rgba(206, 255, 193, 0.11);
+	--hair-2: rgba(206, 255, 193, 0.06);
+
+	--display: "Archivo", system-ui, -apple-system, "Segoe UI", sans-serif;
+	--mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+	--r: 3px;
+	--r-lg: 6px;
+	--ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+
+/*
+ * ── overrides for style.css ──────────────────────────────
+ * Two rules in the old sheet reach into everything:
+ *   `button { min-height: 44px }`  — a mobile tap-target floor that inflates
+ *      every notch segment, chip and switch here.
+ *   a glassmorphism block on `.lobby-panel` / `.logout-modal-content` that uses
+ *      `!important`, so it can only be answered in kind.
+ */
+.custom-settings-overlay button,
+.loading-screen button,
+.lobby-panel button,
+.logout-modal button,
+.notch button,
+.chips button,
+.switch {
+	min-height: 0;
+}
+
+#lobby-panel.lobby-panel,
+#room-list-panel.lobby-panel,
+.logout-modal .logout-modal-content {
+	background: transparent !important;
+	border: 0 !important;
+	box-shadow: none !important;
+	border-radius: 0 !important;
+	backdrop-filter: none !important;
+	-webkit-backdrop-filter: none !important;
+}
+.lobby-panel .lobby-content,
+.logout-modal .logout-modal-content {
+	background: var(--glass) !important;
+	backdrop-filter: blur(26px) saturate(1.2) !important;
+	-webkit-backdrop-filter: blur(26px) saturate(1.2) !important;
+	border: 1px solid var(--hair) !important;
+	border-radius: var(--r-lg) !important;
+	box-shadow: 0 40px 90px -24px rgba(0, 0, 0, 0.85) !important;
+}
+/* The panel itself provides the scrim; the wrapper must stay see-through. */
+#lobby-panel.lobby-panel,
+#room-list-panel.lobby-panel {
+	background: var(--scrim) !important;
+	backdrop-filter: blur(7px) saturate(0.9) !important;
+}
+
+/* ── shared chrome ──────────────────────────────────────── */
+.shell-icon-btn {
+	width: 38px;
+	height: 38px;
+	display: grid;
+	place-items: center;
+	border: 1px solid var(--hair);
+	border-radius: var(--r);
+	background: rgba(10, 14, 12, 0.5);
+	backdrop-filter: blur(8px);
+	color: var(--chalk);
+	cursor: pointer;
+	transition: border-color 0.18s var(--ease), background 0.18s var(--ease);
+}
+.shell-icon-btn:hover {
+	border-color: rgba(169, 234, 92, 0.42);
+	background: rgba(169, 234, 92, 0.08);
+}
+.shell-icon-btn svg {
+	width: 17px;
+	height: 17px;
+	stroke: currentColor;
+	fill: none;
+	stroke-width: 1.6;
+}
+
+.ghost-btn {
+	padding: 10px 16px;
+	border: 1px solid var(--hair);
+	border-radius: var(--r);
+	font-family: var(--mono);
+	font-size: 11px;
+	font-weight: 500;
+	letter-spacing: 0.14em;
+	text-transform: uppercase;
+	color: var(--chalk);
+	background: rgba(10, 14, 12, 0.4);
+	backdrop-filter: blur(8px);
+	cursor: pointer;
+	transition: border-color 0.18s var(--ease), color 0.18s var(--ease),
+		background 0.18s var(--ease);
+}
+.ghost-btn:hover {
+	border-color: rgba(169, 234, 92, 0.45);
+	color: var(--lime);
+	background: rgba(169, 234, 92, 0.07);
+}
+.ghost-btn.is-danger:hover {
+	border-color: rgba(217, 97, 79, 0.55);
+	color: var(--danger);
+	background: rgba(217, 97, 79, 0.08);
+}
+
+.solid-btn {
+	padding: 11px 24px;
+	border: 0;
+	border-radius: var(--r);
+	background: var(--lime);
+	color: var(--ink);
+	font-family: var(--mono);
+	font-size: 11px;
+	font-weight: 700;
+	letter-spacing: 0.16em;
+	text-transform: uppercase;
+	cursor: pointer;
+	transition: filter 0.16s var(--ease), opacity 0.16s var(--ease);
+}
+.solid-btn:hover {
+	filter: brightness(1.1);
+}
+.solid-btn:disabled {
+	opacity: 0.4;
+	cursor: default;
+	filter: none;
+}
+
+.link-btn {
+	font-family: var(--mono);
+	font-size: 11px;
+	letter-spacing: 0.14em;
+	text-transform: uppercase;
+	color: var(--slate);
+	background: none;
+	border: 0;
+	cursor: pointer;
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	transition: color 0.16s var(--ease);
+}
+.link-btn:hover {
+	color: var(--amber);
+}
+
+.kbd {
+	font-family: var(--mono);
+	font-size: 10px;
+	letter-spacing: 0.1em;
+	color: var(--slate-dim);
+	border: 1px solid var(--hair);
+	border-radius: 2px;
+	padding: 3px 6px;
+}
+
+/* ── start screen ───────────────────────────────────────── */
+#loading-screen.loading-screen {
+	position: fixed;
+	inset: 0;
+	z-index: 120;
+	display: flex;
+	flex-direction: column;
+	/* style.css centres this box for the old single-card layout. */
+	align-items: stretch;
+	justify-content: flex-start;
+	background: linear-gradient(rgba(4, 6, 5, 0.55), rgba(4, 6, 5, 0.82));
+	backdrop-filter: blur(3px);
+	font-family: var(--display);
+	color: var(--chalk);
+	transition: opacity 0.5s var(--ease);
+}
+
+.shell-topbar,
+.shell-statusbar {
+	display: flex;
+	align-items: center;
+	gap: 18px;
+	padding: 16px 28px;
+}
+.shell-topbar {
+	justify-content: space-between;
+}
+
+.shell-hero {
+	flex: 1;
+	display: flex;
+	flex-direction: column;
+	justify-content: center;
+	padding: 0 28px 40px;
+	max-width: 1180px;
+	width: 100%;
+	margin: 0 auto;
+}
+
+.eyebrow {
+	font-family: var(--mono);
+	font-size: 11px;
+	letter-spacing: 0.28em;
+	text-transform: uppercase;
+	color: var(--slate);
+	display: flex;
+	align-items: center;
+	gap: 12px;
+	margin-bottom: 20px;
+}
+.eyebrow::before {
+	content: "";
+	width: 26px;
+	height: 1px;
+	background: var(--lime-dim);
+}
+
+.shell-title {
+	font-size: clamp(46px, 10vw, 124px);
+	line-height: 0.86;
+	font-weight: 800;
+	letter-spacing: -0.045em;
+	margin: 0;
+	text-transform: uppercase;
+}
+.shell-title em {
+	font-style: normal;
+	display: block;
+	color: var(--lime);
+}
+
+.rule {
+	height: 1px;
+	background: var(--hair);
+	margin: 34px 0 4px;
+	position: relative;
+	max-width: 560px;
+}
+/*
+ * The fill is a real element, not a pseudo-element: the loading manager in
+ * main.ts drives it with `loadingBar.style.width = pct + "%"`.
+ */
+#loading-bar.rule-fill {
+	position: absolute;
+	inset: 0 auto 0 0;
+	width: 0%;
+	background: var(--lime);
+	transition: width 0.25s var(--ease);
+}
+.loadline {
+	display: flex;
+	justify-content: space-between;
+	max-width: 560px;
+	padding-top: 12px;
+	font-family: var(--mono);
+	font-size: 11px;
+	letter-spacing: 0.16em;
+	text-transform: uppercase;
+	color: var(--slate);
+}
+/* Overrides the old sheet's #loading-text rule. */
+#loading-text.loadline-label {
+	margin: 0;
+	color: var(--slate);
+	font-family: var(--mono);
+	font-size: 11px;
+	letter-spacing: 0.16em;
+	text-transform: uppercase;
+}
+.loadline b {
+	color: var(--chalk);
+	font-weight: 500;
+}
+
+/*
+ * `nav` is `position: fixed; display: none` in style.css (it owns the old
+ * bottom-right link strip), so the menu has to opt back out of all of it.
+ */
+nav.shell-menu {
+	display: block;
+	position: static;
+	padding: 0;
+	margin-top: 30px;
+	max-width: 560px;
+	border-top: 1px solid var(--hair-2);
+}
+
+/*
+ * In-game chrome, hidden until the game actually starts. Both are fixed and
+ * would otherwise sit on top of the menu's status bar.
+ */
+.controls-hint,
+.credits {
+	display: none;
+}
+body.is-playing .controls-hint,
+body.is-playing .credits {
+	display: block;
+}
+.menu-item {
+	display: grid;
+	grid-template-columns: 14px 1fr auto;
+	align-items: center;
+	gap: 16px;
+	width: 100%;
+	padding: 17px 4px;
+	border: 0;
+	border-bottom: 1px solid var(--hair-2);
+	background: none;
+	text-align: left;
+	font-family: var(--display);
+	font-size: 19px;
+	font-weight: 600;
+	text-transform: uppercase;
+	color: var(--slate);
+	cursor: pointer;
+}
+.menu-item .caret {
+	width: 14px;
+	height: 14px;
+	opacity: 0;
+	transition: opacity 0.16s var(--ease);
+}
+.menu-item .caret svg {
+	width: 100%;
+	height: 100%;
+	stroke: var(--lime);
+	fill: none;
+	stroke-width: 2.4;
+}
+.menu-item .meta {
+	font-family: var(--mono);
+	font-size: 11px;
+	font-weight: 400;
+	letter-spacing: 0.16em;
+	color: var(--slate-dim);
+}
+.menu-item:hover,
+.menu-item:focus-visible {
+	color: var(--chalk);
+}
+.menu-item:hover .caret,
+.menu-item:focus-visible .caret {
+	opacity: 1;
+}
+.menu-item.is-primary {
+	font-size: 26px;
+	color: var(--chalk);
+}
+.menu-item.is-primary:hover {
+	color: var(--lime);
+}
+.menu-item:disabled {
+	opacity: 0.35;
+	pointer-events: none;
+}
+
+.shell-statusbar .strip {
+	display: flex;
+	align-items: center;
+	gap: 22px;
+	font-family: var(--mono);
+	font-size: 11px;
+	letter-spacing: 0.16em;
+	text-transform: uppercase;
+	color: var(--slate-dim);
+	flex-wrap: wrap;
+}
+.shell-statusbar .live {
+	display: flex;
+	align-items: center;
+	gap: 9px;
+	color: var(--slate);
+}
+.dot {
+	width: 6px;
+	height: 6px;
+	border-radius: 50%;
+	background: var(--lime);
+}
+.dot.is-off {
+	background: var(--slate-dim);
+}
+
+/* ── account panel (slides in over the hero) ────────────── */
+#account-panel.account-panel {
+	position: fixed;
+	inset: 0;
+	z-index: 34;
+	display: grid;
+	place-items: center;
+	padding: 24px;
+	background: var(--scrim);
+	backdrop-filter: blur(7px) saturate(0.9);
+	opacity: 0;
+	visibility: hidden;
+	transition: opacity 0.18s var(--ease), visibility 0.18s;
+}
+.loading-screen.show-account #account-panel.account-panel {
+	opacity: 1;
+	visibility: visible;
+}
+
+.shell-card {
+	width: min(420px, 100%);
+	background: var(--glass);
+	backdrop-filter: blur(26px) saturate(1.2);
+	border: 1px solid var(--hair);
+	border-radius: var(--r-lg);
+	box-shadow: 0 40px 90px -24px rgba(0, 0, 0, 0.85),
+		inset 0 1px 0 rgba(255, 255, 255, 0.05);
+	padding: 26px;
+	font-family: var(--display);
+	color: var(--chalk);
+}
+.shell-card h2,
+.shell-card h3 {
+	margin: 0 0 6px;
+	font-size: 15px;
+	font-weight: 700;
+	letter-spacing: 0.22em;
+	text-transform: uppercase;
+}
+.shell-card p {
+	margin: 0 0 18px;
+	font-size: 13px;
+	line-height: 1.5;
+	color: var(--slate);
+}
+.shell-card input[type="text"],
+.shell-card input[type="email"] {
+	width: 100%;
+	margin-bottom: 12px;
+	padding: 11px 13px;
+	background: var(--fill);
+	border: 1px solid var(--hair);
+	border-radius: var(--r);
+	color: var(--chalk);
+	font-family: var(--mono);
+	font-size: 13px;
+}
+.shell-card input::placeholder {
+	color: var(--slate-dim);
+}
+.shell-card input:focus {
+	outline: none;
+	border-color: rgba(169, 234, 92, 0.45);
+}
+.shell-card-actions {
+	display: flex;
+	gap: 10px;
+	margin-top: 6px;
+}
+.shell-card-actions > * {
+	flex: 1;
+	justify-content: center;
+}
+.shell-msg {
+	margin: 12px 0 0;
+	font-family: var(--mono);
+	font-size: 11px;
+	letter-spacing: 0.06em;
+	color: var(--lime);
+}
+
+/* ── multiplayer: lobby + room list ─────────────────────── */
+#lobby-panel.lobby-panel,
+#room-list-panel.lobby-panel {
+	position: fixed;
+	inset: 0;
+	z-index: 36;
+	display: grid;
+	place-items: center;
+	padding: 24px;
+	background: var(--scrim);
+	backdrop-filter: blur(7px) saturate(0.9);
+	font-family: var(--display);
+	color: var(--chalk);
+}
+/*
+ * `height: 100%` in style.css made this fill the viewport, which suited the old
+ * full-bleed lobby with 3D models behind it. It is a card now, so it sizes to
+ * its contents.
+ */
+.lobby-content {
+	width: min(720px, 100%);
+	height: auto;
+	max-height: 90vh;
+	overflow-y: auto;
+	background: var(--glass);
+	backdrop-filter: blur(26px) saturate(1.2);
+	border: 1px solid var(--hair);
+	border-radius: var(--r-lg);
+	box-shadow: 0 40px 90px -24px rgba(0, 0, 0, 0.85);
+	padding: 26px;
+}
+.lobby-content h2 {
+	margin: 0 0 20px;
+	font-size: 15px;
+	font-weight: 700;
+	letter-spacing: 0.22em;
+	text-transform: uppercase;
+}
+/*
+ * style.css sized these slots around the 3D lobby models: `.player-slot::before`
+ * reserved the top 70% for the GLB and `.slot-content` took the bottom 30% for
+ * the name, with divider rules between columns. The models are gone (avatars are
+ * sprites now), so all of that has to be unwound or the slots stay tall and empty.
+ */
+.player-grid {
+	display: grid;
+	grid-template-columns: repeat(4, 1fr);
+	gap: 10px;
+	margin: 0 0 22px;
+	flex-grow: 0;
+}
+.player-slot {
+	height: auto;
+	display: block;
+	position: relative;
+}
+.player-slot::before,
+.player-slot:not(:last-child)::after {
+	content: none;
+}
+.player-slot .slot-content {
+	display: grid;
+	place-items: center;
+	align-content: center;
+	flex: initial;
+	min-height: 118px;
+	font-size: 11px;
+	font-weight: 500;
+	font-style: normal;
+	text-shadow: none;
+	padding: 14px 10px;
+	border: 1px solid var(--hair);
+	border-radius: var(--r);
+	background: var(--fill);
+	font-family: var(--mono);
+	font-size: 11px;
+	letter-spacing: 0.12em;
+	text-transform: uppercase;
+	text-align: center;
+	color: var(--chalk);
+}
+.player-slot .slot-content.empty {
+	color: var(--slate-dim);
+	border-style: dashed;
+	background: none;
+}
+.lobby-buttons {
+	display: flex;
+	gap: 10px;
+	justify-content: flex-end;
+}
+/* Procedural pixel bugs (see ui/pixelBug.ts). */
+.bug-avatar {
+	display: block;
+	width: 64px;
+	height: 64px;
+	/* The sprite is drawn at 16px; keep the pixels hard when it scales. */
+	image-rendering: pixelated;
+	image-rendering: crisp-edges;
+}
+.bug-name {
+	display: block;
+	margin-top: 8px;
+	max-width: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-family: var(--mono);
+	font-size: 11px;
+	letter-spacing: 0.08em;
+	text-transform: none;
+	color: var(--chalk);
+}
+
+.room-list-container {
+	max-height: 320px;
+	overflow-y: auto;
+	margin-bottom: 20px;
+	border: 1px solid var(--hair-2);
+	border-radius: var(--r);
+}
+.room-empty {
+	padding: 24px 16px;
+	text-align: center;
+	font-family: var(--mono);
+	font-size: 12px;
+	letter-spacing: 0.1em;
+	text-transform: uppercase;
+	color: var(--slate-dim);
+}
+.room-item {
+	display: flex;
+	align-items: center;
+	gap: 16px;
+	padding: 14px 16px;
+	border-bottom: 1px solid var(--hair-2);
+}
+.room-item:last-child {
+	border-bottom: 0;
+}
+.room-info {
+	flex: 1;
+	min-width: 0;
+}
+.room-host {
+	font-size: 14px;
+	font-weight: 600;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.room-players {
+	margin-top: 3px;
+	font-family: var(--mono);
+	font-size: 11px;
+	letter-spacing: 0.12em;
+	text-transform: uppercase;
+	color: var(--slate-dim);
+}
+.room-join-btn:disabled {
+	opacity: 0.45;
+	cursor: not-allowed;
+}
+
+/*
+ * The old sheet gives these three their own gradients and pill radii. They now
+ * carry `.solid-btn` / `.ghost-btn`, so the per-button styling has to be undone
+ * or they keep the previous look.
+ */
+.start-game-btn.solid-btn,
+.submit-btn.solid-btn,
+.confirm-btn.solid-btn,
+.room-join-btn.solid-btn {
+	/* style.css applies a gradient + glow to these with `!important`. */
+	background: var(--lime) !important;
+	color: var(--ink) !important;
+	border: 0 !important;
+	box-shadow: none !important;
+	border-radius: var(--r);
+	padding: 11px 24px;
+	font-family: var(--mono);
+	font-size: 11px;
+	font-weight: 700;
+	letter-spacing: 0.16em;
+	text-transform: uppercase;
+}
+.start-game-btn.solid-btn:hover:not(:disabled),
+.submit-btn.solid-btn:hover:not(:disabled),
+.confirm-btn.solid-btn:hover:not(:disabled) {
+	transform: none !important;
+	box-shadow: none !important;
+	filter: brightness(1.1);
+}
+
+.leave-lobby-btn.ghost-btn,
+.cancel-btn.ghost-btn,
+.close-btn.ghost-btn,
+.room-join-btn.ghost-btn,
+.game-nav-btn.ghost-btn {
+	background: rgba(10, 14, 12, 0.4);
+	border: 1px solid var(--hair);
+	border-radius: var(--r);
+	color: var(--chalk);
+	padding: 10px 16px;
+	font-family: var(--mono);
+	font-size: 11px;
+	font-weight: 500;
+	letter-spacing: 0.14em;
+	text-transform: uppercase;
+}
+
+/* ── small confirm / login modals ───────────────────────── */
+.logout-modal {
+	position: fixed;
+	inset: 0;
+	z-index: 38;
+	display: grid;
+	place-items: center;
+	padding: 24px;
+	background: var(--scrim);
+	backdrop-filter: blur(7px) saturate(0.9);
+	font-family: var(--display);
+	color: var(--chalk);
+}
+.logout-modal-content {
+	width: min(420px, 100%);
+	background: var(--glass);
+	backdrop-filter: blur(26px) saturate(1.2);
+	border: 1px solid var(--hair);
+	border-radius: var(--r-lg);
+	box-shadow: 0 40px 90px -24px rgba(0, 0, 0, 0.85);
+	padding: 26px;
+}
+.logout-modal-content h3 {
+	margin: 0 0 8px;
+	font-size: 15px;
+	font-weight: 700;
+	letter-spacing: 0.22em;
+	text-transform: uppercase;
+}
+.logout-modal-content p {
+	margin: 0 0 18px;
+	font-size: 13px;
+	line-height: 1.5;
+	color: var(--slate);
+}
+.modal-input {
+	width: 100%;
+	margin-bottom: 12px;
+	padding: 11px 13px;
+	background: var(--fill);
+	border: 1px solid var(--hair);
+	border-radius: var(--r);
+	color: var(--chalk);
+	font-family: var(--mono);
+	font-size: 13px;
+}
+.modal-error {
+	margin: 0 0 12px;
+	font-family: var(--mono);
+	font-size: 11px;
+	color: var(--danger);
+}
+.logout-buttons {
+	display: flex;
+	gap: 10px;
+}
+.logout-buttons > * {
+	flex: 1;
+	justify-content: center;
+}
+
+/* ── settings toggle (in-game, top-left) ────────────────── */
+button.settings-toggle {
+	position: fixed;
+	top: 16px;
+	left: 16px;
+	z-index: 20;
+	width: 38px;
+	height: 38px;
+	display: grid;
+	place-items: center;
+	border: 1px solid var(--hair);
+	border-radius: var(--r);
+	background: rgba(10, 14, 12, 0.5);
+	backdrop-filter: blur(8px);
+	color: var(--chalk);
+	cursor: pointer;
+	transition: border-color 0.18s var(--ease), background 0.18s var(--ease);
+}
+button.settings-toggle:hover {
+	border-color: rgba(169, 234, 92, 0.42);
+	background: rgba(169, 234, 92, 0.08);
+}
+button.settings-toggle svg {
+	width: 18px;
+	height: 18px;
+}
+
+/* ── settings overlay ───────────────────────────────────── */
+.custom-settings-overlay {
+	position: fixed;
+	inset: 0;
+	/* Above the start screen (120) — it opens from the menu as well as in-game. */
+	z-index: 140;
+	display: grid;
+	place-items: center;
+	padding: 24px;
+	background: var(--scrim);
+	backdrop-filter: blur(7px) saturate(0.9);
+	font-family: var(--display);
+	color: var(--chalk);
+}
+
+.panel {
+	width: min(1040px, 100%);
+	height: min(660px, 92vh);
+	display: flex;
+	flex-direction: column;
+	background: var(--glass);
+	backdrop-filter: blur(26px) saturate(1.2);
+	border: 1px solid var(--hair);
+	border-radius: var(--r-lg);
+	box-shadow: 0 40px 90px -24px rgba(0, 0, 0, 0.85),
+		inset 0 1px 0 rgba(255, 255, 255, 0.05);
+	overflow: hidden;
+}
+
+.panel-head {
+	display: flex;
+	align-items: center;
+	gap: 20px;
+	padding: 18px 22px;
+	border-bottom: 1px solid var(--hair);
+}
+.panel-head h2 {
+	margin: 0;
+	font-size: 15px;
+	font-weight: 700;
+	letter-spacing: 0.22em;
+	text-transform: uppercase;
+}
+.panel-head .spacer {
+	flex: 1;
+}
+.preset {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+}
+.preset > span {
+	font-family: var(--mono);
+	font-size: 10px;
+	letter-spacing: 0.18em;
+	text-transform: uppercase;
+	color: var(--slate-dim);
+}
+
+.panel-body {
+	flex: 1;
+	display: grid;
+	grid-template-columns: 212px 1fr;
+	min-height: 0;
+}
+
+.sidenav {
+	border-right: 1px solid var(--hair);
+	padding: 12px 0;
+	overflow-y: auto;
+	background: rgba(0, 0, 0, 0.16);
+}
+.nav-item {
+	position: relative;
+	display: flex;
+	align-items: center;
+	width: 100%;
+	padding: 12px 22px;
+	border: 0;
+	background: none;
+	text-align: left;
+	font-family: var(--mono);
+	font-size: 11px;
+	font-weight: 500;
+	letter-spacing: 0.16em;
+	text-transform: uppercase;
+	color: var(--slate);
+	cursor: pointer;
+	transition: color 0.16s var(--ease), background 0.16s var(--ease);
+}
+.nav-item::before {
+	content: "";
+	position: absolute;
+	left: 0;
+	top: 8px;
+	bottom: 8px;
+	width: 2px;
+	background: transparent;
+}
+.nav-item:hover {
+	color: var(--chalk);
+	background: rgba(255, 255, 255, 0.04);
+}
+.nav-item.is-active {
+	color: var(--lime);
+	background: rgba(169, 234, 92, 0.07);
+}
+.nav-item.is-active::before {
+	background: var(--lime);
+}
+
+.panes {
+	min-height: 0;
+}
+.pane {
+	display: none;
+	padding: 24px 28px 30px;
+	overflow-y: auto;
+	height: 100%;
+}
+.pane.is-active {
+	display: block;
+}
+.pane-head {
+	margin-bottom: 20px;
+}
+.pane-head h3 {
+	margin: 0 0 6px;
+	font-size: 21px;
+	font-weight: 700;
+	letter-spacing: -0.01em;
+}
+.pane-head p {
+	margin: 0;
+	font-size: 13px;
+	line-height: 1.5;
+	color: var(--slate);
+	max-width: 52ch;
+}
+
+.row {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto 84px;
+	align-items: center;
+	gap: 22px;
+	padding: 14px 2px;
+	border-bottom: 1px solid var(--hair-2);
+}
+.row:last-child {
+	border-bottom: 0;
+}
+.row .label {
+	font-size: 14px;
+	font-weight: 600;
+}
+.row .hint {
+	margin-top: 3px;
+	font-size: 12px;
+	line-height: 1.45;
+	color: var(--slate-dim);
+}
+.readout {
+	font-family: var(--mono);
+	font-size: 12px;
+	font-weight: 500;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	text-align: right;
+	color: var(--lime);
+	font-variant-numeric: tabular-nums;
+}
+.readout.is-off {
+	color: var(--slate-dim);
+}
+
+/* notch gauge — ordinal quality, reads like a boost gauge */
+.notch {
+	display: flex;
+	align-items: flex-end;
+	gap: 3px;
+	height: 22px;
+}
+.notch button {
+	width: 22px;
+	padding: 0;
+	background: var(--fill);
+	border: 1px solid var(--hair);
+	border-radius: 1px;
+	cursor: pointer;
+	transition: background 0.14s var(--ease), border-color 0.14s var(--ease);
+}
+.notch button:nth-child(1) { height: 10px; }
+.notch button:nth-child(2) { height: 14px; }
+.notch button:nth-child(3) { height: 18px; }
+.notch button:nth-child(4) { height: 22px; }
+.notch button:hover {
+	border-color: rgba(169, 234, 92, 0.45);
+}
+.notch button.on {
+	background: var(--lime);
+	border-color: var(--lime);
+}
+
+/* chips — non-ordinal options */
+.chips {
+	display: flex;
+	border: 1px solid var(--hair);
+	border-radius: var(--r);
+	overflow: hidden;
+	background: var(--fill);
+}
+.chips button {
+	padding: 7px 13px;
+	border: 0;
+	border-right: 1px solid var(--hair);
+	background: none;
+	font-family: var(--mono);
+	font-size: 11px;
+	letter-spacing: 0.1em;
+	text-transform: uppercase;
+	color: var(--slate);
+	cursor: pointer;
+	transition: color 0.14s var(--ease), background 0.14s var(--ease);
+}
+.chips button:last-child {
+	border-right: 0;
+}
+.chips button:hover {
+	color: var(--chalk);
+	background: rgba(255, 255, 255, 0.05);
+}
+.chips button.on {
+	color: var(--ink);
+	background: var(--lime);
+	font-weight: 700;
+}
+
+/* slider (`ui-` prefixed: `.slider` already exists in style.css) */
+.ui-slider {
+	width: 190px;
+}
+.ui-slider input {
+	-webkit-appearance: none;
+	appearance: none;
+	width: 100%;
+	height: 16px;
+	background: none;
+	display: block;
+	margin: 0;
+}
+.ui-slider input::-webkit-slider-runnable-track {
+	height: 2px;
+	background: var(--fill-2);
+	border-radius: 2px;
+}
+.ui-slider input::-moz-range-track {
+	height: 2px;
+	background: var(--fill-2);
+	border-radius: 2px;
+}
+.ui-slider input::-webkit-slider-thumb {
+	-webkit-appearance: none;
+	width: 12px;
+	height: 12px;
+	margin-top: -5px;
+	background: var(--lime);
+	border-radius: 2px;
+	box-shadow: 0 0 0 4px rgba(169, 234, 92, 0.14);
+	transition: box-shadow 0.16s var(--ease);
+}
+.ui-slider input::-moz-range-thumb {
+	width: 12px;
+	height: 12px;
+	border: 0;
+	background: var(--lime);
+	border-radius: 2px;
+}
+.ui-slider input:hover::-webkit-slider-thumb {
+	box-shadow: 0 0 0 7px rgba(169, 234, 92, 0.18);
+}
+.ticks {
+	display: flex;
+	justify-content: space-between;
+	margin-top: 5px;
+}
+.ticks i {
+	width: 1px;
+	height: 4px;
+	background: var(--hair);
+}
+
+/* switch */
+.switch {
+	width: 46px;
+	height: 22px;
+	padding: 3px;
+	border: 1px solid var(--hair);
+	border-radius: 2px;
+	background: var(--fill);
+	display: flex;
+	cursor: pointer;
+	transition: background 0.18s var(--ease), border-color 0.18s var(--ease);
+}
+.switch b {
+	width: 16px;
+	height: 14px;
+	background: var(--slate-dim);
+	border-radius: 1px;
+	transition: transform 0.18s var(--ease), background 0.18s var(--ease);
+}
+.switch[aria-checked="true"] {
+	background: rgba(169, 234, 92, 0.18);
+	border-color: rgba(169, 234, 92, 0.5);
+}
+.switch[aria-checked="true"] b {
+	transform: translateX(22px);
+	background: var(--lime);
+}
+
+/* caution — dashboard warning light, used sparingly */
+.caution {
+	display: none;
+	align-items: center;
+	gap: 9px;
+	margin: 12px 0 0;
+	padding: 9px 12px;
+	border-left: 2px solid var(--amber);
+	background: rgba(240, 180, 41, 0.08);
+	font-family: var(--mono);
+	font-size: 11px;
+	letter-spacing: 0.06em;
+	color: var(--amber);
+}
+.caution.is-on {
+	display: flex;
+}
+
+/* native select, dressed to match the chips */
+.shell-select {
+	min-width: 190px;
+	padding: 8px 12px;
+	background: var(--fill);
+	border: 1px solid var(--hair);
+	border-radius: var(--r);
+	color: var(--chalk);
+	font-family: var(--mono);
+	font-size: 11px;
+	letter-spacing: 0.1em;
+	text-transform: uppercase;
+	cursor: pointer;
+}
+.shell-select:focus {
+	outline: none;
+	border-color: rgba(169, 234, 92, 0.45);
+}
+.shell-select option {
+	background: #0d1211;
+	color: var(--chalk);
+}
+.is-compact .shell-select {
+	min-width: 132px;
+	padding: 6px 9px;
+	font-size: 10px;
+}
+
+/* stacked action buttons (multiplayer / world actions) */
+.stack {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+}
+.stack > * {
+	width: 100%;
+	justify-content: center;
+}
+
+.panel-foot {
+	display: flex;
+	align-items: center;
+	gap: 14px;
+	padding: 15px 22px;
+	border-top: 1px solid var(--hair);
+	background: rgba(255, 255, 255, 0.02);
+}
+.panel-foot .spacer {
+	flex: 1;
+}
+.only-compact {
+	display: none;
+}
+
+/* ── COMPACT: same panel, while driving ─────────────────── */
+.custom-settings-overlay.is-compact {
+	background: var(--scrim-compact);
+	backdrop-filter: blur(2px);
+	padding: 16px;
+}
+.is-compact .panel {
+	width: min(680px, 100%);
+	height: min(480px, 86vh);
+	background: var(--glass-compact);
+	backdrop-filter: blur(20px) saturate(1.25);
+	box-shadow: 0 24px 60px -20px rgba(0, 0, 0, 0.7),
+		inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+.is-compact .panel-head { padding: 12px 16px; }
+.is-compact .panel-head h2 { font-size: 12px; letter-spacing: 0.18em; }
+.is-compact .panel-foot { padding: 10px 16px; }
+.is-compact .preset > span { display: none; }
+.is-compact .chips button { padding: 5px 9px; font-size: 10px; }
+.is-compact .panel-body { grid-template-columns: 132px 1fr; }
+.is-compact .sidenav { padding: 6px 0; }
+.is-compact .nav-item { padding: 8px 14px; font-size: 10px; letter-spacing: 0.1em; }
+.is-compact .pane { padding: 14px 16px 18px; }
+.is-compact .pane-head { display: none; }   /* you already know where you are */
+.is-compact .row .hint { display: none; }   /* hints are for the main menu */
+.is-compact .row {
+	padding: 9px 2px;
+	gap: 14px;
+	grid-template-columns: minmax(0, 1fr) auto 62px;
+}
+.is-compact .row .label { font-size: 12.5px; font-weight: 500; }
+.is-compact .readout { font-size: 11px; }
+.is-compact .notch { height: 16px; gap: 2px; }
+.is-compact .notch button { width: 15px; }
+.is-compact .notch button:nth-child(1) { height: 7px; }
+.is-compact .notch button:nth-child(2) { height: 10px; }
+.is-compact .notch button:nth-child(3) { height: 13px; }
+.is-compact .notch button:nth-child(4) { height: 16px; }
+.is-compact .ui-slider { width: 132px; }
+.is-compact .ticks { display: none; }
+.is-compact .switch { width: 38px; height: 19px; }
+.is-compact .switch b { width: 13px; height: 11px; }
+.is-compact .switch[aria-checked="true"] b { transform: translateX(17px); }
+.is-compact .caution { padding: 7px 10px; font-size: 10px; }
+.is-compact .kbd { display: none; }
+.is-compact .solid-btn { padding: 9px 18px; font-size: 10px; }
+.is-compact .only-compact { display: flex; }
+.is-compact .only-full { display: none; }
+
+/* ── responsive ─────────────────────────────────────────── */
+@media (max-width: 820px) {
+	.panel-body,
+	.is-compact .panel-body {
+		grid-template-columns: 1fr;
+		grid-template-rows: auto 1fr;
+	}
+	.sidenav {
+		display: flex;
+		overflow-x: auto;
+		border-right: 0;
+		border-bottom: 1px solid var(--hair);
+		padding: 0;
+		scrollbar-width: none;
+	}
+	.sidenav::-webkit-scrollbar { display: none; }
+	.nav-item { padding: 14px 16px; white-space: nowrap; }
+	.nav-item::before { top: auto; bottom: 0; left: 0; right: 0; width: auto; height: 2px; }
+	/*
+	 * Stacked: label + readout share the first row, the control gets its own
+	 * below. `grid-row` on the control is required — without it auto-placement
+	 * drops it back onto row 1 and it sits on top of the label.
+	 */
+	.row { grid-template-columns: 1fr auto; gap: 8px 16px; }
+	.row .readout { grid-column: 2; grid-row: 1; }
+	.row .control { grid-column: 1 / -1; grid-row: 2; justify-self: start; }
+	.pane { padding: 18px 16px 24px; }
+	.panel,
+	.is-compact .panel { height: 100%; width: 100%; }
+	.custom-settings-overlay { padding: 0; }
+	.shell-hero { padding-bottom: 28px; }
+	.shell-topbar,
+	.shell-statusbar { padding: 14px 18px; }
+	.shell-statusbar .strip:nth-child(2) { display: none; }
+	.player-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* ── phones ─────────────────────────────────────────────── */
+@media (max-width: 560px) {
+	/* Respect notches and home indicators on both orientations. */
+	.shell-topbar {
+		padding: max(12px, env(safe-area-inset-top)) max(14px, env(safe-area-inset-right))
+			12px max(14px, env(safe-area-inset-left));
+	}
+	.shell-hero {
+		padding: 0 max(18px, env(safe-area-inset-left)) 20px;
+		justify-content: flex-start;
+		padding-top: 8px;
+		overflow-y: auto;
+	}
+	.shell-statusbar {
+		padding: 10px max(14px, env(safe-area-inset-right))
+			max(12px, env(safe-area-inset-bottom)) max(14px, env(safe-area-inset-left));
+	}
+	/* Only the connection state survives; the keyboard hints are desktop-only. */
+	.shell-statusbar .strip:not(.live) {
+		display: none;
+	}
+
+	.eyebrow {
+		font-size: 10px;
+		letter-spacing: 0.2em;
+		margin-bottom: 12px;
+	}
+	.shell-title {
+		font-size: clamp(38px, 15vw, 64px);
+	}
+	.rule {
+		margin: 20px 0 4px;
+	}
+	nav.shell-menu {
+		margin-top: 18px;
+	}
+	.menu-item {
+		grid-template-columns: 1fr auto;
+		padding: 16px 2px;
+		font-size: 17px;
+	}
+	/* The caret is a hover affordance and there is no hover here. */
+	.menu-item .caret {
+		display: none;
+	}
+	.menu-item.is-primary {
+		font-size: 22px;
+	}
+
+	.shell-card,
+	.logout-modal-content,
+	.lobby-content {
+		padding: 20px 18px;
+	}
+	.player-grid {
+		grid-template-columns: repeat(2, 1fr);
+		gap: 8px;
+	}
+	.bug-avatar {
+		width: 48px;
+		height: 48px;
+	}
+	.lobby-buttons {
+		flex-direction: column-reverse;
+	}
+	.lobby-buttons > * {
+		width: 100%;
+		justify-content: center;
+	}
+	.room-item {
+		gap: 12px;
+		padding: 12px;
+	}
+
+	.panel-head {
+		gap: 10px;
+		padding: 14px 16px;
+	}
+	/* "Preset" label is the first thing to go when width is tight. */
+	.preset > span {
+		display: none;
+	}
+	.panel-foot {
+		padding: 12px 16px;
+	}
+	.pane {
+		padding: 16px 14px 22px;
+	}
+	.ui-slider {
+		width: 100%;
+		min-width: 160px;
+	}
+	.row .control {
+		width: 100%;
+	}
+}
+
+/* Very small / split-screen. */
+@media (max-width: 380px) {
+	.shell-title {
+		font-size: clamp(30px, 13vw, 44px);
+	}
+	.player-grid {
+		grid-template-columns: 1fr;
+	}
+	.chips button {
+		padding: 8px 9px;
+		font-size: 10px;
+	}
+}
+
+/*
+ * Short viewports — phones in landscape. The hero would otherwise push the menu
+ * off-screen, so the title gives up its size rather than the menu its place.
+ */
+@media (max-height: 460px) {
+	.shell-title {
+		font-size: clamp(26px, 7vh, 44px);
+	}
+	.eyebrow {
+		margin-bottom: 8px;
+	}
+	.rule {
+		margin: 14px 0 4px;
+	}
+	nav.shell-menu {
+		margin-top: 12px;
+	}
+	.menu-item {
+		padding: 11px 2px;
+		font-size: 15px;
+	}
+	.menu-item.is-primary {
+		font-size: 18px;
+	}
+	.panel,
+	.is-compact .panel {
+		height: 100%;
+	}
+}
+
+/*
+ * Touch input: grow the small controls to a usable target without changing the
+ * desktop look. style.css sets a global 44px floor for exactly this reason —
+ * the shell opts out of it above, so it has to put the targets back here.
+ */
+@media (pointer: coarse) {
+	.chips button {
+		padding: 11px 14px;
+	}
+	.notch {
+		height: 30px;
+		gap: 4px;
+	}
+	.notch button {
+		width: 30px;
+	}
+	.notch button:nth-child(1) { height: 16px; }
+	.notch button:nth-child(2) { height: 21px; }
+	.notch button:nth-child(3) { height: 26px; }
+	.notch button:nth-child(4) { height: 30px; }
+	.switch {
+		width: 56px;
+		height: 28px;
+	}
+	.switch b {
+		width: 20px;
+		height: 20px;
+	}
+	.switch[aria-checked="true"] b {
+		transform: translateX(26px);
+	}
+	.ui-slider input {
+		height: 28px;
+	}
+	.ui-slider input::-webkit-slider-thumb {
+		width: 18px;
+		height: 18px;
+		margin-top: -8px;
+	}
+	.ui-slider input::-moz-range-thumb {
+		width: 18px;
+		height: 18px;
+	}
+	.nav-item {
+		padding: 14px 18px;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.rule::after,
+	.menu-item .caret,
+	.switch,
+	.switch b {
+		transition-duration: 0.001s !important;
+	}
+}

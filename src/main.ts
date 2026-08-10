@@ -154,6 +154,7 @@ import {
 	type GameWorldId,
 	type QualityLevel,
 } from "./ui/GameSettings";
+import { renderLobbyAvatar } from "./ui/pixelBug";
 import { WorldLoadingOverlay } from "./ui/WorldLoadingOverlay";
 import { HealthHud } from "./ui/HealthHud";
 
@@ -420,8 +421,6 @@ export class FluffyGrass {
 	private mySlotIndex = 0;
 
 	private isBeingCarriedBy: string | null = null;
-	private lobbyModels: THREE.Group[] = [];
-	private lobbyMixers: THREE.AnimationMixer[] = [];
 	private remotePlayers: Map<string, RemotePlayer> = new Map();
 
 	private trees: TreeHandle[] = [];
@@ -751,6 +750,12 @@ export class FluffyGrass {
 			const proceed = (_action: "play", user: AuthUser | null) => {
 				this.userData = user;
 				this.isGameActive = true;
+				// Same panel, denser layout: hints off, controls tightened and the
+				// backdrop thinned so the scene stays readable behind it.
+				this.settings?.setCompact(true);
+				// Reveals the in-game chrome (controls hint, credits), which stays
+				// hidden behind the menu so it cannot overlap the status bar.
+				document.body.classList.add("is-playing");
 				const engineType = this.vehicleId === "hummer" ? "hummer" : (this.vehicleId === "jeep" ? "rally" : "diesel");
 				this.engineSound = new EngineSound(false, engineType);
 				this.hornSound = new HornSound();
@@ -770,10 +775,6 @@ export class FluffyGrass {
 				this.loadingScreenController?.hide();
 
 				if (this.engineSound) this.engineSound.init();
-
-				for (const model of this.lobbyModels) {
-					model.visible = false;
-				}
 
 				// Spawn based on slot index to avoid overlapping cars
 				const spawnX = this.mySlotIndex * 8;
@@ -894,15 +895,15 @@ export class FluffyGrass {
 				const slot = document.querySelector(`#player-slot-${i} .slot-content`);
 				if (slot) {
 					if (i < players.length) {
-						slot.textContent = players[i].user.username;
+						// Seeded off the username, so a player keeps the same bug across
+						// reconnects and everyone in the room sees them as that bug.
+						renderLobbyAvatar(slot, players[i].user.username);
 						slot.classList.remove("empty");
 						slot.classList.add("filled");
-						if (this.lobbyModels[i]) this.lobbyModels[i].visible = !this.isGameActive;
 					} else {
 						slot.textContent = "Waiting...";
 						slot.classList.remove("filled");
 						slot.classList.add("empty");
-						if (this.lobbyModels[i]) this.lobbyModels[i].visible = false;
 					}
 				}
 			}
@@ -1581,7 +1582,7 @@ export class FluffyGrass {
 		this.gameNavigation?.hide();
 
 		if (roomListContainer) {
-			roomListContainer.innerHTML = `<div style="color: white; text-align: center; padding: 20px;">Fetching rooms...</div>`;
+			roomListContainer.innerHTML = `<div class="room-empty">Fetching rooms...</div>`;
 		}
 
 		this.socket!.emit("get-rooms", (res: any) => {
@@ -1589,7 +1590,7 @@ export class FluffyGrass {
 				roomListContainer.innerHTML = "";
 
 				if (res.rooms.length === 0) {
-					roomListContainer.innerHTML = `<div style="color: rgba(255,255,255,0.5); text-align: center; padding: 20px;">No active rooms found. Why not host one?</div>`;
+					roomListContainer.innerHTML = `<div class="room-empty">No active rooms. Host one?</div>`;
 					return;
 				}
 
@@ -1604,7 +1605,7 @@ export class FluffyGrass {
 							<div class="room-host">${room.hostName}'s Game</div>
 							<div class="room-players">${room.playerCount} / 4 Players</div>
 						</div>
-						<button class="room-join-btn" ${isFull ? 'disabled style="background: rgba(14, 22, 16, 0.5); cursor: not-allowed;"' : ''}>
+						<button class="${isFull ? "ghost-btn" : "solid-btn"} room-join-btn" ${isFull ? "disabled" : ""}>
 							${isFull ? 'Full' : 'Join'}
 						</button>
 					`;
@@ -3320,49 +3321,14 @@ export class FluffyGrass {
 		camLight.position.set(0, 2, 0); // slightly above camera
 		this.camera.add(camLight);
 
-		const colors = [
-			0xffffff, // Original (White/None)
-			0xff3333, // Red
-			0x33ff33, // Green
-			0xffff33, // Yellow
-		];
-
-		const spacing = 3.4;
-		const startX = -1.5 * spacing - 0.85; // Shifted even further left to perfectly center with UI
-
-		for (let i = 0; i < 4; i++) {
-			// Reloading GLTF fixes SkinnedMesh bone references (clone() breaks them)
-			const gltf = await this.loadGltfFull("/poutine.glb");
-			const clone = gltf.scene;
-			clone.scale.setScalar(this.sceneProps.humanScale * 1.25); // Scale up slightly
-
-			// Models will remain their original color
-			// (Removed tinting logic since model is a single mesh)
-
-			// Set rotation to face the camera. (Math.PI / 4 is exactly forward!)
-			clone.rotation.set(0, Math.PI / 4, 0);
-
-			setCharacterAlbedo(clone, CHARACTER_ALBEDO);
-			this.characterRoots.push(clone);
-
-			// Position exactly aligned with 4 columns at z = -5, moved down slightly to sit nicely
-			clone.position.set(startX + (i * spacing), -1.0, -5.0);
-
-			// Add to camera so it moves with it
-			this.camera.add(clone);
-
-			// Play idle animation
-			const mixer = new THREE.AnimationMixer(clone);
-			const idleClip = gltf.animations.find((c: any) => c.name.toLowerCase().includes("idle"));
-			if (idleClip) {
-				mixer.clipAction(idleClip).play();
-			}
-			this.lobbyMixers.push(mixer);
-
-			// Initially hidden until someone joins that slot
-			clone.visible = false;
-			this.lobbyModels.push(clone);
-		}
+		// Lobby avatars are procedural pixel sprites drawn into the slot elements
+		// (see ui/pixelBug.ts), not 3D models.
+		//
+		// This used to load four separate copies of `poutine.glb` — ~5 MB each,
+		// skinned, each with its own AnimationMixer ticking every frame — parent them
+		// to the camera and park them behind the lobby UI, purely to fill four avatar
+		// boxes. The sprites cost nothing to load and give every player a distinct,
+		// stable creature instead of four identical models.
 	}
 
 	/**
@@ -3538,12 +3504,6 @@ export class FluffyGrass {
 		}
 
 		this.maybeInjectAmbientWaterRipples(now);
-
-		if (!this.isGameActive) {
-			for (const mixer of this.lobbyMixers) {
-				mixer.update(dt);
-			}
-		}
 
 		// Hand the cursor back the moment mouse-look stops being allowed
 		// (lobby, edit mode, world switch).

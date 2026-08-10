@@ -4,6 +4,11 @@
 <head>
   <meta charset="UTF-8" />
   <link rel="stylesheet" href="/src/style.css">
+  <!-- Loaded after style.css so the shell wins on equal specificity. -->
+  <link rel="stylesheet" href="/src/ui/shell.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
@@ -21,43 +26,82 @@
 </head>
 
 <body>
+  <!-- ══ START SCREEN ═══════════════════════════════════════
+       IDs here are load-bearing: LoadingScreenController binds
+       #play-button / #create-account-btn / #account-panel and the account
+       form, and main.ts drives #loading-bar and #loading-text. -->
   <div id="loading-screen" class="loading-screen">
-    <!-- Left panel (Loading Content) -->
-    <div class="loading-panel">
-      <div class="loading-content">
-        <h1>The Car Game</h1>
-        <div class="loading-bar-container">
-          <div id="loading-bar" class="loading-bar"></div>
-        </div>
-        <p id="loading-text">Loading... 0%</p>
-        <div class="main-action-buttons" style="display: flex; gap: 12px; justify-content: center; align-items: stretch; margin-bottom: 15px; flex-direction: column; width: 250px; margin-left: auto; margin-right: auto;">
-          <button id="play-button" class="play-button" disabled>Loading...</button>
-        </div>
-      </div>
-    </div>
-    
-    <button id="create-account-btn" class="create-account-btn">Create Account</button>
 
-    <!-- Right panel (Account Form) -->
+    <div class="shell-topbar">
+      <button type="button" class="shell-icon-btn" id="menu-settings-btn" aria-label="Settings" title="Settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="3.2" />
+          <path d="M12 2.8v2.4M12 18.8v2.4M4.5 4.5l1.7 1.7M17.8 17.8l1.7 1.7M2.8 12h2.4M18.8 12h2.4M4.5 19.5l1.7-1.7M17.8 6.2l1.7-1.7" />
+        </svg>
+      </button>
+      <button id="create-account-btn" class="ghost-btn create-account-btn" type="button">Create account</button>
+    </div>
+
+    <div class="shell-hero">
+      <div class="eyebrow">Open world · multiplayer</div>
+      <h1 class="shell-title">The car<em>game</em></h1>
+
+      <div class="rule">
+        <div id="loading-bar" class="rule-fill"></div>
+      </div>
+      <div class="loadline">
+        <p id="loading-text" class="loadline-label">Loading... 0%</p>
+        <b id="loading-mode">Single player</b>
+      </div>
+
+      <nav class="shell-menu">
+        <button class="menu-item is-primary" id="play-button" type="button" disabled>
+          <span class="caret"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4l9 8-9 8" /></svg></span>
+          <span data-label>Loading...</span>
+          <span class="meta">Enter</span>
+        </button>
+        <button class="menu-item" id="menu-multiplayer-btn" type="button">
+          <span class="caret"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4l9 8-9 8" /></svg></span>
+          <span>Multiplayer</span>
+          <span class="meta">Host / Join</span>
+        </button>
+        <button class="menu-item" id="menu-settings-item" type="button">
+          <span class="caret"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 4l9 8-9 8" /></svg></span>
+          <span>Settings</span>
+          <span class="meta">Esc</span>
+        </button>
+      </nav>
+    </div>
+
+    <div class="shell-statusbar">
+      <div class="strip live"><i class="dot" id="status-dot"></i><span id="status-label">Loading world</span></div>
+      <div class="strip">
+        <span>WASD drive</span><span>Shift boost</span><span>Space brake</span><span>R reset</span>
+      </div>
+      <div class="strip"><span>v0.4.2</span></div>
+    </div>
+
+    <!-- Account form. Shown by LoadingScreenController via `.show-account`. -->
     <div id="account-panel" class="account-panel">
-      <div class="account-panel-content">
-        <h2>Create Account</h2>
-        <input type="text" id="username" placeholder="Username" />
-        <input type="email" id="email" placeholder="Email" />
-        <div class="account-buttons">
-          <button id="submit-account-btn" class="submit-btn">Submit</button>
-          <button id="close-account-btn" class="close-btn">Cancel</button>
+      <div class="shell-card account-panel-content">
+        <h2>Create account</h2>
+        <p>An account is only needed for multiplayer. Single player works without one.</p>
+        <input type="text" id="username" placeholder="Username" autocomplete="username" />
+        <input type="email" id="email" placeholder="Email" autocomplete="email" />
+        <div class="shell-card-actions account-buttons">
+          <button id="submit-account-btn" class="solid-btn submit-btn" type="button">Submit</button>
+          <button id="close-account-btn" class="ghost-btn close-btn" type="button">Cancel</button>
         </div>
-        <p id="account-success-msg" style="display: none; color: #a3d977; margin-top: 10px;">Account created!</p>
+        <p id="account-success-msg" class="shell-msg" style="display: none;">Account created!</p>
       </div>
     </div>
 
   </div>
 
-  <!-- Multiplayer Lobby Overlay -->
+  <!-- ══ MULTIPLAYER LOBBY ═════════════════════════════════ -->
   <div id="lobby-panel" class="lobby-panel" style="display: none;">
     <div class="lobby-content">
-      <h2>Multiplayer Lobby</h2>
+      <h2>Multiplayer lobby</h2>
       <div class="player-grid" id="lobby-players-grid">
         <div class="player-slot" id="player-slot-0"><div class="slot-content empty">Waiting...</div></div>
         <div class="player-slot" id="player-slot-1"><div class="slot-content empty">Waiting...</div></div>
@@ -65,30 +109,31 @@
         <div class="player-slot" id="player-slot-3"><div class="slot-content empty">Waiting...</div></div>
       </div>
       <div class="lobby-buttons">
-        <button id="start-game-btn" class="start-game-btn" style="display: none;" disabled>Waiting for players...</button>
-        <button id="leave-lobby-btn" class="leave-lobby-btn">Leave Room</button>
+        <button id="leave-lobby-btn" class="ghost-btn is-danger leave-lobby-btn" type="button">Leave room</button>
+        <button id="start-game-btn" class="solid-btn start-game-btn" type="button" style="display: none;" disabled>Waiting for players...</button>
       </div>
     </div>
   </div>
 
-  <!-- Room List Panel -->
+  <!-- ══ ROOM LIST ═════════════════════════════════════════ -->
   <div id="room-list-panel" class="lobby-panel" style="display: none;">
     <div class="lobby-content" style="max-width: 600px;">
-      <h2>Active Rooms</h2>
+      <h2>Active rooms</h2>
       <div id="room-list-container" class="room-list-container">
-        <!-- Rooms will be injected here -->
-        <div style="color: white; text-align: center; padding: 20px;">Fetching rooms...</div>
+        <div style="text-align: center; padding: 20px;">Fetching rooms...</div>
       </div>
       <div class="lobby-buttons">
-        <button id="refresh-rooms-btn" class="start-game-btn" style="background: linear-gradient(135deg, #5ba3e3, #77d9c4);">Refresh List</button>
-        <button id="close-room-list-btn" class="leave-lobby-btn">Cancel</button>
+        <button id="close-room-list-btn" class="ghost-btn leave-lobby-btn" type="button">Cancel</button>
+        <button id="refresh-rooms-btn" class="solid-btn start-game-btn" type="button">Refresh list</button>
       </div>
     </div>
   </div>
 
+  <!-- ══ IN-GAME CHROME ════════════════════════════════════ -->
   <button type="button" class="settings-toggle" id="settings-toggle" aria-label="Open settings" title="Settings">
-    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="currentColor">
-      <path d="M19.14 12.94c.04-.31.06-.63.06-.94s-.02-.63-.06-.94l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.6-.22l-2.39.96a7.07 7.07 0 0 0-1.63-.94l-.36-2.54a.5.5 0 0 0-.5-.42h-3.84a.5.5 0 0 0-.5.42l-.36 2.54c-.59.24-1.13.55-1.63.94l-2.39-.96a.5.5 0 0 0-.6.22L2.71 8.84a.5.5 0 0 0 .12.64l2.03 1.58c-.04.31-.06.63-.06.94s.02.63.06.94L2.83 14.52a.5.5 0 0 0-.12.64l1.92 3.32c.12.22.39.3.6.22l2.39-.96c.5.39 1.04.71 1.63.94l.36 2.54c.05.24.26.42.5.42h3.84c.24 0 .45-.18.5-.42l.36-2.54c.59-.24 1.13-.55 1.63-.94l2.39.96c.22.08.48 0 .6-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.6A3.6 3.6 0 1 1 12 8.4a3.6 3.6 0 0 1 0 7.2z"/>
+    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6">
+      <circle cx="12" cy="12" r="3.2" />
+      <path d="M12 2.8v2.4M12 18.8v2.4M4.5 4.5l1.7 1.7M17.8 17.8l1.7 1.7M2.8 12h2.4M18.8 12h2.4M4.5 19.5l1.7-1.7M17.8 6.2l1.7-1.7" />
     </svg>
   </button>
   <nav></nav>
@@ -96,44 +141,47 @@
   <div class="controls-hint">
     <p>Hold Q weapon wheel · Gun: LMB auto-aim+fire · RMB toggle aim lock · Fists: LMB punch / RMB kick · T bomb</p>
   </div>
-  <div id="game-top-nav" class="game-top-nav" style="display: none;">
-    <button id="login-btn" class="game-nav-btn">Login</button>
-    <button id="in-game-host-btn" class="game-nav-btn" style="background: linear-gradient(135deg, #e3a35b, #d97777); border: none;">Host Game</button>
-    <button id="in-game-join-btn" class="game-nav-btn" style="background: linear-gradient(135deg, #5ba3e3, #77d9c4); border: none;">Join Game</button>
-    <button id="logout-btn" class="game-nav-btn logout-btn-style">Logout</button>
+
+  <!-- Relocated into Settings -> Multiplayer by GameSettings.moveExternalButtons. -->
+  <div id="game-top-nav" class="game-top-nav stack" style="display: none;">
+    <button id="login-btn" class="ghost-btn game-nav-btn" type="button">Login</button>
+    <button id="in-game-host-btn" class="ghost-btn game-nav-btn" type="button">Host game</button>
+    <button id="in-game-join-btn" class="ghost-btn game-nav-btn" type="button">Join game</button>
+    <button id="logout-btn" class="ghost-btn is-danger game-nav-btn logout-btn-style" type="button">Logout</button>
   </div>
 
+  <!-- ══ MODALS ════════════════════════════════════════════ -->
   <div id="game-login-modal" class="logout-modal" style="display: none;">
     <div class="logout-modal-content">
-      <h3>Login for Multiplayer</h3>
-      <p>Single-player remains available without an account.</p>
-      <input type="email" id="game-login-email" class="modal-input" placeholder="Email Address" autocomplete="email" />
+      <h3>Login for multiplayer</h3>
+      <p>Single player remains available without an account.</p>
+      <input type="email" id="game-login-email" class="modal-input" placeholder="Email address" autocomplete="email" />
       <p id="game-login-error" class="modal-error" style="display: none;"></p>
       <div class="logout-buttons">
-        <button id="submit-game-login-btn" class="submit-btn">Login</button>
-        <button id="close-game-login-btn" class="cancel-btn">Cancel</button>
+        <button id="close-game-login-btn" class="ghost-btn cancel-btn" type="button">Cancel</button>
+        <button id="submit-game-login-btn" class="solid-btn submit-btn" type="button">Login</button>
       </div>
     </div>
   </div>
-  
+
   <div id="logout-confirm-modal" class="logout-modal" style="display: none;">
     <div class="logout-modal-content">
-      <h3>Log Out</h3>
+      <h3>Log out</h3>
       <p>Are you sure you want to log out?</p>
       <div class="logout-buttons">
-        <button id="confirm-logout-btn" class="confirm-btn">Yes, Log Out</button>
-        <button id="cancel-logout-btn" class="cancel-btn">Cancel</button>
+        <button id="cancel-logout-btn" class="ghost-btn cancel-btn" type="button">Cancel</button>
+        <button id="confirm-logout-btn" class="solid-btn confirm-btn" type="button">Yes, log out</button>
       </div>
     </div>
   </div>
 
   <div id="host-confirm-modal" class="logout-modal" style="display: none;">
     <div class="logout-modal-content">
-      <h3>Host Game</h3>
-      <p>Are you sure you want to host a multiplayer game?</p>
+      <h3>Host game</h3>
+      <p>Start a new multiplayer room. Other players will be able to join you.</p>
       <div class="logout-buttons">
-        <button id="confirm-host-btn" class="confirm-btn" style="background: linear-gradient(135deg, #e3a35b, #d97777);">Yes, Host Game</button>
-        <button id="cancel-host-btn" class="cancel-btn">Cancel</button>
+        <button id="cancel-host-btn" class="ghost-btn cancel-btn" type="button">Cancel</button>
+        <button id="confirm-host-btn" class="solid-btn confirm-btn" type="button">Yes, host game</button>
       </div>
     </div>
   </div>
