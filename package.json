@@ -12,6 +12,7 @@
   "devDependencies": {
     "@types/dat.gui": "^0.7.12",
     "@types/three": "^0.185.4",
+    "puppeteer-core": "^25.5.0",
     "typescript": "^5.2.2",
     "vite": "^5.0.8"
   },

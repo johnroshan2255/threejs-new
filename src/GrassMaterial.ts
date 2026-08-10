@@ -284,13 +284,21 @@ export class GrassMaterial {
 	private setupGrassMaterial(material: MeshLambertNodeMaterial) {
 		const u = this.uniforms;
 
-		// Mask UV sampled *before* the wind displacement below. Sampling the
-		// swayed position would make both the colour variation and the snow
-		// coverage shimmer as the blade moves. It is carried to the fragment
-		// stage explicitly because `positionWorld` there reflects the final,
-		// displaced vertex.
-		const vGlobalUV = varyingProperty("vec2", "vGrassGlobalUV");
-		const vBladeWorld = varyingProperty("vec3", "vGrassBladeWorld");
+		// Colour variation and snow coverage are resolved per *vertex*, not per
+		// fragment, and only the two resulting scalars are interpolated.
+		//
+		// Both used to be fragment-stage texture fetches keyed off an interpolated
+		// world position. A blade card is a couple of pixels wide but the field
+		// overdraws itself ~20x, so every one of those fetches was paid ~20 times
+		// per screen pixel. Both signals vary over metres — a low-frequency noise
+		// lookup and the snow mask — so sampling them at the 32 vertices of a
+		// blade clump and letting the rasteriser interpolate is visually identical
+		// and moves the work off the hot path.
+		//
+		// Sampled *before* the wind displacement below: sampling the swayed
+		// position would make colour and snow shimmer as the blade moves.
+		const vVariation = varyingProperty("float", "vGrassVariation");
+		const vSnowMask = varyingProperty("float", "vGrassSnowMask");
 
 		material.normalNode = normalLocal;
 
@@ -305,8 +313,7 @@ export class GrassMaterial {
 				.div(terrainSize)
 				.toVar();
 
-			vGlobalUV.assign(globalUV);
-			vBladeWorld.assign(bladeWorld);
+			vSnowMask.assign(snowMaskAt(bladeWorld));
 
 			// Distance fade: sink grass into the ground at the edges
 			const distToCamera = distance(bladeWorld, u.uPlayerPosition);
@@ -342,9 +349,15 @@ export class GrassMaterial {
 				.mul(windAmp)
 				.mul(tip);
 
+			// One sample, two consumers: the tip lift below and the base->tip colour
+			// variation in the fragment stage want the exact same lookup, so it is
+			// taken once here rather than again per fragment.
+			const variation = u.noiseTexture.sample(globalUV.mul(u.uNoiseScale)).r.toVar();
+			vVariation.assign(variation);
+
 			// Tip lift is in world units *after* the instance scale, so it has to
 			// track blade height or grass stays tall when the instance Y shrinks.
-			const lift: any = exp(u.noiseTexture.sample(globalUV.mul(u.uNoiseScale)).r)
+			const lift: any = exp(variation)
 				.mul(0.5)
 				.mul(u.uBladeHeightScale)
 				.mul(tip)
@@ -358,15 +371,18 @@ export class GrassMaterial {
 		const bladeUV = vec2(uv().x, float(1.0).sub(uv().y));
 		const grassAlpha = u.grassAlphaTexture.sample(bladeUV).r;
 
-		const grassVariation = u.noiseTexture.sample(vGlobalUV.mul(u.uNoiseScale));
-		const tipColor = mix(u.tipColor1, u.tipColor2, grassVariation.r);
+		// Both of these arrive interpolated from the vertex stage — see the
+		// varying declarations above for why they are not sampled here.
+		const tipColor = mix(u.tipColor1, u.tipColor2, vVariation);
 		const albedo = mix(u.baseColor, tipColor, bladeUV.y).toVar();
 
 		// Grass deliberately skips the upness term in snowAt(): blades are
 		// near-vertical, so their normal.y is ~0 and it would cancel snow out
 		// completely. Weight by height along the blade instead — tips catch the
 		// most, bases stay greener, which is what a dusted field looks like.
-		const snow = snowMaskAt(vBladeWorld).mul(mix(0.4, 1.0, bladeUV.y));
+		// The height weight stays per-fragment (pure ALU); only the mask lookup
+		// itself moved to the vertex stage.
+		const snow = vSnowMask.mul(mix(0.4, 1.0, bladeUV.y));
 
 		material.colorNode = mix(albedo, snowUniforms.uSnowColor, snow);
 		// Hand the alpha map through *continuous*, not pre-thresholded.

@@ -336,6 +336,19 @@ export class FluffyGrass {
 	private editorTopDown = false;
 	/** Pixel ratio the quality tier asks for, before any per-view override. */
 	private basePixelRatio = 1.25;
+	/**
+	 * User-facing render scale, as a multiplier on the final pixel ratio.
+	 *
+	 * Deliberately separate from `resolutionQuality`: that picks a tier and then
+	 * applies a supersample *floor* to kill grass speckle, so it cannot be used to
+	 * trade sharpness for frames continuously. This can. 1 is exactly the old
+	 * behaviour, so the default changes nothing.
+	 *
+	 * Worth having its own control because the frame here is fragment-bound —
+	 * measured, grass alone is ~36% of it — and every one of those costs scales
+	 * with pixel count, so this is the one slider that moves the whole frame.
+	 */
+	private renderScale = 1;
 	/** GPU teardown deferred to the top of a frame — see queueGpuDispose. */
 	private pendingGpuDisposals: Array<() => void> = [];
 	private lastGpuPanelUpdate = 0;
@@ -4310,6 +4323,9 @@ export class FluffyGrass {
 				const parsed = JSON.parse(saved);
 				if (parsed.shadowQuality) this.shadowQuality = parsed.shadowQuality;
 				if (parsed.resolutionQuality) this.resolutionQuality = parsed.resolutionQuality;
+				if (parsed.renderScale !== undefined) {
+					this.renderScale = THREE.MathUtils.clamp(parsed.renderScale, 0.5, 2);
+				}
 				if (parsed.waterQuality) this.waterQuality = parsed.waterQuality;
 				if (parsed.vehicleId) this.vehicleId = parsed.vehicleId;
 				if (parsed.postFxEnabled !== undefined) this.postFxEnabled = parsed.postFxEnabled;
@@ -4338,6 +4354,7 @@ export class FluffyGrass {
 			const toSave = {
 				shadowQuality: this.shadowQuality,
 				resolutionQuality: this.resolutionQuality,
+				renderScale: this.renderScale,
 				waterQuality: this.waterQuality,
 				vehicleId: this.vehicleId,
 				postFxEnabled: this.postFxEnabled,
@@ -4368,6 +4385,7 @@ export class FluffyGrass {
 		this.settings = new GameSettings({
 			shadowQuality: this.shadowQuality,
 			resolutionQuality: this.resolutionQuality,
+			renderScale: this.renderScale,
 			waterQuality: this.waterQuality,
 			postFx: this.postFxEnabled,
 			showStats: this.showStatsEnabled,
@@ -4382,6 +4400,7 @@ export class FluffyGrass {
 			worldOptions: this.getWorldSelectOptions(),
 			onShadowQualityChange: (quality) => { this.applyShadowQuality(quality); this.saveSettings(); },
 			onResolutionQualityChange: (quality) => { this.applyResolutionQuality(quality); this.saveSettings(); },
+			onRenderScaleChange: (scale) => { this.setRenderScale(scale); this.saveSettings(); },
 			onWaterQualityChange: (quality) => { this.applyWaterQuality(quality); this.saveSettings(); },
 			onPostFxChange: (enabled) => { this.setPostFxEnabled(enabled); this.saveSettings(); },
 			onShowStatsChange: (enabled) => { this.setShowStatsEnabled(enabled); this.saveSettings(); },
@@ -4564,13 +4583,23 @@ export class FluffyGrass {
 	}
 
 	private applyPixelRatio() {
-		const ratio = this.editorTopDown
+		const base = this.editorTopDown
 			? Math.max(this.basePixelRatio, EDITOR_TOPDOWN.supersample)
 			: this.basePixelRatio;
+		// Render scale multiplies whatever the quality tier settled on, and is
+		// clamped so a stored value can never drive the buffer to something the
+		// backend will refuse to allocate.
+		const ratio = THREE.MathUtils.clamp(base * this.renderScale, 0.4, 4);
 		if (this.renderer.getPixelRatio() !== ratio) {
 			this.renderer.setPixelRatio(ratio);
 			this.resizePondTargets();
 		}
+	}
+
+	/** Render scale as a multiplier on the resolution tier's pixel ratio. */
+	private setRenderScale(scale: number) {
+		this.renderScale = THREE.MathUtils.clamp(scale, 0.5, 2);
+		this.applyPixelRatio();
 	}
 
 	/**
@@ -5116,9 +5145,32 @@ export class FluffyGrass {
 		document.body.appendChild(this.interactionPrompt);
 	}
 
+	/**
+	 * Give stats-gl a GL context only when there actually is one.
+	 *
+	 * `Stats.init()` exists purely to set up its GPU panel from
+	 * `EXT_disjoint_timer_query_webgl2`. It accepts a WebGL renderer, a
+	 * WebGL2RenderingContext or a canvas — a `WebGPURenderer` is none of those,
+	 * so handing it one made stats-gl log
+	 *
+	 *   Stats: Invalid input type. Expected WebGL2RenderingContext, ...
+	 *
+	 * and bail out before doing anything. Nothing was lost (the GPU numbers come
+	 * from the custom panel below), but every boot logged an error.
+	 *
+	 * `WebGPURenderer` still falls back to a WebGL2 backend where WebGPU is
+	 * unavailable, and there the canvas *does* carry a webgl2 context worth
+	 * handing over — so this checks the backend rather than assuming either way.
+	 */
+	private initStatsGpuPanel() {
+		const backend = (this.renderer as unknown as { backend?: { isWebGLBackend?: boolean } })
+			.backend;
+		if (backend?.isWebGLBackend !== true) return;
+		this.stats.init(this.canvas);
+	}
+
 	private setupStats() {
-		// @ts-ignore
-		this.stats.init(this.renderer);
+		this.initStatsGpuPanel();
 		const statsDom = (this.stats as unknown as { dom: HTMLElement }).dom;
 
 		statsDom.style.position = "fixed";
@@ -5141,8 +5193,10 @@ export class FluffyGrass {
 				child.style.position = "relative";
 			}
 
-			// Some browsers block GPU timer queries, causing stats-gl to hide the GPU panel.
-			// We inject a custom GPU panel that reads raw Three.js WebGL draw calls and triangles.
+			// stats-gl only ever builds its GPU panel from a WebGL2 timer query, so
+			// on the WebGPU backend there is none at all (and some browsers block
+			// the query even on WebGL). We inject our own, fed from the scene graph
+			// by the updater in `render()`.
 			const customGpuPanel = document.createElement("div");
 			customGpuPanel.id = "custom-gpu-panel";
 			customGpuPanel.style.backgroundColor = "#000000";

@@ -163,17 +163,24 @@ export async function createTree(
 	let trunk: THREE.Mesh | null = null;
 	let rigidBody: RAPIER.RigidBody | null = null;
 
-	const world = getWorld();
-	if (world) {
-		const bodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(x0, y, z0);
-		rigidBody = world.createRigidBody(bodyDesc);
-		const halfHeight = 2.0 * scale;
-		const radius = 0.35 * scale;
-		const colliderDesc = RAPIER.ColliderDesc.cylinder(halfHeight, radius).setTranslation(0, halfHeight, 0);
-		world.createCollider(colliderDesc, rigidBody);
-	}
-
+	// Collider ownership follows mesh ownership.
+	//
+	// Instanced trees are drawn *and* collided by TreeInstancedMesh, which builds
+	// its own body in `updateTreeTransform` keyed by tree id. Building one here as
+	// well gave every instanced tree two overlapping static cylinders — measured
+	// on the 1 km world as 513 colliders for 252 trees. Only the standalone path
+	// (`useInstancing: false`, the island hero tree) owns its body here.
 	if (!useInstancing) {
+		const world = getWorld();
+		if (world) {
+			const bodyDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(x0, y, z0);
+			rigidBody = world.createRigidBody(bodyDesc);
+			const halfHeight = 2.0 * scale;
+			const radius = 0.35 * scale;
+			const colliderDesc = RAPIER.ColliderDesc.cylinder(halfHeight, radius).setTranslation(0, halfHeight, 0);
+			world.createCollider(colliderDesc, rigidBody);
+		}
+
 		trunk = template.trunk.clone(true);
 		trunk.castShadow = true;
 		trunk.receiveShadow = true;

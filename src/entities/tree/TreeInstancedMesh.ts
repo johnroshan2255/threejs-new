@@ -136,6 +136,25 @@ export class TreeInstancedMesh {
 	
 	public cullDistance = 400; // Trees draw very far
 
+	/**
+	 * Canopy LOD thresholds, in metres.
+	 *
+	 * Foliage is the entire cost of a tree. Measured on the 1 km world (252
+	 * trees): hiding the canopy roughly halved the frame, while hiding the trunk
+	 * moved it ~0.4 ms and disabling shadow casting moved it not at all. The
+	 * canopy is alpha-tested camera-facing cards drawn `leafLayers` times per
+	 * tree, so its cost is covered pixels — and a tree 200 m out spends the same
+	 * four layers on a handful of them as one at arm's length.
+	 *
+	 * Layers are rotated copies of the same blob, so dropping them thins the
+	 * canopy rather than changing its silhouette; layer 0 is the unrotated
+	 * original and is always the one kept.
+	 */
+	private lodMidDistance = 70;
+	private lodFarDistance = 160;
+	private lodMidLayers = 2;
+	private lodFarLayers = 1;
+
 	constructor(private manager?: THREE.LoadingManager, leafLayers = 4) {
 		this.leafLayers = leafLayers;
 	}
@@ -240,6 +259,9 @@ export class TreeInstancedMesh {
 
 		const leafLayersU = uint(this.leafLayers);
 		const hideDistance = float(this.cullDistance);
+		// Squared, to match the squared distance the cull already computes.
+		const midDistSq = float(this.lodMidDistance * this.lodMidDistance);
+		const farDistSq = float(this.lodFarDistance * this.lodFarDistance);
 
 		const cullingFn = Fn(() => {
 			const sharedData = workgroupArray('atomic<u32>', 2);
@@ -254,6 +276,9 @@ export class TreeInstancedMesh {
 
 			const index = instanceIndex;
 			const isVisible = uint(0).toVar();
+			// How many canopy layers this particular tree will contribute. Stays 0
+			// for culled trees, which is what keeps the reservation below exact.
+			const layers = uint(0).toVar();
 			const activeCount = this.countUniform;
 
 			If(index.lessThan(activeCount), () => {
@@ -293,8 +318,21 @@ export class TreeInstancedMesh {
 						.and(d3.greaterThanEqual(radius.negate()))
 						.and(d4.greaterThanEqual(radius.negate()))
 						.and(d5.greaterThanEqual(radius.negate()));
-						
-					isVisible.assign(inFrustum);
+
+					If(inFrustum, () => {
+						isVisible.assign(uint(1));
+
+						// Canopy LOD. Two sequential tests rather than if/else-if:
+						// they are ordered near -> far, so the farther band simply
+						// overwrites the nearer one.
+						layers.assign(uint(this.leafLayers));
+						If(distSq.greaterThanEqual(midDistSq), () => {
+							layers.assign(uint(this.lodMidLayers));
+						});
+						If(distSq.greaterThanEqual(farDistSq), () => {
+							layers.assign(uint(this.lodFarLayers));
+						});
+					});
 				});
 			});
 
@@ -314,10 +352,13 @@ export class TreeInstancedMesh {
 				If(totalLocal.greaterThan(uint(0)), () => {
 					// @ts-ignore
 					atomicStore(sharedData.element(uint(1)), atomicAdd(trunkIndirectNode.element(1), totalLocal));
-					// @ts-ignore
-					atomicAdd(foliageIndirectNode.element(1), totalLocal.mul(leafLayersU));
 				});
 			});
+
+			// Foliage count is no longer `visibleTrees * leafLayers`, because each
+			// tree now contributes a different number of layers. So it cannot be
+			// aggregated per workgroup the way the trunk count is — each visible
+			// tree reserves its own run below instead.
 			
 			workgroupBarrier();
 			
@@ -325,15 +366,25 @@ export class TreeInstancedMesh {
 				// @ts-ignore
 				const writeIndex = atomicLoad(sharedData.element(uint(1))).add(localOffset);
 				culledTrunkNode.element(writeIndex).assign(masterTrunkNode.element(index));
-				
-				const foliageBaseWrite = writeIndex.mul(leafLayersU);
+
+				// Reserve exactly this tree's layer run. The returned value is the
+				// run's start, so the layers stay contiguous even though neighbouring
+				// trees reserve different amounts.
+				// @ts-ignore
+				const foliageBaseWrite = atomicAdd(foliageIndirectNode.element(1), layers);
+				// The *master* buffer keeps its fixed stride — only what we copy out
+				// of it varies.
 				const foliageBaseRead = index.mul(leafLayersU);
-				
+
+				// Static bound with a dynamic guard: the loop count has to be a
+				// compile-time constant, so the per-tree layer count gates the body.
 				Loop({ start: int(0), end: int(this.leafLayers), type: 'int', condition: '<' }, ({ i }) => {
-					const r = foliageBaseRead.add(uint(i));
-					const w = foliageBaseWrite.add(uint(i));
-					culledFoliageNode.element(w).assign(masterFoliageNode.element(r));
-					culledFoliageColorNode.element(w).assign(masterFoliageColorNode.element(r));
+					If(uint(i).lessThan(layers), () => {
+						const r = foliageBaseRead.add(uint(i));
+						const w = foliageBaseWrite.add(uint(i));
+						culledFoliageNode.element(w).assign(masterFoliageNode.element(r));
+						culledFoliageColorNode.element(w).assign(masterFoliageColorNode.element(r));
+					});
 				});
 			});
 		});

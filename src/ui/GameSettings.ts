@@ -18,6 +18,8 @@ export type CarTuningDef = {
 type GameSettingsOptions = {
 	shadowQuality: QualityLevel;
 	resolutionQuality: QualityLevel;
+	/** Multiplier on the resolution tier's pixel ratio, 0.5–2. */
+	renderScale: number;
 	waterQuality: QualityLevel;
 	postFx: boolean;
 	showStats: boolean;
@@ -32,6 +34,7 @@ type GameSettingsOptions = {
 	worldOptions?: Record<string, string>;
 	onShadowQualityChange: (quality: QualityLevel) => void;
 	onResolutionQualityChange: (quality: QualityLevel) => void;
+	onRenderScaleChange: (scale: number) => void;
 	onWaterQualityChange: (quality: QualityLevel) => void;
 	onPostFxChange: (enabled: boolean) => void;
 	onShowStatsChange: (enabled: boolean) => void;
@@ -64,6 +67,7 @@ export class GameSettings {
 		this.state = {
 			shadowQuality: options.shadowQuality,
 			resolutionQuality: options.resolutionQuality,
+			renderScale: options.renderScale,
 			waterQuality: options.waterQuality,
 			postFx: options.postFx,
 			showStats: options.showStats,
@@ -242,6 +246,13 @@ export class GameSettings {
 								</select>
 							</div>
 							<div class="setting-row">
+								<label for="set-render-scale">Render Scale</label>
+								<div class="slider-container" style="flex:1;">
+									<input type="range" id="set-render-scale" min="50" max="200" step="5" />
+									<span class="slider-value">100%</span>
+								</div>
+							</div>
+							<div class="setting-row">
 								<label for="set-water">Water Physics</label>
 								<select id="set-water">
 									<option value="Low">Low</option>
@@ -404,6 +415,19 @@ export class GameSettings {
 		const rSel = overlay.querySelector("#set-resolution") as HTMLSelectElement;
 		rSel.value = this.state.resolutionQuality;
 		rSel.addEventListener("change", (e) => this.options.onResolutionQualityChange((e.target as HTMLSelectElement).value as QualityLevel));
+
+		// Render Scale is stored as a multiplier but shown as a percentage, so the
+		// slider works in whole percent and converts on the way out.
+		const rsInp = overlay.querySelector("#set-render-scale") as HTMLInputElement;
+		const rsPercent = Math.round(this.state.renderScale * 100);
+		rsInp.value = rsPercent.toString();
+		rsInp.nextElementSibling!.textContent = `${rsPercent}%`;
+		rsInp.addEventListener("input", (e) => {
+			const percent = parseFloat((e.target as HTMLInputElement).value);
+			rsInp.nextElementSibling!.textContent = `${percent}%`;
+			this.state.renderScale = percent / 100;
+			this.options.onRenderScaleChange(percent / 100);
+		});
 
 		const wSel = overlay.querySelector("#set-water") as HTMLSelectElement;
 		wSel.value = this.state.waterQuality;

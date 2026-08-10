@@ -75,6 +75,20 @@ export type EditApplierHost = {
 	getTreeManager: () => import("../entities/tree/TreeInstancedMesh").TreeInstancedMesh | null;
 };
 
+/** How long the apply loop may hold the main thread before letting a frame through. */
+const YIELD_INTERVAL_MS = 32;
+
+/**
+ * Yield to the *event loop*, not just the microtask queue.
+ *
+ * `await Promise.resolve()` only drains microtasks and never lets the renderer
+ * run, which is why a load full of already-cached awaits still froze the frame.
+ * A zero-delay timer is a macrotask, so the browser gets to paint between ops.
+ */
+function yieldToEventLoop(): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 /**
  * Applies world-edit ops locally. Used for the authoring client and remote peers.
  */
@@ -423,8 +437,24 @@ export class EditApplier {
 				return true;
 			}
 			case "paint-forest": {
-				for (const treeSpec of op.trees) {
-					const id = "forest_" + Math.random().toString(36).substring(2, 9);
+				// A single forest op can carry hundreds of trees, so this loop yields
+				// on the same budget as applyMany's — otherwise one op blocks the
+				// frame no matter how often the outer loop lets go.
+				let lastYield = performance.now();
+				for (let treeIndex = 0; treeIndex < op.trees.length; treeIndex++) {
+					if (performance.now() - lastYield >= YIELD_INTERVAL_MS) {
+						await yieldToEventLoop();
+						lastYield = performance.now();
+					}
+					const treeSpec = op.trees[treeIndex]!;
+					// Derived from the op, not random.
+					//
+					// These ids used to be `Math.random()`, so a forest got fresh ids on
+					// every load. A later `delete-entity` op recorded against one of them
+					// referenced an id that no longer existed after a reload, and the
+					// deleted tree came back. Op id + index is stable across sessions and
+					// unique within the document.
+					const id = `${op.id}_t${treeIndex}`;
 					const tree = await createTree({
 						position: [treeSpec.x, 0, treeSpec.z],
 						placeOnTerrain: true,
@@ -844,6 +874,7 @@ export class EditApplier {
 			const pendingHeavy: Promise<boolean>[] = [];
 
 			const tSeqStart = performance.now();
+			let lastYield = performance.now();
 			for (const op of ops) {
 				if (op.type === "paint-cave" || op.type === "paint-water") {
 					// Fire off heavy background tasks to the worker pool / async compiler
@@ -853,6 +884,19 @@ export class EditApplier {
 					// Run trees, sculpts, etc. sequentially to avoid DDoSing the browser
 					// with thousands of simultaneous asset loads or memory spikes
 					await this.apply(op);
+				}
+
+				// Hand the main thread back periodically.
+				//
+				// Every op here awaits, but almost all of them settle on the microtask
+				// queue (cached asset templates, synchronous terrain sampling), which
+				// never yields to the event loop — so no frame renders. Measured on the
+				// 1 km world: 28 frames across an 11.4 s load, about 2.5 fps, with the
+				// loading bar frozen the whole time. A macrotask yield lets one frame
+				// through so progress can actually be drawn.
+				if (performance.now() - lastYield >= YIELD_INTERVAL_MS) {
+					await yieldToEventLoop();
+					lastYield = performance.now();
 				}
 			}
 			const tSeqEnd = performance.now();
