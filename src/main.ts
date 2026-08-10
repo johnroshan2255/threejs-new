@@ -6151,7 +6151,10 @@ export class FluffyGrass {
 					auto: this.dayNight.auto,
 					hour: this.dayNight.hour,
 				};
-				this.dayNight.setPeriod("noon");
+				// Immediate: entering the editor is a mode switch, so the lighting
+				// should already be settled when the view appears rather than
+				// sweeping to noon over the next couple of seconds.
+				this.dayNight.setPeriod("noon", true);
 				this.dayNight.auto = false;
 				this.dayNightGui.auto = false;
 				this.dayNightGui.period = "noon";

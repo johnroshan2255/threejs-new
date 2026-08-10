@@ -335,6 +335,26 @@ const PERIOD_TIMELINE: PeriodNode[] = [
 	},
 ];
 
+/**
+ * How long a manual period change takes to play out, in seconds.
+ *
+ * Picking a period used to assign `hour` outright, so the whole rig — sun angle,
+ * sky, fog, grade, grass light — changed between one frame and the next. The
+ * auto cycle never had that problem because it only ever nudges `hour`, and
+ * `sampleAtHour` smoothsteps between the surrounding keys; this just gives a
+ * manual change the same treatment by sweeping `hour` over a short window.
+ */
+const PERIOD_TRANSITION_SECONDS = 1.8;
+
+/**
+ * Key light shadow map resolution, fixed for the session.
+ *
+ * 2048 over the ±200 m ortho box is ~10 cm per texel, which PCF-soft shadows of
+ * a car and some trees cannot resolve past. It cannot be changed after startup —
+ * `setShadowQuality` explains what goes wrong when you try.
+ */
+const SHADOW_MAP_SIZE = 2048;
+
 const COLOR_CACHE = new Map<string, THREE.Color>();
 
 function getColor(value: string): THREE.Color {
@@ -725,7 +745,14 @@ export type DayNightCycle = {
 	auto: boolean;
 	speed: number;
 	period: DayPeriod;
-	setPeriod: (period: DayPeriod) => void;
+	/**
+	 * Sweep to a period's hour over `PERIOD_TRANSITION_SECONDS`.
+	 *
+	 * Pass `immediate` to land on it this frame instead — for mode switches,
+	 * where the lighting change is incidental and an animation just delays the
+	 * mode from settling.
+	 */
+	setPeriod: (period: DayPeriod, immediate?: boolean) => void;
 	setHour: (hour: number) => void;
 	update: (dt: number) => number;
 	getFireflyIntensity: () => number;
@@ -789,7 +816,9 @@ export function createDayNightCycle(
 	keyLight.shadow.camera.right = shadowExtent;
 	keyLight.shadow.camera.top = shadowExtent;
 	keyLight.shadow.camera.bottom = -shadowExtent;
-	keyLight.shadow.mapSize.set(2048, 2048);
+	// Fixed for the session — `setShadowQuality` documents why this cannot be
+	// changed at runtime on the WebGPU path.
+	keyLight.shadow.mapSize.set(SHADOW_MAP_SIZE, SHADOW_MAP_SIZE);
 
 	/**
 	 * Shadow bias, scaled to the map's world texel size.
@@ -910,6 +939,19 @@ export function createDayNightCycle(
 	let sunGlowMultiplier = 1.0;
 	/** Wall-clock seconds driving cloud drift. */
 	let skyTime = 0;
+	/**
+	 * In-flight manual period change, driven by `update`.
+	 *
+	 * `span` is always positive: the sweep runs *forward* through the clock even
+	 * when the target is nearer going backwards, because running the sun
+	 * backwards across the sky reads as a glitch rather than a transition.
+	 */
+	let transition: {
+		from: number;
+		span: number;
+		target: number;
+		elapsed: number;
+	} | null = null;
 
 	function nearestPeriod(h: number): DayPeriod {
 		let best: DayPeriod = "morning";
@@ -1008,13 +1050,37 @@ export function createDayNightCycle(
 			keyLight.color.copy(sample.sun);
 			const lowBoost = THREE.MathUtils.smoothstep(0.4, 0.05, sunDir.y);
 			keyLight.intensity = sample.sunIntensity * (1 + lowBoost * 0.2);
-			keyLight.castShadow = true;
+			keyLight.shadow.intensity = 1;
 		} else {
 			keyLight.color.copy(sample.moon);
 			keyLight.intensity = sample.moonIntensity;
-			// Moonlight now casts too — a shadowless night reads flat and grey.
-			keyLight.castShadow = sample.moonIntensity > 0.25;
+			// Moonlight casts too — a shadowless night reads flat and grey — but it
+			// fades in rather than switching on at a threshold.
+			keyLight.shadow.intensity = THREE.MathUtils.smoothstep(
+				sample.moonIntensity,
+				0.18,
+				0.45
+			);
 		}
+		// NB: `castShadow` is set once at construction and deliberately never
+		// touched here.
+		//
+		// This used to toggle it per hour (`castShadow = moonIntensity > 0.25`).
+		// Toggling it makes three retire and rebuild the light's shadow node, and
+		// doing that while a `PassNode` post-processing chain is live corrupts the
+		// pass graph — the scene pass ends up sampling and writing its own target
+		// inside one render pass:
+		//
+		//   GPUValidationError: [Texture "output"] usage (TextureBinding|
+		//   RenderAttachment) includes writable usage and another usage in the same
+		//   synchronization scope
+		//
+		// which fired every frame once the hour crossed sunrise or sunset. Reproduced
+		// at 688 errors in one hour sweep with MSAA + postfx active.
+		//
+		// `shadow.intensity` reaches the shader as a live uniform
+		// (`reference('intensity', 'float', shadow)`), so driving that instead is
+		// free, rebuilds nothing, and gives a smooth ramp for the same visual.
 		// Anchor the frustum on the player, not the world origin, so the ±extent
 		// ortho box travels with them instead of being stranded at (0,0,0).
 		positionKeyLight();
@@ -1069,6 +1135,8 @@ export function createDayNightCycle(
 			return hour;
 		},
 		set hour(v: number) {
+			// An explicit hour wins over an in-flight sweep.
+			transition = null;
 			hour = ((v % 24) + 24) % 24;
 			apply();
 		},
@@ -1089,6 +1157,9 @@ export function createDayNightCycle(
 			return auto;
 		},
 		set auto(v: boolean) {
+			// Handing control back to the clock abandons any manual sweep, which
+			// would otherwise keep overwriting `hour` until it finished.
+			if (v) transition = null;
 			auto = v;
 		},
 		get speed() {
@@ -1100,13 +1171,28 @@ export function createDayNightCycle(
 		get period() {
 			return period;
 		},
-		setPeriod(next) {
-			hour = DAY_PERIODS[next].hour;
+		setPeriod(next, immediate = false) {
 			period = next;
 			auto = false;
-			apply();
+
+			const target = DAY_PERIODS[next].hour;
+			// Forward-only distance around the 24 h clock.
+			const span = (((target - hour) % 24) + 24) % 24;
+
+			// Already sitting on it — nothing to sweep, and starting a transition
+			// would take the long way round the whole day.
+			if (immediate || span < 1e-3) {
+				transition = null;
+				hour = target;
+				apply();
+				return;
+			}
+
+			transition = { from: hour, span, target, elapsed: 0 };
 		},
 		setHour(next) {
+			// An explicit hour wins over an in-flight sweep.
+			transition = null;
 			hour = ((next % 24) + 24) % 24;
 			apply();
 		},
@@ -1115,7 +1201,19 @@ export function createDayNightCycle(
 			// clouds keep moving even when the cycle is paused.
 			skyTime += dt;
 			skyMat.uniforms.uTime.value = skyTime;
-			if (auto) {
+
+			if (transition) {
+				transition.elapsed += dt;
+				const t = Math.min(1, transition.elapsed / PERIOD_TRANSITION_SECONDS);
+				// Eased on top of the per-segment smoothstep `sampleAtHour` already
+				// applies, so the sweep starts and lands without a visible kick.
+				hour = (transition.from + transition.span * smoothstep01(t)) % 24;
+				if (t >= 1) {
+					hour = transition.target;
+					transition = null;
+				}
+				apply();
+			} else if (auto) {
 				hour = (hour + speed * dt) % 24;
 				apply();
 			}
@@ -1137,24 +1235,39 @@ export function createDayNightCycle(
 			// Only the light needs moving; the colour sample is unchanged.
 			positionKeyLight();
 		},
-		setShadowQuality(mapSize, extent) {
-			const size = Math.max(512, Math.min(8192, Math.floor(mapSize)));
+		setShadowQuality(_mapSize, extent) {
+			// The shadow map's *resolution* is fixed for the session — see
+			// SHADOW_MAP_SIZE. Only the ortho extent is adjustable here.
+			//
+			// Resizing it at runtime cannot be done safely on this renderer. The
+			// target is allocated by `ShadowNode.setupRenderTarget()` during node
+			// graph construction and owned by the node, and every route to changing
+			// its size ends in freeing a texture the node is still submitting:
+			//
+			//   - `shadow.map.dispose(); shadow.map = null` (the WebGL idiom) leaves
+			//     the node using freed memory *and* never rebuilds, so `shadow.map`
+			//     stays null and shadows vanish for the rest of the session.
+			//   - `RenderTarget.setSize()` keeps the objects alive but still frees the
+			//     GPU resources; once the scene target is multisampled the driver
+			//     reports "Destroyed texture [ShadowDepthTexture] used in a submit"
+			//     every frame.
+			//   - Deferring that same work by a frame makes it worse, not better.
+			//
+			// The resolution was never where the cost was, either: what makes a large
+			// map expensive is re-rendering it every frame, and that is governed by
+			// `shadow.autoUpdate`, which the caller still drives per quality tier.
+			// So the tier keeps its meaning and loses only an adjustment that could
+			// not be made safely.
 			const next = Math.max(20, extent);
-			if (size === keyLight.shadow.mapSize.x && next === shadowExtent) return;
+			if (next === shadowExtent) return;
 			shadowExtent = next;
-			keyLight.shadow.mapSize.set(size, size);
 			keyLight.shadow.camera.left = -shadowExtent;
 			keyLight.shadow.camera.right = shadowExtent;
 			keyLight.shadow.camera.top = shadowExtent;
 			keyLight.shadow.camera.bottom = -shadowExtent;
 			keyLight.shadow.camera.updateProjectionMatrix();
-			// Texel size changed, so the bias has to be rescaled with it.
+			// Extent changed, so texel size did too and the bias has to follow.
 			applyShadowBias();
-			// mapSize only takes effect on a fresh target.
-			if (keyLight.shadow.map) {
-				keyLight.shadow.map.dispose();
-				keyLight.shadow.map = null as unknown as THREE.WebGLRenderTarget;
-			}
 			positionKeyLight();
 		},
 		setSunGlowMultiplier(v) {
