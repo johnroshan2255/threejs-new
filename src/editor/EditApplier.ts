@@ -213,6 +213,18 @@ export class EditApplier {
 		return kind === "tree" || kind === "stone";
 	}
 
+	previewTransform(entityId: string, obj: THREE.Object3D) {
+		const handle = this.entities.get(entityId);
+		if (!handle) return;
+		if (handle.kind === "tree") {
+			const tm = this.host.getTreeManager();
+			if (tm) {
+				const scale = (obj.scale.x + obj.scale.y + obj.scale.z) / 3;
+				tm.updateTreeTransform(entityId, obj.position, obj.rotation.y, scale);
+			}
+		}
+	}
+
 	async apply(op: WorldEditOp): Promise<boolean> {
 		if (this.applied.has(op.id)) return false;
 		this.applied.add(op.id);
@@ -563,8 +575,7 @@ export class EditApplier {
 			this.deferColliderRebuild = false;
 		}
 		this.flushCaveTerrain();
-		const tm = this.host.getTreeManager();
-		if (tm) tm.clear();
+		this.host.getGrassField()?.clearMask();
 	}
 
 	private tagEntity(obj: THREE.Object3D, entityId: string) {

@@ -402,7 +402,16 @@ export function caveMouthMaskCircles(
 	const dilate = punchDilate(cellSize);
 	return caveMouthRuns(sampleCaveSpine(nodes, sampleHeight), dilate)
 		.flat()
-		.map((m) => ({ x: m.x, z: m.z, radius: m.r + dilate }));
+		.map((m) => {
+			// Grow grass much closer to the cave mouth to hide the jagged hole edges.
+			const R = m.r + 0.05;
+			const h = sampleHeight(m.x, m.z) - 0.15;
+			const dy = h - m.y;
+			const r2 = R * R - dy * dy;
+			const radius = r2 > 0 ? Math.sqrt(r2) : 0;
+			return { x: m.x, z: m.z, radius };
+		})
+		.filter((c) => c.radius > 0.1);
 }
 
 /** The most open point of a run — where an entrance ramp belongs. */

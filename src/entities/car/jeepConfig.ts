@@ -24,13 +24,13 @@ export const JEEP_CONFIG = {
 			lensColor: "#ffffff",
 			markerColor: "#ffffff",
 			lensSize: 0.1, // smaller than Kenney's big yellow lamps
-			spotIntensity: 18,
-			distance: 26,
+			spotIntensity: 20,
+			distance: 50,
 			angle: Math.PI / 3.0,
 			forwardBias: 0.05,
 			mounts: {
-				left: { x: -0.7, y: 1.25, z: 2.0 },
-				right: { x: 0.7, y: 1.25, z: 2.0 },
+				left: { x: -0.9, y: 1.5, z: 2.6 },
+				right: { x: 0.9, y: 1.5, z: 2.6 },
 			},
 			hideLens: true,
 		},
@@ -41,12 +41,12 @@ export const JEEP_CONFIG = {
 			markerColor: "#ff0000",
 			lensSize: 0.12,
 			spotIntensity: 4,
-			distance: 8,
+			distance: 18,
 			angle: Math.PI / 2.0,
 			forwardBias: -0.05, // point slightly backward from the lens
 			mounts: {
-				left: { x: -0.8, y: 1.3, z: -2.301 },
-				right: { x: 0.8, y: 1.3, z: -2.301 },
+				left: { x: -1.0, y: 1.6, z: -2.301 },
+				right: { x: 1.0, y: 1.6, z: -2.301 },
 			},
 			isTaillight: true,
 			hideLens: true,
@@ -158,5 +158,5 @@ export const JEEP_CONFIG = {
 	},
 
 	/** Explicit grapple hook mount point relative to physics center */
-	grappleMount: { x: 0, y: 1, z: 2.3 },
+	grappleMount: { x: 0, y: 1, z: 3.3 },
 };

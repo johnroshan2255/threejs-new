@@ -251,6 +251,21 @@ export class TreeInstancedMesh {
 		this.trunkMesh.userData = { isTreeInstancedMesh: true, manager: this };
 		this.foliageMesh.userData = { isTreeInstancedMesh: true, manager: this };
 
+		// Fix CPU raycasting: force it to use the master unculled data
+		this.trunkMesh.getMatrixAt = (index: number, matrix: THREE.Matrix4) => {
+			matrix.fromArray(this.masterTrunkArray, index * 16);
+			return matrix;
+		};
+		this.foliageMesh.getMatrixAt = (index: number, matrix: THREE.Matrix4) => {
+			matrix.fromArray(this.masterFoliageArray, index * 16);
+			return matrix;
+		};
+		const hugeSphere = new THREE.Sphere(new THREE.Vector3(), 1000000);
+		this.trunkMesh.boundingSphere = hugeSphere;
+		this.foliageMesh.boundingSphere = hugeSphere;
+		this.trunkMesh.count = 0;
+		this.foliageMesh.count = 0;
+
 		// 6. Compute Shaders
 		const resetFn = Fn(() => {
 			atomicStore(trunkIndirectNode.element(1), uint(0));
@@ -414,6 +429,8 @@ export class TreeInstancedMesh {
 		this.indexToId.set(index, id);
 		
 		this.countUniform.value = this.count;
+		this.trunkMesh.count = this.count;
+		this.foliageMesh.count = this.count * this.leafLayers;
 		
 		this.updateTreeTransform(id, position, rotationY, scale, leafColorHex);
 	}
@@ -513,6 +530,8 @@ export class TreeInstancedMesh {
 		
 		this.count--;
 		this.countUniform.value = this.count;
+		this.trunkMesh.count = this.count;
+		this.foliageMesh.count = this.count * this.leafLayers;
 		
 		const world = getWorld();
 		if (world) {
@@ -531,6 +550,8 @@ export class TreeInstancedMesh {
 	clear() {
 		this.count = 0;
 		if (this.countUniform) this.countUniform.value = 0;
+		this.trunkMesh.count = 0;
+		this.foliageMesh.count = 0;
 		this.idToIndex.clear();
 		this.indexToId.clear();
 		

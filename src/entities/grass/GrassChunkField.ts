@@ -57,6 +57,7 @@ export class GrassChunkField {
 	private densityUniform: any;
 
 	private allMatrices?: Float32Array;
+	private pristineMatrices?: Float32Array;
 	private roadMasked?: boolean[];
 	private instanceDataBuffer?: StorageBufferAttribute;
 
@@ -104,6 +105,11 @@ export class GrassChunkField {
 		}
 
 		if (totalCount === 0) return;
+
+		if (this.allMatrices) {
+			this.pristineMatrices = new Float32Array(this.allMatrices);
+		}
+
 		this.roadMasked = new Array(totalCount).fill(false);
 
 		if (!options.geometry.boundingSphere) options.geometry.computeBoundingSphere();
@@ -372,6 +378,14 @@ export class GrassChunkField {
 			this.instanceDataBuffer.array.set(this.allMatrices);
 			this.instanceDataBuffer.needsUpdate = true;
 		}
+	}
+
+	clearMask() {
+		if (!this.allMatrices || !this.pristineMatrices || !this.roadMasked || !this.instanceDataBuffer) return;
+		this.allMatrices.set(this.pristineMatrices);
+		this.roadMasked.fill(false);
+		this.instanceDataBuffer.array.set(this.allMatrices);
+		this.instanceDataBuffer.needsUpdate = true;
 	}
 
 	dispose() {

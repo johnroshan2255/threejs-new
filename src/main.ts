@@ -302,7 +302,7 @@ export class FluffyGrass {
 	};
 	private clock = new THREE.Clock();
 
-	private terrainMat: THREE.MeshPhongMaterial;
+	private terrainMat: MeshPhongNodeMaterial;
 	private pond?: Pond;
 	private grassGeometry = new THREE.BufferGeometry();
 	private grassMaterial: GrassMaterial;
@@ -579,7 +579,7 @@ export class FluffyGrass {
 			75,
 			window.innerWidth / window.innerHeight,
 			0.1,
-			1000
+			15000
 		);
 		this.camera.position.set(-17, 12, -10);
 		// See both world (grass) and car layers
@@ -3405,7 +3405,8 @@ export class FluffyGrass {
 		// doesn't slide the grass ring in a weird direction.
 		let cullPos: THREE.Vector3;
 		if (this.editMode?.isEnabled) {
-			cullPos = this.editMode.activeCamera.position;
+			if (this.editorTopDown) cullPos = this.camera.position;
+			else cullPos = this.editMode.target;
 		} else if (this.activePlayer === "human" && this.human?.mesh) {
 			cullPos = this.human.mesh.position;
 		} else if (this.car?.mesh) {
@@ -5233,11 +5234,16 @@ export class FluffyGrass {
 					: this.currentWorld === "valley"
 						? this.valleyTerrainMesh
 						: this.islandTerrainMesh;
-				const mat = (mesh?.material as THREE.MeshPhongMaterial | undefined) ?? this.terrainMat;
-				mat.vertexColors = true;
-				// Keep albedo white so vertex greens (and mud) show at full strength.
-				mat.color.setHex(0xffffff);
-				mat.needsUpdate = true;
+				const mat = (mesh?.material as MeshPhongNodeMaterial | undefined) ?? this.terrainMat;
+				if (!mat.vertexColors) {
+					mat.vertexColors = true;
+					mat.color.setHex(0xffffff);
+					// NodeMaterial graph was built without vertexColors. We must clear the flag
+					// and re-apply snow so stockAlbedoNode picks up the vertexColor() multiplier.
+					delete (mat as any)["snowPatched"];
+					applySnowToMaterial(mat);
+					mat.needsUpdate = true;
+				}
 			},
 			setMapMode: (enabled) => {
 				this.sceneProps.mapMode = enabled;

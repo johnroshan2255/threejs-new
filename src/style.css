@@ -576,7 +576,7 @@ body.orientation-portrait-lock .dg.ac {
 	pointer-events: none !important;
 }
 
-/* World transition loading */
+/* World transition loading — compact card matching the settings panel */
 .world-loading-overlay {
 	position: fixed;
 	inset: 0;
@@ -584,10 +584,9 @@ body.orientation-portrait-lock .dg.ac {
 	display: none;
 	align-items: center;
 	justify-content: center;
-	padding: 24px;
-	background: rgba(6, 10, 8, 0.92);
-	backdrop-filter: blur(16px);
-	-webkit-backdrop-filter: blur(16px);
+	background: rgba(4, 6, 5, 0.5);
+	backdrop-filter: blur(8px) saturate(0.85);
+	-webkit-backdrop-filter: blur(8px) saturate(0.85);
 }
 
 .world-loading-overlay.is-visible {
@@ -595,37 +594,69 @@ body.orientation-portrait-lock .dg.ac {
 }
 
 .world-loading-card {
-	width: min(420px, 90vw);
-	color: #f1f7ed;
-	text-align: center;
-	font-family: "Sora", system-ui, sans-serif;
-}
-
-.world-loading-card h2 {
-	margin-bottom: 10px;
-	font-size: 1.6rem;
+	width: 260px;
+	background: rgba(11, 15, 14, 0.82);
+	backdrop-filter: blur(26px) saturate(1.2);
+	-webkit-backdrop-filter: blur(26px) saturate(1.2);
+	border: 1px solid rgba(206, 255, 193, 0.11);
+	border-radius: 6px;
+	box-shadow: 0 40px 90px -24px rgba(0, 0, 0, 0.85),
+	            inset 0 1px 0 rgba(255, 255, 255, 0.05);
+	overflow: hidden;
+	font-family: "Archivo", system-ui, -apple-system, "Segoe UI", sans-serif;
+	color: #e7ede6;
 }
 
 .world-loading-card p {
-	min-height: 22px;
-	margin-bottom: 18px;
-	color: rgba(225, 238, 216, 0.72);
-	font-size: 0.9rem;
+	font-family: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+	font-size: 10px;
+	font-weight: 500;
+	letter-spacing: 0.18em;
+	text-transform: uppercase;
+	color: #8b968c;
+	margin: 0;
+}
+
+.world-loading-card h2 {
+	font-size: 13px;
+	font-weight: 700;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	color: #e7ede6;
+	margin: 0 0 12px;
+}
+
+/* Header row */
+.world-loading-card-head {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	padding: 12px 14px 10px;
+	border-bottom: 1px solid rgba(206, 255, 193, 0.11);
+}
+
+/* Progress area */
+.world-loading-card-body {
+	padding: 10px 14px 12px;
 }
 
 .world-loading-track {
-	height: 7px;
+	height: 2px;
 	overflow: hidden;
 	border-radius: 999px;
-	background: rgba(255, 255, 255, 0.1);
+	background: rgba(206, 255, 193, 0.11);
+	position: relative;
 }
 
 .world-loading-progress {
+	position: absolute;
+	inset: 0 auto 0 0;
 	width: 0;
 	height: 100%;
 	border-radius: inherit;
-	background: #a3d977;
-	transition: width 0.2s ease;
+	background: #a9ea5c;
+	transition: width 0.25s cubic-bezier(0.2, 0.7, 0.2, 1);
+	box-shadow: 0 0 6px rgba(169, 234, 92, 0.5);
 }
 
 /* Loading Screen */

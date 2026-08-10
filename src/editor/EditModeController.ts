@@ -259,6 +259,11 @@ export class EditModeController {
 		this.transformControls.getHelper().visible = false;
 		this.transformControls.enabled = false;
 		this.transformControls.setSize(0.9);
+		this.transformControls.addEventListener("change", () => {
+			if (this.transformDragging && this.selectedEntityId && this.transformControls.object) {
+				this.applier.previewTransform(this.selectedEntityId, this.transformControls.object);
+			}
+		});
 		this.transformControls.addEventListener("dragging-changed", (event) => {
 			this.transformDragging = Boolean(
 				(event as { value?: boolean }).value
@@ -282,10 +287,14 @@ export class EditModeController {
 				this.brushHelper.visible = this.enabled && this.isBrushTool(tool);
 				this.updateBrushColor();
 				this.syncBrushHelperScale();
-				// Leaving the cave tool abandons an unfinished spine rather than
-				// letting it reappear later on an unrelated click.
 				if (tool !== "paint-cave") this.clearCaveDraft();
-				if (tool !== "select") this.clearSelection();
+				if (tool !== "select") {
+					this.clearSelection();
+				} else if (this.selectedEntityId) {
+					this.setSelection(this.selectedEntityId);
+				} else if (this.transformControls) {
+					this.transformControls.enabled = true;
+				}
 				if (tool === "camera" && this.viewMode === "orbit") {
 					this.syncOrbit();
 				}
@@ -1047,6 +1056,8 @@ export class EditModeController {
 			mat.vertexColors = this.terrainHadVertexColors;
 			if (!mat.vertexColors) {
 				mat.color.set(this.host.getScenePropsTerrainColor());
+			} else {
+				mat.color.setHex(0xffffff);
 			}
 			mat.needsUpdate = true;
 		}
@@ -1625,6 +1636,7 @@ export class EditModeController {
 
 				// Camera tool: LMB drag orbits (look around hills); Shift+LMB pans.
 				// Short click still snaps focus to the surface hit.
+
 				if (this.tool === "camera") {
 					this.lastPan.set(event.clientX, event.clientY);
 					this.pointerDownPos.set(event.clientX, event.clientY);
@@ -1847,7 +1859,7 @@ export class EditModeController {
 	}
 
 	private clampTargetToMap() {
-		const half = this.host.getActiveWorldDefinition().size * 0.48;
+		const half = this.host.getActiveWorldDefinition().size * 0.5;
 		this.target.x = THREE.MathUtils.clamp(this.target.x, -half, half);
 		this.target.z = THREE.MathUtils.clamp(this.target.z, -half, half);
 	}
@@ -2080,7 +2092,7 @@ export class EditModeController {
 			this.clearSelection();
 			return;
 		}
-		const entityId = this.applier.getEntityIdAtObject(hits[0].object);
+		const entityId = this.applier.getEntityIdAtIntersection(hits[0]);
 		if (!entityId) {
 			this.clearSelection();
 			return;

@@ -11,10 +11,14 @@ export class WorldLoadingOverlay {
 		this.root.setAttribute("aria-live", "polite");
 		this.root.innerHTML = `
 			<div class="world-loading-card">
-				<h2>Loading world</h2>
-				<p>Preparing terrain...</p>
-				<div class="world-loading-track">
-					<div class="world-loading-progress"></div>
+				<div class="world-loading-card-head">
+					<p>Loading world</p>
+					<h2>Preparing terrain</h2>
+				</div>
+				<div class="world-loading-card-body">
+					<div class="world-loading-track">
+						<div class="world-loading-progress"></div>
+					</div>
 				</div>
 			</div>
 		`;
@@ -26,23 +30,23 @@ export class WorldLoadingOverlay {
 	}
 
 	show(worldName: string): void {
-		this.title.textContent = `Loading ${worldName}`;
-		this.status.textContent = "Preparing terrain...";
+		this.status.textContent = worldName;
+		this.title.textContent = "Preparing terrain";
 		this.bar.style.width = "5%";
 		this.root.classList.add("is-visible");
 	}
 
 	/** Generic task, for anything that stalls a frame but isn't a world load. */
 	showTask(title: string, message: string): void {
-		this.title.textContent = title;
-		this.status.textContent = message;
+		this.status.textContent = title;
+		this.title.textContent = message;
 		this.bar.style.width = "10%";
 		this.root.classList.add("is-visible");
 	}
 
 	setProgress(percent: number, message: string): void {
 		this.bar.style.width = `${Math.max(0, Math.min(100, percent))}%`;
-		this.status.textContent = message;
+		this.title.textContent = message;
 	}
 
 	hide(): void {
@@ -50,8 +54,8 @@ export class WorldLoadingOverlay {
 	}
 
 	showError(message: string): void {
-		this.title.textContent = "World change failed";
-		this.status.textContent = message;
+		this.status.textContent = "World change failed";
+		this.title.textContent = message;
 		this.bar.style.width = "0%";
 		window.setTimeout(() => this.hide(), 3000);
 	}
