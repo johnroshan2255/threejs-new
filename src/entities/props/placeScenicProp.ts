@@ -78,6 +78,50 @@ function normalizePropRoot(source: THREE.Group): {
 	};
 }
 
+
+/**
+ * Fixed trimesh body following every triangle of a placed prop.
+ *
+ * Vertices are baked to world space because the body itself sits at the origin —
+ * simpler than keeping a body transform in sync with the group, and these props
+ * never move once placed.
+ */
+function createTrimeshBody(group: THREE.Object3D): RAPIER.RigidBody | null {
+	group.updateMatrixWorld(true);
+	const positions: number[] = [];
+	const _v = new THREE.Vector3();
+	group.traverse((child) => {
+		if (!(child instanceof THREE.Mesh)) return;
+		const geo = child.geometry.index
+			? child.geometry.toNonIndexed()
+			: child.geometry;
+		const attr = geo.attributes.position;
+		if (!attr) return;
+		for (let i = 0; i < attr.count; i++) {
+			_v.fromBufferAttribute(attr, i).applyMatrix4(child.matrixWorld);
+			positions.push(_v.x, _v.y, _v.z);
+		}
+		if (geo !== child.geometry) geo.dispose();
+	});
+	// Three vertices minimum, and Rapier wants whole triangles.
+	const triCount = Math.floor(positions.length / 9);
+	if (triCount < 1) return null;
+
+	const vertices = new Float32Array(positions.slice(0, triCount * 9));
+	const indices = new Uint32Array(triCount * 3);
+	for (let i = 0; i < indices.length; i++) indices[i] = i;
+
+	const world = getWorld();
+	const body = world.createRigidBody(RAPIER.RigidBodyDesc.fixed());
+	world.createCollider(
+		RAPIER.ColliderDesc.trimesh(vertices, indices)
+			.setFriction(1.0)
+			.setRestitution(0),
+		body
+	);
+	return body;
+}
+
 /**
  * Place a GLB with height scaled to meters (human ≈ 1.8 m).
  * Bottom of the mesh sits on terrain. Optional fixed Rapier collider.
@@ -88,8 +132,14 @@ export async function placeScenicProp(options: {
 	/** Desired world height in meters. */
 	targetHeight: number;
 	rotationY?: number;
-	/** Add a fixed cuboid collider (default true). */
+	/** Add a fixed collider (default true). */
 	withCollider?: boolean;
+	/**
+	 * `box` wraps the whole prop — fine for anything you just must not drive
+	 * through. `trimesh` follows the model's own surface, which is what a ramp needs:
+	 * against a box a ramp is a kerb you bump into instead of a slope you climb.
+	 */
+	colliderShape?: "box" | "trimesh";
 	manager?: THREE.LoadingManager;
 }): Promise<ScenicPropHandle> {
 	const template = await loadPropTemplate(options.assetUrl, options.manager);
@@ -106,7 +156,9 @@ export async function placeScenicProp(options: {
 	group.updateMatrixWorld(true);
 
 	let body: RAPIER.RigidBody | null = null;
-	if (options.withCollider !== false) {
+	if (options.withCollider !== false && options.colliderShape === "trimesh") {
+		body = createTrimeshBody(group);
+	} else if (options.withCollider !== false) {
 		const worldBox = new THREE.Box3().setFromObject(group);
 		const worldSize = new THREE.Vector3();
 		const center = new THREE.Vector3();

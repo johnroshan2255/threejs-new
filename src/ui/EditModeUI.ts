@@ -657,7 +657,18 @@ export class EditModeUI {
 			<button type="button" data-mesh="${entry.id}" class="edit-mesh-thumb${
 					entry.id === this.meshId ? " is-active" : ""
 				}" title="${entry.name}">
-				<img id="edit-mesh-img-${entry.id}" src="${entry.preview}" alt="${entry.name}" loading="lazy" draggable="false" />
+				${
+					// An <img src=""> renders as a broken-image icon, which is what every
+					// entry without authored art was showing. No art: no <img>.
+					entry.preview
+						? `<img id="edit-mesh-img-${entry.id}" src="${entry.preview}" alt="${entry.name}" loading="lazy" draggable="false" />`
+						: // Deliberately not a <span>: the shelf hides every span on a tile
+							// (labels live in the tooltip), which turned this placeholder into
+							// an empty box.
+							`<i class="edit-mesh-noart" aria-hidden="true">${escapeHtml(
+								entry.label.slice(0, 2).toUpperCase()
+							)}</i>`
+				}
 				<span>${entry.label}</span>
 			</button>`
 			)

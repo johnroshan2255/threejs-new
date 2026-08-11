@@ -72,6 +72,13 @@ export type EditModeHost = {
 	switchToWorldId: (worldId: string) => Promise<void>;
 	/** Leave for another world by reloading the page — see main.ts reloadIntoWorld. */
 	reloadIntoWorld: (worldId: string) => void;
+	/** Live animals: the render loop steers them and the gun can hit them. */
+	addAnimal: (
+		entityId: string,
+		animal: import("../entities/animal/createAnimal").AnimalHandle
+	) => void;
+	removeAnimal: (entityId: string) => void;
+	emitDeathSmoke: (position: THREE.Vector3) => void;
 	/** In-memory custom world defs (created this session, not yet in the DB). */
 	listLocalCustomWorlds: () => WorldDefinition[];
 	/** Rebuild fluffy grass from the current terrain (used after undo/redo). */
@@ -213,6 +220,10 @@ export class EditModeController {
 			removeEditorPond: (pond) => host.removeEditorPond(pond),
 			getScenePropsTerrainColor: () => host.getScenePropsTerrainColor(),
 			getActiveWorldId: () => host.getActiveWorldDefinition().id,
+			getActiveWorldSize: () => host.getActiveWorldDefinition().size,
+			addAnimal: (entityId, animal) => host.addAnimal(entityId, animal),
+			removeAnimal: (entityId) => host.removeAnimal(entityId),
+			emitDeathSmoke: (position) => host.emitDeathSmoke(position),
 			getTreeManager: () => host.getTreeManager(),
 		});
 

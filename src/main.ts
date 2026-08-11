@@ -80,6 +80,7 @@ import {
 } from "./entities/grass/grassPlacementCore";
 import { grassPlacementWorker } from "./workers/grassPlacementClient";
 import { EditModeController } from "./editor/EditModeController";
+import type { AnimalHandle } from "./entities/animal/createAnimal";
 import {
 	createLargeBlankWorld,
 	createProceduralTerrain,
@@ -245,6 +246,14 @@ const GODRAY_SUN_RADIUS = 0.55;
  * the ground's hue back to the day/night rig.
  */
 const TERRAIN_SUNSET_TINT = 0.4;
+
+/**
+ * Marks a bullet target as wildlife.
+ *
+ * The bullet system only hands back an id, so animals share the vehicle-target
+ * path with the car and are told apart by this prefix plus their edit-op id.
+ */
+const ANIMAL_TARGET_PREFIX = "animal:";
 
 const EDITOR_TOPDOWN = {
 	/** 948 -> 371 speckled pixels. The view is static, so frames are cheap. */
@@ -445,6 +454,14 @@ export class FluffyGrass {
 
 	private trees: TreeHandle[] = [];
 	private editorStones: PlacedStoneHandle[] = [];
+	/**
+	 * Live wildlife, keyed by the edit-op id that spawned it.
+	 *
+	 * A map rather than an array so the applier can pull one out when its op is
+	 * deleted or the world is rebuilt, and so bullet target ids round-trip back to
+	 * the right bird.
+	 */
+	private readonly animals = new Map<string, AnimalHandle>();
 	private editorPonds: Pond[] = [];
 	private islandScenicProps: ScenicPropHandle[] = [];
 	private lampFireflyGlow: LampFireflyGlow | null = null;
@@ -2842,6 +2859,15 @@ export class FluffyGrass {
 
 		if (this.bulletSystem) {
 			this.bulletSystem.onHit = (targetId, point, part) => {
+				if (targetId.startsWith(ANIMAL_TARGET_PREFIX)) {
+					const animal = this.animals.get(
+						targetId.slice(ANIMAL_TARGET_PREFIX.length)
+					);
+					// kill() hides it, fires the death puff and respawns it elsewhere —
+					// in the sky for flyers, on the ground for walkers.
+					animal?.kill();
+					return;
+				}
 				if (targetId === "car-local") {
 					if (this.smokeSystem) {
 						this.smokeSystem.emit(point); // bullet impact puff
@@ -3562,6 +3588,11 @@ export class FluffyGrass {
 			this.updateEditorPonds(dt);
 		}
 
+		// Outside the per-world block above: that one is gated on which grass field is
+		// visible, and wildlife has nothing to do with grass. Nested there, animals
+		// froze in any world whose gate was false.
+		this.updateAnimals(dt);
+
 		this.maybeInjectAmbientWaterRipples(now);
 
 		// Hand the cursor back the moment mouse-look stops being allowed
@@ -4198,6 +4229,16 @@ export class FluffyGrass {
 					id: "car-local",
 					position: this.car.mesh.position.clone().add(new THREE.Vector3(0, 1.0, 0)),
 					radius: 2.5
+				});
+			}
+			// Wildlife rides the same sphere-target path as the car: id prefixed so the
+			// hit handler can tell a chicken from a vehicle.
+			for (const [id, animal] of this.animals) {
+				if (animal.isDead) continue;
+				vehicleTargets.push({
+					id: `${ANIMAL_TARGET_PREFIX}${id}`,
+					position: animal.targetPosition,
+					radius: animal.targetRadius,
 				});
 			}
 			this.bulletSystem.update(dt, targets, bombTargets, vehicleTargets);
@@ -4932,6 +4973,43 @@ export class FluffyGrass {
 		}
 	}
 
+	/**
+	 * Steer every live animal.
+	 *
+	 * Kept out of the editor: a chicken wandering off while you are trying to place
+	 * props is maddening, and the flock would drift away from where it was authored.
+	 * They freeze in place and resume in play mode.
+	 */
+	/**
+	 * White puff marking a kill.
+	 *
+	 * A burst rather than one particle: a single puff at this scale is a smudge, and
+	 * the death has to read from across the field. Offsets are small so it stays a
+	 * cloud at the body rather than a fog bank.
+	 */
+	private emitDeathSmoke(position: THREE.Vector3) {
+		if (!this.smokeSystem) return;
+		for (let i = 0; i < 10; i++) {
+			this._deathSmokePos
+				.copy(position)
+				.add(
+					new THREE.Vector3(
+						(Math.random() - 0.5) * 0.9,
+						Math.random() * 0.7,
+						(Math.random() - 0.5) * 0.9
+					)
+				);
+			this.smokeSystem.emit(this._deathSmokePos);
+		}
+	}
+
+	private readonly _deathSmokePos = new THREE.Vector3();
+
+	private updateAnimals(dt: number) {
+		if (this.editMode?.isEnabled) return;
+		for (const animal of this.animals.values()) animal.update(dt);
+	}
+
 	private updateEditorPonds(dt: number) {
 		if (!this.editorPonds.length) return;
 
@@ -5433,6 +5511,13 @@ export class FluffyGrass {
 			reloadIntoWorld: (worldId) => {
 				this.reloadIntoWorld(worldId as GameWorldId);
 			},
+			addAnimal: (entityId, animal) => {
+				this.animals.set(entityId, animal);
+			},
+			removeAnimal: (entityId) => {
+				this.animals.delete(entityId);
+			},
+			emitDeathSmoke: (position) => this.emitDeathSmoke(position),
 			listLocalCustomWorlds: () => [...this.customWorldDefs],
 			rebuildEditGrass: () => this.rebuildActiveEditGrass(),
 			liftPlayersAboveTerrain: () => {

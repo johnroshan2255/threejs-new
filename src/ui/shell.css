@@ -1484,3 +1484,22 @@ html.autoplay-boot .shell-hero {
 	/* Without the title and menu the hero would sit oddly high. */
 	justify-content: center;
 }
+
+/* Shelf tile for a mesh with no authored preview art.
+ * Replaces what used to be a broken-image icon: initials on the same footprint
+ * as a real thumbnail, so the grid keeps its rhythm. */
+.edit-mesh-thumb i.edit-mesh-noart {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 100%;
+	aspect-ratio: 1 / 1;
+	border-radius: 6px;
+	background: rgba(255, 255, 255, 0.06);
+	border: 1px solid rgba(255, 255, 255, 0.1);
+	font-weight: 700;
+	font-size: 15px;
+	font-style: normal;
+	letter-spacing: 0.04em;
+	color: rgba(255, 255, 255, 0.62);
+}

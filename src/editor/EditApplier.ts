@@ -2,6 +2,11 @@ import * as THREE from "three";
 import { createTree, type TreeHandle } from "../entities/tree";
 import { placeStone, type PlacedStoneHandle } from "../entities/stone/placeStone";
 import {
+	placeScenicProp,
+	type ScenicPropHandle,
+} from "../entities/props/placeScenicProp";
+import { createAnimal, type AnimalHandle } from "../entities/animal/createAnimal";
+import {
 	Pond,
 	REFERENCE_TEXELS_PER_METER,
 	REFERENCE_WATER_LOOK,
@@ -56,6 +61,8 @@ export const DEFAULT_WATER_RADIUS = 10;
 type TrackedEntity =
 	| { kind: "tree"; tree: TreeHandle }
 	| { kind: "stone"; stone: PlacedStoneHandle }
+	| { kind: "prop"; prop: ScenicPropHandle }
+	| { kind: "animal"; animal: AnimalHandle }
 	| { kind: "pond"; pond: Pond }
 	| { kind: "cave"; cave: CaveHandle };
 
@@ -97,6 +104,13 @@ export type EditApplierHost = {
 	getScenePropsTerrainColor: () => THREE.ColorRepresentation;
 	/** Active world id — a replay that outlives its world must stop. */
 	getActiveWorldId: () => string;
+	/** Extent of the active world on X/Z; animals respawn inside it. */
+	getActiveWorldSize: () => number;
+	/** Hand a spawned animal to the render loop so it steers and can be shot. */
+	addAnimal: (entityId: string, animal: AnimalHandle) => void;
+	removeAnimal: (entityId: string) => void;
+	/** White puff where something died. */
+	emitDeathSmoke: (position: THREE.Vector3) => void;
 	getTreeManager: () => import("../entities/tree/TreeInstancedMesh").TreeInstancedMesh | null;
 };
 
@@ -193,6 +207,8 @@ export class EditApplier {
 		if (tm) list.push(tm.group);
 		for (const entry of this.entities.values()) {
 			if (entry.kind === "stone") list.push(entry.stone.group);
+			else if (entry.kind === "prop") list.push(entry.prop.group);
+			else if (entry.kind === "animal") list.push(entry.animal.group);
 			else if (entry.kind === "pond") list.push(entry.pond.mesh);
 			else if (entry.kind === "cave") list.push(entry.cave.mesh);
 		}
@@ -287,11 +303,13 @@ export class EditApplier {
 			return entry.tree.group;
 		}
 		if (entry.kind === "stone") return entry.stone.group;
+		if (entry.kind === "prop") return entry.prop.group;
+		if (entry.kind === "animal") return entry.animal.group;
 		if (entry.kind === "cave") return entry.cave.mesh;
 		return entry.pond.mesh;
 	}
 
-	getEntityKind(entityId: string): "tree" | "stone" | "pond" | "cave" | null {
+	getEntityKind(entityId: string): TrackedEntity["kind"] | null {
 		return this.entities.get(entityId)?.kind ?? null;
 	}
 
@@ -362,6 +380,37 @@ export class EditApplier {
 			case "place-mesh": {
 				this.flushTerrain();
 				const catalog = resolveEditMesh(op.meshId);
+				if (catalog.kind === "prop") {
+					const prop = await placeScenicProp({
+						assetUrl: catalog.assetUrl!,
+						position: { x: op.x, z: op.z },
+						targetHeight: (catalog.targetHeight ?? 2) * (op.scale ?? 1),
+						rotationY: op.rotationY,
+						colliderShape: catalog.collider ?? "box",
+					});
+					this.tagEntity(prop.group, op.id);
+					this.host.worldGroup.add(prop.group);
+					this.entities.set(op.id, { kind: "prop", prop });
+					return true;
+				}
+				if (catalog.kind === "animal") {
+					const animal = await createAnimal({
+						assetUrl: catalog.assetUrl!,
+						kind: catalog.animalKind ?? "ground",
+						position: new THREE.Vector3(op.x, 0, op.z),
+						scale: op.scale ?? catalog.defaultScale ?? 1,
+						targetHeight: catalog.targetHeight ?? 1,
+						rotationY: op.rotationY,
+						worldSize: this.host.getActiveWorldSize(),
+						speed: catalog.speed,
+						onDeath: (pos) => this.host.emitDeathSmoke(pos),
+					});
+					this.tagEntity(animal.group, op.id);
+					this.host.worldGroup.add(animal.group);
+					this.host.addAnimal(op.id, animal);
+					this.entities.set(op.id, { kind: "animal", animal });
+					return true;
+				}
 				if (catalog.kind === "stone") {
 					const stone = await placeStone({
 						position: new THREE.Vector3(op.x, 0, op.z),
@@ -639,6 +688,17 @@ export class EditApplier {
 	private removeEntity(entityId: string) {
 		this.terrainSeated.delete(entityId);
 		const handle = this.entities.get(entityId);
+		if (handle?.kind === "animal") {
+			this.host.removeAnimal(entityId);
+			handle.animal.dispose();
+			this.entities.delete(entityId);
+			return;
+		}
+		if (handle?.kind === "prop") {
+			handle.prop.dispose();
+			this.entities.delete(entityId);
+			return;
+		}
 		if (!handle) return;
 		if (handle.kind === "tree") {
 			this.host.removeEditorTree(handle.tree);

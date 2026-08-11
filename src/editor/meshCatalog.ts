@@ -3,9 +3,22 @@
  * Grouped by category with preview thumbnails — add entries as assets are wired.
  */
 
-export type EditMeshCategoryId = "trees" | "stones" | "bushes" | "other";
+export type EditMeshCategoryId =
+	| "trees"
+	| "stones"
+	| "bushes"
+	| "animals"
+	| "props"
+	| "other";
 
-export type EditMeshKind = "tree" | "stone";
+/**
+ * How the applier builds the thing.
+ *
+ * `stone` is the generic "GLB dropped on the ground" path. `prop` is the same but
+ * with a real collider you can drive on — ramps are useless without one. `animal`
+ * is alive: it walks or flies, can be shot, and respawns.
+ */
+export type EditMeshKind = "tree" | "stone" | "prop" | "animal";
 
 /** Stable catalog ids (also used in saved world-edit ops). */
 export type EditMeshId = string;
@@ -30,12 +43,28 @@ export type EditMeshCatalogEntry = {
 	defaultScale?: number;
 	/** Random scale jitter added on place (±). */
 	scaleJitter?: number;
+	/**
+	 * Collider shape for `prop` entries.
+	 *
+	 * `trimesh` follows the model's own surface, which is the whole point of a ramp:
+	 * a box collider would just be a kerb to bump into. `box` is cheaper and right
+	 * for anything you only need to not drive through.
+	 */
+	collider?: "box" | "trimesh";
+	/** Height in metres a `prop` is scaled to, instead of a raw scale factor. */
+	targetHeight?: number;
+	/** `animal` only: walks the ground or flies the sky. */
+	animalKind?: "ground" | "air";
+	/** `animal` only: metres per second. */
+	speed?: number;
 };
 
 export const EDIT_MESH_CATEGORIES: EditMeshCategory[] = [
 	{ id: "trees", label: "Trees" },
 	{ id: "stones", label: "Stones" },
 	{ id: "bushes", label: "Bushes" },
+	{ id: "animals", label: "Animals" },
+	{ id: "props", label: "Props" },
 	{ id: "other", label: "Other" },
 ];
 
@@ -130,6 +159,96 @@ export const EDIT_MESH_CATALOG: EditMeshCatalogEntry[] = [
 		assetUrl: "/models/wooden_sign.glb",
 		defaultScale: 1.0,
 		scaleJitter: 0.0,
+	},
+	{
+		id: "chicken",
+		category: "animals",
+		kind: "animal",
+		animalKind: "ground",
+		label: "Chicken",
+		name: "Chicken",
+		preview: "",
+		assetUrl: "/Games/Animal/chicken_walkcycle.glb",
+		// Twice the original 0.62 m — a chicken at hen scale read as a bug on the
+		// ground next to 1.8 m characters and metre-tall grass.
+		targetHeight: 1.24,
+		defaultScale: 1.0,
+		scaleJitter: 0.15,
+		speed: 1.5,
+	},
+	{
+		id: "flamingo",
+		category: "animals",
+		kind: "animal",
+		animalKind: "air",
+		label: "Flamingo",
+		name: "Flying Flamingo",
+		preview: "",
+		assetUrl: "/Games/Animal/flying_flamingo.glb",
+		// Twice the chicken, so it still reads as a bird from the ground while
+		// circling overhead.
+		targetHeight: 2.48,
+		defaultScale: 1.0,
+		scaleJitter: 0.15,
+		speed: 9,
+	},
+	{
+		id: "soldier",
+		category: "animals",
+		kind: "animal",
+		animalKind: "ground",
+		label: "Soldier",
+		name: "Gun Chicken Soldier",
+		preview: "",
+		assetUrl: "/Games/Enemy/chicken_gun_walking_target.glb",
+		targetHeight: 1.8,
+		defaultScale: 1.0,
+		scaleJitter: 0.1,
+		speed: 1.8,
+	},
+	{
+		id: "ramp_circle",
+		category: "props",
+		kind: "prop",
+		label: "Circle Ramp",
+		name: "Circle Ramp",
+		preview: "",
+		assetUrl: "/Games/Ramp/circle_ramp.glb",
+		targetHeight: 6,
+		collider: "trimesh",
+	},
+	{
+		id: "ramp_small",
+		category: "props",
+		kind: "prop",
+		label: "Small Ramp",
+		name: "Small Ramp (low poly)",
+		preview: "",
+		assetUrl: "/Games/Ramp/small_ramp_lowpoly.glb",
+		targetHeight: 2.2,
+		collider: "trimesh",
+	},
+	{
+		id: "bowling_ball",
+		category: "props",
+		kind: "prop",
+		label: "Bowling Ball",
+		name: "Bowling Ball",
+		preview: "",
+		assetUrl: "/Games/Bowlingball/bowling_ball.glb",
+		targetHeight: 1.2,
+		collider: "box",
+	},
+	{
+		id: "bowling_pin",
+		category: "props",
+		kind: "prop",
+		label: "Bowling Pin",
+		name: "Bowling Pin",
+		preview: "",
+		assetUrl: "/Games/Bowlingball/bowling_pin.glb",
+		targetHeight: 1.6,
+		collider: "box",
 	},
 ];
 
