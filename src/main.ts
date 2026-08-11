@@ -122,13 +122,11 @@ import {
 	toneMapping as toneMappingTsl,
 	uniform,
 	uv,
-	vec4,
 	vec2,
 	dot,
 	fract,
 	sin,
 } from "three/tsl";
-import { bloom } from "three/addons/tsl/display/BloomNode.js";
 import { godrays } from "three/addons/tsl/display/GodraysNode.js";
 import { setCharacterAlbedo } from "./entities/human/toonCharacter";
 import { SmokeTrailSystem } from "./environment/smokeTrail";
@@ -239,6 +237,20 @@ const BOMB_ANGULAR_DAMPING = 2;
  * enough that the far side of the frame stays clear.
  */
 const GODRAY_SUN_RADIUS = 0.55;
+
+/**
+ * Resolution scale the god-ray pass drops to while its output is masked off — see
+ * collapseGodRays. A 16th on each axis is ~0.4% of the pixels, small enough that
+ * the pass is free but never zero-sized, which the render target would reject.
+ */
+const GODRAY_COLLAPSED_SCALE = 1 / 16;
+
+/**
+ * Frames the sun has to stay irrelevant before the pass is allowed to shrink.
+ * ~1/4 second at 60 fps: long enough that swinging the camera past the sun never
+ * resizes the target, short enough that dusk reclaims the cost immediately.
+ */
+const GODRAY_COLLAPSE_DWELL_FRAMES = 15;
 
 /**
  * How far the ground's fixed shade is allowed to drift toward the low sun's
@@ -360,6 +372,15 @@ export class FluffyGrass {
 	private waterFrameCounter = 0;
 	private waterDeltaAccumulator = 0;
 	private renderFrameCounter = 0;
+	/**
+	 * How often the key light's shadow map is redrawn, in milliseconds.
+	 *
+	 * Set per shadow tier by applyShadowQuality; consumed by render(). 33 ms is
+	 * ~30 Hz, which for a scene whose only fast-moving caster is one car is
+	 * indistinguishable from per-frame.
+	 */
+	private shadowRefreshMs = 33;
+	private lastShadowRefresh = 0;
 	/** Scratch vector for the dig inset's logical viewport size. */
 	private readonly _pipViewSize = new THREE.Vector2();
 	/** True while the editor's orthographic map view is the one being rendered. */
@@ -553,8 +574,10 @@ export class FluffyGrass {
 	private postProcessing: PostProcessing | null = null;
 	/** Beauty pass — its camera is retargeted when the editor takes over. */
 	private scenePass: any = null;
-	private bloomNode: any = null;
 	private godRays: any = null;
+	/** GodraysNode's own default, captured so collapseGodRays can restore it. */
+	private godRayBaseResolutionScale = 0.5;
+	private godRayCollapseDwell = 0;
 	private readonly gradeExposure = uniform(1);
 	private readonly godRayWeight = uniform(0.3);
 	/**
@@ -664,6 +687,16 @@ export class FluffyGrass {
 			antialias: !isMobileDevice(),
 			alpha: true,
 		});
+		// MSAA stays at the 4x that `antialias: true` implies.
+		//
+		// It is the most expensive single setting here — the scene pass is RGBA16F,
+		// so every sample costs 8 bytes of bandwidth on write and again on resolve —
+		// but WebGPU offers no cheaper level. `WebGPUUtils.getSampleCount` is
+		// `sampleCount >= 4 ? 4 : 1`, because the spec only requires 1 and 4, so
+		// there is no 2x to ask for: setting `samples = 2` gets pipelines built at 1
+		// sample while the canvas still attaches a resolve target, and every frame
+		// dies as "cannot set as a resolve target" with nothing drawn. It measures
+		// 18% faster precisely because it renders nothing.
 		this.renderer.shadowMap.enabled = true;
 
 		this.renderer.shadowMap.type = isMobileDevice() ? THREE.PCFShadowMap : THREE.PCFSoftShadowMap;
@@ -3430,14 +3463,18 @@ export class FluffyGrass {
 		if (frameDt <= 0 || isNaN(frameDt)) frameDt = 1 / 60;
 		const dt = Math.min(Math.max(frameDt, 0.001), 0.033);
 		this.renderFrameCounter++;
-		if (
-			this.resolutionQuality === "Medium" &&
-			this.renderFrameCounter % 6 === 0
-		) {
-			// Medium keeps shadow.autoUpdate off and re-arms the map by hand, so
-			// the expensive depth pass runs at ~10 Hz instead of every frame.
+		// No tier lets the shadow map autoUpdate (see applyShadowQuality); it is
+		// re-armed here instead, so the depth pass runs on a cadence rather than
+		// once per frame. High used to redraw it every frame, which measured as ~5%
+		// of the whole frame for a map that is visually identical at 30 Hz.
+		//
+		// Timed rather than counted in frames, because a frame interval *is* a
+		// framerate multiplier: `% 2` is 30 Hz at 60 fps and 125 Hz at 250, so the
+		// faster the frame got the more of the saving it handed back.
+		if (now - this.lastShadowRefresh >= this.shadowRefreshMs) {
 			const keyShadow = this.dayNight?.lights.keyLight.shadow;
 			if (keyShadow && this.renderer.shadowMap.enabled) {
+				this.lastShadowRefresh = now;
 				keyShadow.needsUpdate = true;
 			}
 		}
@@ -4608,9 +4645,19 @@ export class FluffyGrass {
 		// scratch every frame, which is most of the cost of a frame.
 		const keyShadow = this.dayNight?.lights.keyLight.shadow;
 		if (keyShadow) {
-			keyShadow.autoUpdate = quality === "High";
+			// Never autoUpdate, at any tier. The map is re-armed by hand from
+			// render(), on the cadence in `shadowRefreshMs` — High included,
+			// which used to redraw the full 2048² depth pass every single frame.
+			// Nothing in this scene moves fast enough for the shadow of it to need
+			// more than ~30 Hz, and the frustum re-anchor in render() is already
+			// gated on the frames where a redraw actually happens.
+			keyShadow.autoUpdate = false;
 			if (shadowsEnabled) keyShadow.needsUpdate = true;
 		}
+		// High: 30 Hz. Medium: 10 Hz, which is what its old `% 6` frame counter
+		// worked out to at 60 fps.
+		this.shadowRefreshMs = quality === "High" ? 33 : 100;
+		this.lastShadowRefresh = 0;
 		// 2048 over the +/-200 m ortho box is ~10 cm per texel, which PCF-soft
 		// shadows of a car and some trees cannot resolve past. 4096 cost 96 MB more
 		// of texture memory for a frame that measured pixel-identical.
@@ -4620,7 +4667,17 @@ export class FluffyGrass {
 
 	private applyResolutionQuality(quality: QualityLevel) {
 		this.resolutionQuality = quality;
-		const cap = quality === "Low" ? 0.75 : quality === "Medium" ? 1 : 2;
+		// High is capped at 1.5, not 2.
+		//
+		// Frame cost is very close to linear in pixel count, and this scene is
+		// fill-bound: measured at 1600x900, 1.0x -> 239 fps, 1.25x -> 185,
+		// 1.5x -> 145, 2.0x -> 95. A 2x cap means any display reporting
+		// devicePixelRatio >= 2 — most laptop panels — silently pays 2.5x the fill
+		// of the 1.25x floor that the speckle fix actually needs, for a sharpness
+		// difference that the supersample floor comment above already measured as
+		// buying nothing above 1.25. `renderScale` is still there for anyone who
+		// wants to spend it.
+		const cap = quality === "Low" ? 0.75 : quality === "Medium" ? 1 : 1.5;
 		const target = Math.min(window.devicePixelRatio, cap);
 
 		// Never render the world below ~1.25 device pixels per CSS pixel.
@@ -4693,8 +4750,12 @@ export class FluffyGrass {
 
 	private applyWaterQuality(quality: QualityLevel) {
 		this.waterQuality = quality;
+		// One water tick still costs two nested scene renders, so this is the tier's
+		// most expensive knob. High moved 2 -> 3 for ~5% of the frame; the ripple
+		// sim integrates accumulated delta rather than a fixed step, so the waves
+		// travel at the same speed either way.
 		this.waterUpdateInterval =
-			quality === "Low" ? 4 : quality === "Medium" ? 3 : 2;
+			quality === "Low" ? 5 : quality === "Medium" ? 4 : 3;
 		this.waterFrameCounter = 0;
 		this.waterDeltaAccumulator = 0;
 		this.editorWaterFrameCounter = 0;
@@ -4731,7 +4792,14 @@ export class FluffyGrass {
 		const sceneDepth = scenePass.getTextureNode("depth");
 
 		const rays = godrays(sceneDepth as any, this.camera, keyLight);
-		rays.raymarchSteps.value = 40;
+		// 16, down from 40. Each step is a shadow-map fetch per pixel, so this is
+		// the single most expensive thing in the composite: 40 -> 16 measured as a
+		// 10% whole-frame gain, and 16 -> 8 as only 2% more, so the curve has
+		// already flattened here. GodraysNode jitters the step count per pixel
+		// (`steps + (steps/8 + 2) * noise`), which dithers the banding that a low
+		// count would otherwise show.
+		rays.raymarchSteps.value = 16;
+		this.godRayBaseResolutionScale = rays.resolutionScale;
 		// GodraysNode accumulates `lit * distance * density/100` per step and returns
 		// `clamp(1 - exp(-illum), 0, maxDensity)`. Over this scene's scale — 40 steps
 		// across a 200 m shadow frustum — the old 0.55 drove `illum` past 20, so the
@@ -4757,22 +4825,18 @@ export class FluffyGrass {
 			rays.mul(this.godRayWeight).mul(sunMask)
 		);
 
-		// 1. Tonemap the HDR input (withRays)
+		// Tonemap the HDR input (withRays)
 		const tonemappedRays = toneMappingTsl(
 			THREE.ACESFilmicToneMapping,
 			this.gradeExposure,
 			withRays
 		);
 
-		// 2. Extract Bloom from the LDR tonemapped output
-		const bloomNode = bloom(vec4((tonemappedRays as any).xyz, 1.0), 0.42, 0.4, 0.72);
-		// Bloom keeps a 5-level mip chain (10 targets) plus a bright pass, and the
-		// composite reads all five, so the level count is not safely tunable. The
-		// input scale is: at 0.35 the chain holds roughly half the pixels of the
-		// 0.5 default, and the result is a wide blur that never showed that detail
-		// in the first place.
-		bloomNode.setResolutionScale(0.35);
-		this.bloomNode = bloomNode;
+		// No bloom node. One used to be built here — a 5-level mip chain plus a
+		// bright pass — and then never referenced by `graded` below, so the graph
+		// never contained it and it never contributed a pixel. Building it anyway
+		// cost the allocation and, worse, syncPostFxGrade bailed out early when it
+		// was missing, which quietly took exposure grading with it.
 
 		// Vignette: no addon node for this one, and it is two lines.
 		const vignetteAmount = uv().sub(0.5).length().mul(1.4142);
@@ -4780,10 +4844,10 @@ export class FluffyGrass {
 			.mul(0.5)
 			.add(0.5);
 
-		// 3. Apply vignette to the tonemapped output (bloom disabled).
+		// Apply vignette to the tonemapped output.
 		let graded: any = tonemappedRays.mul(vignetteFactor);
 
-		// 4. Dithering to prevent color banding in dark gradients
+		// Dithering to prevent color banding in dark gradients
 		const noise = fract(sin(dot(uv(), vec2(12.9898, 78.233))).mul(43758.5453));
 		graded = graded.add(noise.sub(0.5).mul(1.5 / 255.0));
 
@@ -4817,6 +4881,7 @@ export class FluffyGrass {
 		// screen at all.
 		if (dir.y <= 0.02 || !(cam as THREE.PerspectiveCamera).isPerspectiveCamera) {
 			this.sunScreenStrength.value = 0;
+			this.collapseGodRays(true);
 			return;
 		}
 		cam.updateMatrixWorld(true);
@@ -4825,8 +4890,10 @@ export class FluffyGrass {
 		this._camForward.set(0, 0, -1).applyQuaternion(cam.quaternion);
 		if (this._camForward.dot(dir) <= 0) {
 			this.sunScreenStrength.value = 0;
+			this.collapseGodRays(true);
 			return;
 		}
+		this.collapseGodRays(false);
 		// The sun is a direction: every point along it lands on the same pixel, so a
 		// near one is used. A far one (5000) sat past the far plane, where project()
 		// reports z > 1 and the whole effect switched itself off.
@@ -4838,6 +4905,42 @@ export class FluffyGrass {
 		);
 		// Fade in as the sun climbs, so sunrise does not pop a shaft on.
 		this.sunScreenStrength.value = THREE.MathUtils.smoothstep(dir.y, 0.02, 0.18);
+	}
+
+	/**
+	 * Shrink the god-ray march to nothing while its result is being multiplied by a
+	 * zero mask.
+	 *
+	 * `sunScreenStrength` only scales the *output*. The pass itself is a node in the
+	 * composite's graph, so it renders unconditionally: at midnight, and with the
+	 * camera pointed away from the sun, every pixel still walked the shadow map 16
+	 * times for a result that was then multiplied by 0. Measured by pinning the
+	 * weight to zero, which changed the frame time by nothing at all.
+	 *
+	 * Removing the node from the graph instead would be a recompile of the whole
+	 * composite — seconds of stall, since the node pipeline is keyed on the graph.
+	 * `resolutionScale` is re-read from GodraysNode.updateBefore every frame and
+	 * only touches its render target's size, so driving it to a 16th of an axis
+	 * makes the march ~1/256 of the pixels with no pipeline change.
+	 *
+	 * The dwell counter is what keeps a mouse-look sweep past the sun from
+	 * reallocating that target every few frames: collapsing waits for the sun to
+	 * have been irrelevant for a while, while restoring is immediate so no frame
+	 * ever shows a low-resolution shaft.
+	 */
+	private collapseGodRays(collapse: boolean) {
+		const rays = this.godRays as { resolutionScale: number } | null;
+		if (!rays) return;
+		if (!collapse) {
+			this.godRayCollapseDwell = 0;
+			if (rays.resolutionScale !== this.godRayBaseResolutionScale) {
+				rays.resolutionScale = this.godRayBaseResolutionScale;
+			}
+			return;
+		}
+		if (rays.resolutionScale === GODRAY_COLLAPSED_SCALE) return;
+		if (++this.godRayCollapseDwell < GODRAY_COLLAPSE_DWELL_FRAMES) return;
+		rays.resolutionScale = GODRAY_COLLAPSED_SCALE;
 	}
 
 	/**
@@ -4864,11 +4967,12 @@ export class FluffyGrass {
 	}
 
 	private syncPostFxGrade() {
-		if (!this.dayNight || !this.bloomNode) return;
-		const grade = this.dayNight.getGrade();
-		this.gradeExposure.value = grade.exposure;
-		this.bloomNode.strength.value = grade.bloomStrength;
-		this.bloomNode.threshold.value = grade.bloomThreshold;
+		if (!this.dayNight) return;
+		// Exposure only. The grade table's bloomStrength / bloomThreshold have no
+		// consumer — the composite has no bloom node (see setupPostProcessing) — and
+		// gating this whole method on one being present is what kept exposure pinned
+		// at 1 through every period of the day.
+		this.gradeExposure.value = this.dayNight.getGrade().exposure;
 	}
 
 	/**

@@ -101,6 +101,10 @@ function loadTreeTemplate(manager?: THREE.LoadingManager): Promise<TreeTemplate>
 }
 
 export class TreeInstancedMesh {
+	/**
+	 * Named so the water passes can find and skip it, the same way they find the
+	 * "Grass" fields — see WaterRenderer.collectHeavyFoliage.
+	 */
 	public group = new THREE.Group();
 	private trunkMesh!: THREE.InstancedMesh;
 	private foliageMesh!: THREE.InstancedMesh;
@@ -157,6 +161,7 @@ export class TreeInstancedMesh {
 
 	constructor(private manager?: THREE.LoadingManager, leafLayers = 4) {
 		this.leafLayers = leafLayers;
+		this.group.name = "Trees";
 	}
 
 	async initialize() {
