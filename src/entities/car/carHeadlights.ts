@@ -5,8 +5,6 @@ export const CAR_LAYER = 1;
 /** Default world layer (grass, terrain, fireflies) that headlights illuminate. */
 export const WORLD_LAYER = 0;
 
-/** Kenney colormap UV of the yellow circular headlamps (not the white bumper dots). */
-const HEADLIGHT_UV = { u: 0.21875, vMin: 0.02, vMax: 0.28, uTol: 0.035 };
 
 export type CarLightConfig = {
 	color: number | string;
@@ -39,64 +37,6 @@ export type CarLightPair = {
 	dispose: () => void;
 };
 
-/**
- * Locate the two yellow circular headlamps on the Kenney grille
- * (colormap UV ~0.22 — not the white bumper lights).
- */
-export function findKenneyHeadlightLocals(
-	carRoot: THREE.Object3D
-): { left: THREE.Vector3; right: THREE.Vector3 } | null {
-	carRoot.updateMatrixWorld(true);
-	const invRoot = new THREE.Matrix4().copy(carRoot.matrixWorld).invert();
-	const left: THREE.Vector3[] = [];
-	const right: THREE.Vector3[] = [];
-	const local = new THREE.Vector3();
-
-	carRoot.traverse((child) => {
-		if (!(child instanceof THREE.Mesh)) return;
-		if (child.name.toLowerCase().includes("wheel")) return;
-
-		const posAttr = child.geometry.getAttribute("position");
-		const uvAttr = child.geometry.getAttribute("uv");
-		if (!posAttr || !uvAttr) return;
-
-		for (let i = 0; i < posAttr.count; i++) {
-			const u = uvAttr.getX(i);
-			const v = uvAttr.getY(i);
-			// Yellow headlamp disc on Kenney atlas
-			if (Math.abs(u - HEADLIGHT_UV.u) > HEADLIGHT_UV.uTol) continue;
-			if (v < HEADLIGHT_UV.vMin || v > HEADLIGHT_UV.vMax) continue;
-
-			local
-				.fromBufferAttribute(posAttr, i)
-				.applyMatrix4(child.matrixWorld)
-				.applyMatrix4(invRoot);
-
-			(local.x < 0 ? left : right).push(local.clone());
-		}
-	});
-
-	if (!left.length || !right.length) return null;
-
-	const avg = (pts: THREE.Vector3[]) => {
-		const out = new THREE.Vector3();
-		for (const p of pts) out.add(p);
-		return out.multiplyScalar(1 / pts.length);
-	};
-
-	// Keep only the forward-most cluster (grille lamps, not rear yellow markers)
-	const keepFront = (pts: THREE.Vector3[]) => {
-		let maxZ = -Infinity;
-		for (const p of pts) maxZ = Math.max(maxZ, p.z);
-		return pts.filter((p) => p.z > maxZ - 0.4);
-	};
-
-	const L = keepFront(left);
-	const R = keepFront(right);
-	if (!L.length || !R.length) return null;
-
-	return { left: avg(L), right: avg(R) };
-}
 
 /**
  * Spot beams from the Kenney yellow headlamps onto grass only (WORLD_LAYER).
@@ -109,16 +49,10 @@ export function createCarLightPair(
 	const group = new THREE.Group();
 	group.name = initial?.isTaillight ? "car-taillights" : "car-headlights";
 
-	const detected = !initial?.mounts ? findKenneyHeadlightLocals(carMesh) : null;
-	const mounts = initial?.mounts || (detected 
-		? {
-			left: { x: -Math.abs(detected.left.x), y: detected.left.y, z: detected.left.z },
-			right: { x: Math.abs(detected.right.x), y: detected.right.y, z: detected.right.z }
-		}
-		: {
-			left: { x: -0.66, y: 1.04, z: 2.0 },
-			right: { x: 0.66, y: 1.04, z: 2.0 }
-		});
+	const mounts = initial?.mounts || {
+		left: { x: -0.66, y: 1.04, z: 2.0 },
+		right: { x: 0.66, y: 1.04, z: 2.0 }
+	};
 
 	const config: CarLightConfig = {
 		color: 0xffe0a0,
@@ -247,15 +181,7 @@ export function createCarLightPair(
 
 	layout();
 
-	if (detected) {
-		console.log("[Headlights] seated on yellow Kenney headlamps", {
-			left: detected.left.toArray(),
-			right: detected.right.toArray(),
-			config: { ...config },
-		});
-	} else {
-		console.warn("[Headlights] could not detect lamp UVs — using defaults");
-	}
+
 
 	return {
 		group,

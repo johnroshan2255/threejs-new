@@ -8,7 +8,7 @@ import { getWorld } from "../../physics/world";
 import { CAR_CONFIG } from "./carConfig";
 import { HUMMER_CONFIG } from "./hummerConfig";
 import { JEEP_CONFIG } from "./jeepConfig";
-import { loadKenneySuvVisual } from "./kenneyCarVisual";
+
 import { loadHummerVisual } from "./hummerCarVisual";
 import { loadJeepVisual } from "./jeepCarVisual";
 import { computeGrappleMountLocal } from "./vehicleGrapple";
@@ -36,11 +36,11 @@ export type CarEntity = {
 	config: typeof CAR_CONFIG;
 };
 
-export type VehicleId = "kenney_suv" | "hummer" | "jeep";
+export type VehicleId = "hummer" | "jeep";
 
 export async function createCar(
 	manager?: THREE.LoadingManager,
-	vehicleId: VehicleId = "kenney_suv"
+	vehicleId: VehicleId = "jeep"
 ): Promise<CarEntity> {
 	const world = getWorld();
 	
@@ -65,9 +65,7 @@ export async function createCar(
 
 	const layout = activeConfig === JEEP_CONFIG
 		? await loadJeepVisual(colliderYOffset, manager)
-		: (activeConfig === HUMMER_CONFIG 
-			? await loadHummerVisual(colliderYOffset, manager)
-			: await loadKenneySuvVisual(colliderYOffset, manager));
+		: await loadHummerVisual(colliderYOffset, manager);
 
 	// The user expects the "Elevation" slider to literally lift the car body higher relative to the wheels.
 	// Since physics suspension can sometimes compress down and hide the lift, we guarantee 

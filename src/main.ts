@@ -29,7 +29,7 @@ import {
 import { setCaveTerrainColor } from "./entities/cave/createCave";
 import { Pond, REFERENCE_WATER_LOOK } from "./entities/water";
 import { createCar, type CarEntity } from "./entities/car/createCar";
-import { loadKenneySuvVisual } from "./entities/car/kenneyCarVisual";
+import { loadJeepVisual } from "./entities/car/jeepCarVisual";
 import { CarController } from "./entities/car/carController";
 import { CarInput } from "./entities/car/carInput";
 import { resetCarUpright, respawnCarAtStart, isCarOutsideWorld } from "./entities/car/resetCar";
@@ -364,6 +364,8 @@ export class FluffyGrass {
 	private customWorldDefs: WorldDefinition[] = [];
 	/** Last GET /api/worlds?mine=1 result — the source of truth for the picker. */
 	private savedWorldList: WorldListItem[] = [];
+	/** Worlds shared by other players currently in the same multiplayer room. */
+	private sharedMultiplayerWorlds: WorldListItem[] = [];
 	private shadowQuality: QualityLevel = "High";
 	private resolutionQuality: QualityLevel = "High";
 	private waterQuality: QualityLevel = "High";
@@ -981,6 +983,20 @@ export class FluffyGrass {
 		this.editMode?.attachSocket(this.socket);
 
 		this.socket.on("room-updated", (players: any[]) => {
+			this.sharedMultiplayerWorlds = [];
+			const seenIds = new Set<string>();
+			for (const p of players) {
+				if (p.user?.sharedWorlds) {
+					for (const w of p.user.sharedWorlds) {
+						if (!seenIds.has(w.worldId) && w.ownerId !== this.userData?.id) {
+							seenIds.add(w.worldId);
+							this.sharedMultiplayerWorlds.push(w);
+						}
+					}
+				}
+			}
+			this.refreshWorldSelectOptions();
+
 			for (let i = 0; i < 4; i++) {
 				const slot = document.querySelector(`#player-slot-${i} .slot-content`);
 				if (slot) {
@@ -1390,12 +1406,12 @@ export class FluffyGrass {
 					animations.set(nameLower, action);
 				});
 
-				const layout = await loadKenneySuvVisual(CAR_CONFIG.colliderYOffset, this.loadingManager);
+				const layout = await loadJeepVisual(JEEP_CONFIG.colliderYOffset, this.loadingManager);
 				const carGroup = new THREE.Group();
 				carGroup.add(layout.body);
-				layout.physicsWheelPositions.forEach(pos => {
-					const wheel = layout.wheelTemplate.clone();
-					wheel.position.set(pos[0], pos[1], pos[2]);
+				layout.physicsWheelPositions.forEach((pos, i) => {
+					const wheel = layout.visualWheels[i];
+					wheel.position.copy(pos);
 					carGroup.add(wheel);
 				});
 				this.scene.add(carGroup);
@@ -1588,7 +1604,7 @@ export class FluffyGrass {
 			this.socket!.emit(
 				"create-room",
 				{
-					user: this.userData,
+					user: { ...this.userData, sharedWorlds: this.savedWorldList },
 					worldId,
 					worldDefinition,
 				},
@@ -1613,7 +1629,7 @@ export class FluffyGrass {
 				"join-room",
 				{
 					roomCode: roomCodeToJoin,
-					userData: this.userData,
+					userData: { ...this.userData, sharedWorlds: this.savedWorldList },
 					worldId: this.editMode?.getActiveWorldId() ?? this.activeWorldDef.id,
 				},
 				(res: any) => {
@@ -1643,6 +1659,8 @@ export class FluffyGrass {
 		this.socket?.disconnect();
 		this.socket = null;
 		this.roomCode = "";
+		this.sharedMultiplayerWorlds = [];
+		this.refreshWorldSelectOptions();
 
 		for (const remotePlayer of this.remotePlayers.values()) {
 			if (remotePlayer.carGroup) this.scene.remove(remotePlayer.carGroup);
@@ -4615,13 +4633,12 @@ export class FluffyGrass {
 
 	/** Returns a frozen snapshot of the original default values for a vehicle.
 	 *  We store these once so "revert" always goes back to the code defaults.  */
-	private static readonly DEFAULT_KENNEY = JSON.parse(JSON.stringify(CAR_CONFIG));
 	private static readonly DEFAULT_HUMMER = JSON.parse(JSON.stringify(HUMMER_CONFIG));
 	private static readonly DEFAULT_JEEP = JSON.parse(JSON.stringify(JEEP_CONFIG));
 	private getDefaultConfig(vehicleId: string): any {
 		return vehicleId === "hummer"
 			? (this.constructor as any).DEFAULT_HUMMER
-			: (vehicleId === "jeep" ? (this.constructor as any).DEFAULT_JEEP : (this.constructor as any).DEFAULT_KENNEY);
+			: (this.constructor as any).DEFAULT_JEEP;
 	}
 
 	/** Set a value on a nested object using a dot-path key like "drive.engineForce". */
@@ -5689,6 +5706,16 @@ export class FluffyGrass {
 			const label = name in options ? `${name} (${worldId.slice(-4)})` : name;
 			options[label] = worldId;
 		}
+
+		if (this.sharedMultiplayerWorlds.length > 0) {
+			for (const item of this.sharedMultiplayerWorlds) {
+				const owner = item.ownerName ? `${item.ownerName}'s ` : "Shared ";
+				const name = item.worldName || item.worldId;
+				const label = `[MP] ${owner}${name}`;
+				options[label] = item.worldId;
+			}
+		}
+
 		return options;
 	}
 

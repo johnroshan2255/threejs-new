@@ -1,6 +1,6 @@
 export type QualityLevel = "Low" | "Medium" | "High";
 export type GameWorldId = string;
-export type VehicleId = "none" | "kenney_suv" | "hummer" | "jeep";
+export type VehicleId = "none" | "hummer" | "jeep";
 
 type DayPeriod = "morning" | "noon" | "evening" | /* "sunset" | */ "night";
 
@@ -62,8 +62,8 @@ type GameSettingsOptions = {
 const QUALITY_TIERS: QualityLevel[] = ["Low", "Medium", "High"];
 const PERIODS: DayPeriod[] = ["morning", "noon", "evening", "night"];
 const PERIOD_LABELS = ["Morning", "Noon", "Evening", "Night"];
-const VEHICLES: VehicleId[] = ["jeep", "kenney_suv", "hummer"];
-const VEHICLE_LABELS = ["Patrol", "SUV", "Hummer"];
+const VEHICLES: VehicleId[] = ["jeep", "hummer"];
+const VEHICLE_LABELS = ["Patrol", "Hummer"];
 
 /**
  * Graphics presets. Each entry is a notch value (1-based) for the three ordinal
