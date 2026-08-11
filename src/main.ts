@@ -21,7 +21,11 @@ import { setIslandTerrain, getWorldTerrainY, findSafeTerrainSpawn, isOutsideTerr
 import { createLargeTerrain, TERRAIN_CONFIG } from "./terrain/createLargeTerrain";
 import { clearCaves } from "./terrain/caveRegistry";
 import { configureSnowMask } from "./terrain/snowMask";
-import { applySnowToMaterial } from "./terrain/snowShading";
+import {
+	applySnowToMaterial,
+	applyTerrainShading,
+	terrainShadeUniforms,
+} from "./terrain/snowShading";
 import { setCaveTerrainColor } from "./entities/cave/createCave";
 import { Pond, REFERENCE_WATER_LOOK } from "./entities/water";
 import { createCar, type CarEntity } from "./entities/car/createCar";
@@ -227,6 +231,21 @@ const BOMB_ANGULAR_DAMPING = 2;
  * This is a map you edit on, not a beauty shot, which is the same reasoning that
  * already turns off fog and the stylised grade up here.
  */
+/**
+ * Screen-space radius of the god-ray shaft region, in UV around the sun.
+ *
+ * Large enough that shafts read as a broad glow rather than a hard disc, small
+ * enough that the far side of the frame stays clear.
+ */
+const GODRAY_SUN_RADIUS = 0.55;
+
+/**
+ * How far the ground's fixed shade is allowed to drift toward the low sun's
+ * colour. Slight on purpose: enough to sit inside a sunset, not enough to hand
+ * the ground's hue back to the day/night rig.
+ */
+const TERRAIN_SUNSET_TINT = 0.4;
+
 const EDITOR_TOPDOWN = {
 	/** 948 -> 371 speckled pixels. The view is static, so frames are cheap. */
 	supersample: 2,
@@ -521,6 +540,21 @@ export class FluffyGrass {
 	private godRays: any = null;
 	private readonly gradeExposure = uniform(1);
 	private readonly godRayWeight = uniform(0.3);
+	/**
+	 * Sun position in screen UV, and 0/1 for "is the sun actually on screen".
+	 *
+	 * Shafts belong around the sun. Without this gate the godray term is applied
+	 * over the whole frame, and since it saturates in open sunlight (see
+	 * setupPostProcessing) the result is a flat white lift — fog, not shafts.
+	 */
+	private readonly sunScreenPos = uniform(new THREE.Vector2(0.5, 0.5));
+	private readonly sunScreenStrength = uniform(0);
+	/** (aspect, 1), so the shaft mask stays round instead of an ellipse. */
+	private readonly sunUvScale = uniform(
+		new THREE.Vector2(window.innerWidth / Math.max(1, window.innerHeight), 1)
+	);
+	private readonly _sunScreenProbe = new THREE.Vector3();
+	private readonly _camForward = new THREE.Vector3();
 
 	private sunMesh: THREE.Mesh | null = null;
 	/** User-facing master switch for the fog raymarch + bloom. */
@@ -1991,10 +2025,8 @@ export class FluffyGrass {
 		// is created before the flag flips so the snow patch compiles a graph that
 		// actually reads it — see `ensureTerrainVertexColors`.
 		ensureTerrainVertexColors(mesh.geometry as THREE.BufferGeometry);
-		this.terrainMat.vertexColors = true;
 		this.terrainMat.color.setHex(0xffffff);
-		applySnowToMaterial(this.terrainMat);
-		this.terrainMat.needsUpdate = true;
+		applyTerrainShading(this.terrainMat, true);
 		paintTerrainMudShore(mesh, -20, 5, 10, 16);
 
 		if (!this.grassGeometry.hasAttribute("position")) {
@@ -3555,7 +3587,9 @@ export class FluffyGrass {
 			}
 
 			// Grass shades itself, so hand it the key/fill/shadow colours directly.
-			this.grassMaterial.setLightParams(this.dayNight.getGrassLightParams());
+			const grassLight = this.dayNight.getGrassLightParams();
+			this.grassMaterial.setLightParams(grassLight);
+			this.syncTerrainShade(grassLight);
 			// ...and the rig's real key radiance, which is only used to recover the
 			// shadow mask from what the lighting model receives.
 			this.grassMaterial.setKeyLightRadiance(
@@ -3563,6 +3597,7 @@ export class FluffyGrass {
 				this.dayNight.lights.keyLight.intensity
 			);
 			this.syncPostFxGrade();
+			this.syncGodRaySun();
 
 
 			if (this.dayNight.fillScale !== this.lookTuning.fill) {
@@ -4656,13 +4691,30 @@ export class FluffyGrass {
 
 		const rays = godrays(sceneDepth as any, this.camera, keyLight);
 		rays.raymarchSteps.value = 40;
-		rays.density.value = 0.55;
-		rays.maxDensity.value = 0.4;
+		// GodraysNode accumulates `lit * distance * density/100` per step and returns
+		// `clamp(1 - exp(-illum), 0, maxDensity)`. Over this scene's scale — 40 steps
+		// across a 200 m shadow frustum — the old 0.55 drove `illum` past 20, so the
+		// term pinned at `maxDensity` for *every* pixel in open sunlight: a uniform
+		// grey the screen blend turned into fog, and the slider scaled the fog rather
+		// than the shafts. Low enough not to saturate, the term stays a gradient and
+		// only reads where shadow casters actually break the light.
+		rays.density.value = 0.12;
+		rays.maxDensity.value = 0.5;
 		this.godRays = rays;
+
+		// Shafts are gated to a round region around the sun, and fade out entirely
+		// when it is off screen or below the horizon.
+		const sunOffset = uv().sub(this.sunScreenPos).mul(this.sunUvScale);
+		const sunMask = smoothstepTsl(GODRAY_SUN_RADIUS, 0.0, sunOffset.length()).mul(
+			this.sunScreenStrength
+		);
 
 		// SCREEN blend, as the WebGL GodRaysEffect used: rays lift the image
 		// toward white without ever pushing it past it, which additive would.
-		const withRays: any = blendScreen(sceneColor, rays.mul(this.godRayWeight));
+		const withRays: any = blendScreen(
+			sceneColor,
+			rays.mul(this.godRayWeight).mul(sunMask)
+		);
 
 		// 1. Tonemap the HDR input (withRays)
 		const tonemappedRays = toneMappingTsl(
@@ -4706,6 +4758,70 @@ export class FluffyGrass {
 	 * WebGL those numbers were read by the fog pass's composite, which this chain
 	 * replaces. Without this they would simply go unused.
 	 */
+	/**
+	 * Project the sun into screen space for the shaft mask.
+	 *
+	 * Cheap — one vector projection per frame — and it is what keeps god rays from
+	 * behaving like a fog slider: the shafts only exist where the sun is, and vanish
+	 * when it is behind the camera or below the horizon.
+	 */
+	private syncGodRaySun() {
+		if (!this.dayNight) return;
+		const cam = this.editMode?.isEnabled
+			? (this.editMode.activeCamera ?? this.camera)
+			: this.camera;
+		const dir = this.dayNight.getSunDirection();
+		// Below the horizon there is no sun to shaft from; the moon is not bright
+		// enough to justify it. Ortho (the editor's top view) has no sun position on
+		// screen at all.
+		if (dir.y <= 0.02 || !(cam as THREE.PerspectiveCamera).isPerspectiveCamera) {
+			this.sunScreenStrength.value = 0;
+			return;
+		}
+		cam.updateMatrixWorld(true);
+		// Behind the camera, `project()` mirrors the point onto the screen, so the
+		// direction has to be tested separately rather than trusting the NDC.
+		this._camForward.set(0, 0, -1).applyQuaternion(cam.quaternion);
+		if (this._camForward.dot(dir) <= 0) {
+			this.sunScreenStrength.value = 0;
+			return;
+		}
+		// The sun is a direction: every point along it lands on the same pixel, so a
+		// near one is used. A far one (5000) sat past the far plane, where project()
+		// reports z > 1 and the whole effect switched itself off.
+		this._sunScreenProbe.copy(cam.position).addScaledVector(dir, 100);
+		this._sunScreenProbe.project(cam);
+		this.sunScreenPos.value.set(
+			(this._sunScreenProbe.x + 1) * 0.5,
+			(this._sunScreenProbe.y + 1) * 0.5
+		);
+		// Fade in as the sun climbs, so sunrise does not pop a shaft on.
+		this.sunScreenStrength.value = THREE.MathUtils.smoothstep(dir.y, 0.02, 0.18);
+	}
+
+	/**
+	 * Drive the ground's stylised shade: brightness from the grass, a hint of the
+	 * low sun's colour at either end of the day.
+	 *
+	 * Brightness rides the grass's own light level so ground and blades dim together
+	 * through dusk. The tint is deliberately weak and only opens up while the sun is
+	 * *low and still up* — at night it closes completely, or the ground would take
+	 * the moon's cool hue and stop being a fixed colour at all.
+	 */
+	private syncTerrainShade(grassLight: { intensity: number }) {
+		terrainShadeUniforms.uFlatBrightness.value = grassLight.intensity;
+		if (!this.dayNight) return;
+		const sunY = this.dayNight.getSunDirection().y;
+		// 1 near the horizon, 0 overhead.
+		const lowSun = THREE.MathUtils.smoothstep(sunY, 0.34, 0.03);
+		// 0 once the sun is down, so the moon never tints the ground.
+		const sunUp = THREE.MathUtils.smoothstep(sunY, -0.02, 0.09);
+		const warmth = TERRAIN_SUNSET_TINT * lowSun * sunUp;
+		terrainShadeUniforms.uFlatTint.value
+			.setRGB(1, 1, 1)
+			.lerp(this.dayNight.lights.keyLight.color, warmth);
+	}
+
 	private syncPostFxGrade() {
 		if (!this.dayNight || !this.bloomNode) return;
 		const grade = this.dayNight.getGrade();
@@ -5263,15 +5379,11 @@ export class FluffyGrass {
 				// lazily, and a batched stroke paints a tick or more later — long
 				// after the shader for this material was compiled.
 				if (mesh) ensureTerrainVertexColors(mesh.geometry as THREE.BufferGeometry);
-				if (!mat.vertexColors) {
-					mat.vertexColors = true;
-					mat.color.setHex(0xffffff);
-				}
-				// Unconditional: the flag can already be true while the compiled graph
-				// still predates it (the editor's baseline restore flips it directly),
-				// and only a fresh `colorNode` makes NodeMaterial rebuild. The patch
-				// is a no-op once the graph matches the material.
-				applySnowToMaterial(mat);
+				// `applyTerrainShading` owns the vertex-colour multiply (see there), so
+				// `.color` stays the world's tint and `vertexColors` stays off. Passing
+				// `true` is what switches the painted buffer into the shade.
+				mat.color.setHex(0xffffff);
+				applyTerrainShading(mat, true);
 			},
 			setMapMode: (enabled) => {
 				this.sceneProps.mapMode = enabled;
@@ -6562,7 +6674,7 @@ export class FluffyGrass {
 			flatShading: true,
 			side: THREE.DoubleSide
 		});
-		applySnowToMaterial(material);
+		applyTerrainShading(material, false);
 
 		const newTerrain = new THREE.Mesh(geometry, material);
 		newTerrain.position.set(centerX, 0, centerZ);
@@ -6623,6 +6735,8 @@ export class FluffyGrass {
 		this.camera.aspect = window.innerWidth / window.innerHeight;
 		this.camera.updateProjectionMatrix();
 		this.renderer.setSize(window.innerWidth, window.innerHeight);
+		// Keeps the god-ray shaft mask circular rather than stretched.
+		this.sunUvScale.value.set(this.camera.aspect, 1);
 		this.resizePondTargets();
 		const pr = this.renderer.getPixelRatio();
 

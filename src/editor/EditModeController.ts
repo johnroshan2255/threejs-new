@@ -26,7 +26,7 @@ import {
 } from "../terrain/caveShape";
 import { createTerrainCollider } from "../physics/terrainCollider";
 import { clearSnowMask } from "../terrain/snowMask";
-import { applySnowToMaterial } from "../terrain/snowShading";
+import { applyTerrainShading } from "../terrain/snowShading";
 import { getCaveMeshes } from "../terrain/caveRegistry";
 import { WorldEditStore } from "./WorldEditStore";
 import { WorldEditPersistence } from "./WorldEditPersistence";
@@ -1066,24 +1066,18 @@ export class EditModeController {
 				colorAttr.needsUpdate = true;
 			}
 			const mat = mesh.material as THREE.MeshPhongMaterial;
-			mat.vertexColors = true;
 			mat.color.setHex(0xffffff);
-			// The snow patch owns `colorNode`, and NodeMaterial only re-reads the
-			// vertex-colour flag when that node is rebuilt. Without this the ground
-			// keeps shading from the flat white `.color` and the map renders blank.
-			applySnowToMaterial(mat);
-			mat.needsUpdate = true;
+			// `applyTerrainShading` owns the vertex-colour multiply and the snow mix;
+			// re-applying it is what rebuilds the graph around the restored buffer.
+			applyTerrainShading(mat, true);
 		} else {
 			if (geo.getAttribute("color")) geo.deleteAttribute("color");
 			const mat = mesh.material as THREE.MeshPhongMaterial;
-			mat.vertexColors = this.terrainHadVertexColors;
-			if (!mat.vertexColors) {
-				mat.color.set(this.host.getScenePropsTerrainColor());
-			} else {
-				mat.color.setHex(0xffffff);
-			}
-			applySnowToMaterial(mat);
-			mat.needsUpdate = true;
+			const keepVertexColors = this.terrainHadVertexColors;
+			mat.color.set(
+				keepVertexColors ? 0xffffff : this.host.getScenePropsTerrainColor()
+			);
+			applyTerrainShading(mat, keepVertexColors);
 		}
 
 		setIslandTerrain(mesh);

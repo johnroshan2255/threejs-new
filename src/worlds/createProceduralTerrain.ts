@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import type { WorldDefinition } from "./worldTypes";
-import { applySnowToMaterial } from "../terrain/snowShading";
+import { applyTerrainShading } from "../terrain/snowShading";
 
 import { buildTerrainGeneration } from "./terrainGenerationCore";
 
@@ -21,7 +21,7 @@ export function createProceduralTerrain(
 ): ProceduralTerrainResult {
 	// See createLargeTerrain: snow is patched onto whatever material builds
 	// terrain, so a new caller can't silently ship green ground under snow.
-	applySnowToMaterial(material);
+	applyTerrainShading(material, Boolean((material as any).vertexColors));
 
 	const { size, segments } = definition;
 	const seed = definition.seed ?? 42;
@@ -50,7 +50,14 @@ export function createProceduralTerrain(
 	return { mesh, heights, nrows, ncols, size };
 }
 
-/** Base ground tint the vertex-colour buffer starts from. */
+/**
+ * Base ground tint the vertex-colour buffer starts from.
+ *
+ * The grass colour, not the darker soil: the ground reads as part of the field.
+ * It stays put through the day because `applyTerrainShading` carries most of the
+ * ground's colour in an emissive term the sun cannot tint — the two together are
+ * what keep ground and blades looking like one surface at every hour.
+ */
 const TERRAIN_GRASS_TINT = new THREE.Color("#3f6d21");
 
 /**

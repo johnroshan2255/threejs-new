@@ -8,6 +8,8 @@ import {
 	smoothstep,
 	step,
 	texture,
+	uniform,
+	vertexColor,
 } from "three/tsl";
 import { snowUniforms } from "./snowMask";
 
@@ -109,6 +111,79 @@ function stockAlbedoNode(material: any) {
 	let albedo: any = materialColor;
 	if (material.map) albedo = albedo.mul(texture(material.map).rgb);
 	return albedo;
+}
+
+
+/**
+ * How much of the ground's shade the rig's lights are allowed to touch.
+ *
+ * The rest is emissive, which lights never tint. Keeping a lit share means hills
+ * still read and shadows still land on the ground; keeping it small means sunset
+ * does not wash the whole map orange and night does not turn it blue.
+ */
+const TERRAIN_LIT_SHARE = 0.35;
+
+/**
+ * Brightness of the ground's fixed shade, 0..1. Fed per frame from the *same*
+ * value the grass uses for its own light intensity, so the two dim together
+ * through dusk instead of drifting apart — the ground going flat olive under
+ * near-black grass is what "terrain doesn't match the grass" was.
+ */
+export const terrainShadeUniforms = {
+	uFlatBrightness: uniform(1),
+	/**
+	 * Tint applied to the ground's fixed shade — white for most of the day.
+	 *
+	 * A fixed hue that ignores the sun entirely reads wrong at sunset, when
+	 * everything else in frame goes warm. This lets a *little* of the low sun's
+	 * colour in, so the ground joins the sunset without handing its hue over to the
+	 * rig the way a plainly lit material did. Driven per frame — see
+	 * `syncTerrainShade`.
+	 */
+	uFlatTint: uniform(new THREE.Color(1, 1, 1)),
+};
+
+const TERRAIN_PATCH_FLAG = "terrainShaded";
+
+/**
+ * Stylised ground shade: a fixed hue that the sun's colour cannot move.
+ *
+ * `MeshPhongNodeMaterial` multiplies its albedo by whatever colour the key light
+ * and ambient happen to be, so the ground tracked the day/night rig — warm at
+ * sunset, blue at night — while the grass, which shades itself, did not. Here the
+ * ground's colour is mostly carried by `emissiveNode`, which no light touches, and
+ * only `TERRAIN_LIT_SHARE` of it stays lit so shadows and relief survive.
+ *
+ * Vertex colours are multiplied in explicitly and `vertexColors` is turned off,
+ * because three only appends its own multiply to the *diffuse* term — the
+ * emissive share would otherwise lose roads, water and painted ground entirely.
+ */
+export function applyTerrainShading(material: THREE.Material, hasVertexColors: boolean) {
+	const m = material as any;
+	const signature = `${hasVertexColors ? 1 : 0}|${m.map ? m.map.uuid : "-"}`;
+	if (m[TERRAIN_PATCH_FLAG] === signature) return;
+	m[TERRAIN_PATCH_FLAG] = signature;
+	// Ours to apply now — see the note above.
+	m.vertexColors = false;
+	// The snow patch would fight over `colorNode`; this function owns the whole
+	// shade, snow included.
+	m[SNOW_PATCH_FLAG] = signature;
+
+	let albedo: any = materialColor;
+	if (m.map) albedo = albedo.mul(texture(m.map).rgb);
+	if (hasVertexColors) albedo = albedo.mul(vertexColor());
+	const shade = mix(
+		albedo,
+		snowUniforms.uSnowColor,
+		snowAt(positionWorld, normalWorld.y)
+	);
+
+	m.colorNode = shade.mul(TERRAIN_LIT_SHARE);
+	m.emissiveNode = shade
+		.mul(1 - TERRAIN_LIT_SHARE)
+		.mul(terrainShadeUniforms.uFlatBrightness)
+		.mul(terrainShadeUniforms.uFlatTint);
+	m.needsUpdate = true;
 }
 
 /**
