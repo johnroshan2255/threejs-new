@@ -1,6 +1,6 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
-import { getWorldTerrainY } from "../../terrain/islandHeight";
+import { getPropSeatY } from "../../terrain/islandHeight";
 import { applySnowToMaterial } from "../../terrain/snowShading";
 
 const DEFAULT_STONE_URL = "/stone/stone_smallC.glb";
@@ -67,9 +67,11 @@ export async function placeStone(options: {
 	const scale = options.scale ?? 2.2 + Math.random() * 0.8;
 	group.scale.setScalar(scale);
 	group.rotation.y = options.rotationY ?? Math.random() * Math.PI * 2;
+	// Terrain surface, not the composed terrain+caves height: a stone dropped near
+	// a cave used to land on the shell's roof, metres above the ground.
 	const y =
 		options.y ??
-		getWorldTerrainY(options.position.x, options.position.z);
+		getPropSeatY(options.position.x, options.position.z);
 	group.position.set(options.position.x, y, options.position.z);
 	group.name = "PlacedStone";
 

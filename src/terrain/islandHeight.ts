@@ -161,29 +161,135 @@ export function findSafeTerrainSpawn(
 }
 
 /**
+ * Ceiling for a downward probe, against the terrain *as it stands now*.
+ *
+ * `rayStartY` is captured when a world registers, but sculpting keeps raising the
+ * surface afterwards. A probe that starts inside a hill reads the far underside
+ * (terrain is DoubleSide) or misses outright, so the live geometry bounds get a
+ * vote too.
+ */
+function probeStartY(): number {
+	const box = baseTerrainMesh?.geometry?.boundingBox;
+	if (!box) return rayStartY;
+	return Math.max(rayStartY, box.max.y + (baseTerrainMesh?.position.y ?? 0) + 50);
+}
+
+/**
+ * Rings sampled when a vertical probe finds nothing, nearest first.
+ *
+ * A miss inside the map means a hole in the terrain — a cave mouth, nearly
+ * always, since carving one deletes the triangles over it. The rim a few metres
+ * out is the honest answer for "ground height here"; see `getWorldTerrainY`.
+ */
+const HOLE_PROBE_RINGS = [4, 10, 20];
+const HOLE_PROBE_ANGLES = 6;
+
+/**
  * Height of the ground at (x, z).
  *
  * By default the probe starts above every peak, so it reports the outdoor
  * surface — correct for grass, props and spawning. Pass `fromY` to get the
  * surface directly *beneath* a known position instead; inside a cave the
  * topmost hit is the hillside overhead, not the floor you are standing on.
+ *
+ * A vertical miss used to return `fallbackY` — the top of the world. Callers
+ * read this as a ground height and drop props onto it, so a prop over a cave
+ * mouth was launched tens of metres into the sky and hung there. Sampling the
+ * hole's rim instead keeps it on the ground it was meant to sit on.
  */
+/**
+ * Where a prop with no saved Y belongs at (x, z).
+ *
+ * Preference order, and each step exists because of a way props ended up in the
+ * sky:
+ *  1. The outdoor terrain directly underneath. `getWorldTerrainY` composes terrain
+ *     with every cave shell and returns the *topmost* hit, so a shell that rises
+ *     above the ground it was dug from became "the surface" and seated nearby
+ *     trees and stones on its roof, metres up.
+ *  2. Failing that the terrain has a hole here — a cave mouth was carved under the
+ *     prop after it was planted — so rest on whatever surface really is there,
+ *     which is the shell spanning the hole.
+ *  3. Only if nothing at all answers, the rim of the hole, then the fallback.
+ */
+export function getPropSeatY(x: number, z: number): number {
+	const terrainOnly = baseTerrainMesh ? probeExact([baseTerrainMesh], x, z) : null;
+	if (terrainOnly != null) return terrainOnly;
+	const anySurface = probeExact(terrainMeshes(), x, z);
+	if (anySurface != null) return anySurface;
+	return baseTerrainMesh ? probeSurface([baseTerrainMesh], x, z) : fallbackY;
+}
+
+/** Straight vertical probe, no fallbacks: null when nothing is under (x, z). */
+function probeExact(meshes: THREE.Object3D[], x: number, z: number): number | null {
+	if (!meshes.length) return null;
+	const startY = probeStartY();
+	_origin.set(x, startY, z);
+	_raycaster.set(_origin, _down);
+	_raycaster.far = rayFar + Math.max(0, startY - rayStartY);
+	const hits = _raycaster.intersectObjects(meshes, true);
+	return hits.length > 0 ? hits[0]!.point.y : null;
+}
+
+/** Shared vertical probe: live ceiling, then hole-rim rings, then the fallback. */
+function probeSurface(meshes: THREE.Object3D[], x: number, z: number): number {
+	const startY = probeStartY();
+	const far = rayFar + Math.max(0, startY - rayStartY);
+	_origin.set(x, startY, z);
+	_raycaster.set(_origin, _down);
+	_raycaster.far = far;
+	const hits = _raycaster.intersectObjects(meshes, true);
+	if (hits.length > 0) return hits[0]!.point.y;
+
+	if (terrainBounds) {
+		const pad = 2;
+		if (
+			x < terrainBounds.min.x - pad ||
+			x > terrainBounds.max.x + pad ||
+			z < terrainBounds.min.z - pad ||
+			z > terrainBounds.max.z + pad
+		) {
+			return fallbackY;
+		}
+	}
+
+	// Lowest hit on the nearest ring that answers, not the first. A single sample
+	// can land on a steep hillside or an overhang and report a height far above the
+	// hole — which put a prop 59 m up. Biasing low means the worst case is a prop
+	// sunk slightly into a slope instead of one hanging in the sky.
+	for (const radius of HOLE_PROBE_RINGS) {
+		let lowest = Infinity;
+		for (let i = 0; i < HOLE_PROBE_ANGLES; i++) {
+			const angle = (i / HOLE_PROBE_ANGLES) * Math.PI * 2;
+			_origin.set(x + Math.cos(angle) * radius, startY, z + Math.sin(angle) * radius);
+			_raycaster.set(_origin, _down);
+			_raycaster.far = far;
+			const ringHits = _raycaster.intersectObjects(meshes, true);
+			if (ringHits.length > 0 && ringHits[0]!.point.y < lowest) {
+				lowest = ringHits[0]!.point.y;
+			}
+		}
+		if (Number.isFinite(lowest)) return lowest;
+	}
+	return fallbackY;
+}
+
 export function getWorldTerrainY(x: number, z: number, fromY?: number): number {
 	const meshes = terrainMeshes();
 	if (meshes.length === 0) return fallbackY;
 
-	_origin.set(x, fromY == null ? rayStartY : fromY + 0.5, z);
+	if (fromY == null) return probeSurface(meshes, x, z);
+
+	const startY = fromY + 0.5;
+	const far = rayFar + 50;
+	_origin.set(x, startY, z);
 	_raycaster.set(_origin, _down);
-	_raycaster.far = fromY == null ? rayFar : rayFar + 50;
+	_raycaster.far = far;
 
 	const hits = _raycaster.intersectObjects(meshes, true);
-	if (hits.length > 0) {
-		// First hit from the probe origin: the outdoor surface when probing from
-		// above, or the nearest floor below the caller when given fromY.
-		return hits[0].point.y;
-	}
-
-	return fromY == null ? fallbackY : -1000;
+	// Probing from a known position: the nearest floor below the caller. A rim
+	// metres away is not their floor, so there is no ring fallback here.
+	if (hits.length > 0) return hits[0]!.point.y;
+	return -1000;
 }
 
 /**

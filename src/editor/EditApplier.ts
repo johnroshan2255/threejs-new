@@ -7,7 +7,11 @@ import {
 	REFERENCE_WATER_LOOK,
 } from "../entities/water";
 import { debugLine } from "../ui/debugOverlay";
-import { getWorldTerrainY, setIslandTerrain } from "../terrain/islandHeight";
+import {
+	getPropSeatY,
+	getWorldTerrainY,
+	setIslandTerrain,
+} from "../terrain/islandHeight";
 import {
 	paintTerrainMud,
 	paintTerrainMudShore,
@@ -55,6 +59,25 @@ type TrackedEntity =
 	| { kind: "pond"; pond: Pond }
 	| { kind: "cave"; cave: CaveHandle };
 
+/**
+ * A prop whose height belongs to the terrain rather than to the op.
+ *
+ * No `place-mesh` / `place-stone` op stores a Y — they mean "stand at (x, z) on
+ * the ground". The ground under them moves during a replay, though: sculpt and
+ * water ops are batched, and paint-water digs basins metres deep, so a prop
+ * spawned earlier in the op list was seated on a surface that later ops changed.
+ * `reseatTerrainProps` re-resolves them once the terrain has settled.
+ *
+ * `manual` marks a prop a `transform-entity` op has moved by hand — its Y is the
+ * author's choice and must never be snapped back down.
+ */
+type TerrainSeatedProp = {
+	entityId: string;
+	x: number;
+	z: number;
+	manual: boolean;
+};
+
 export type EditApplierHost = {
 	worldGroup: THREE.Group;
 	renderer: any;
@@ -72,6 +95,8 @@ export type EditApplierHost = {
 	removeEditorStone: (stone: PlacedStoneHandle) => void;
 	removeEditorPond: (pond: Pond) => void;
 	getScenePropsTerrainColor: () => THREE.ColorRepresentation;
+	/** Active world id — a replay that outlives its world must stop. */
+	getActiveWorldId: () => string;
 	getTreeManager: () => import("../entities/tree/TreeInstancedMesh").TreeInstancedMesh | null;
 };
 
@@ -95,6 +120,8 @@ function yieldToEventLoop(): Promise<void> {
 export class EditApplier {
 	private readonly applied = new Set<string>();
 	private readonly entities = new Map<string, TrackedEntity>();
+	/** Props that must ride the terrain — see `TerrainSeatedProp`. */
+	private readonly terrainSeated = new Map<string, TerrainSeatedProp>();
 	private colliderDirty = false;
 	private caveTerrainDirty = false;
 	private deferColliderRebuild = false;
@@ -105,6 +132,20 @@ export class EditApplier {
 	private pendingTerrainUpdate = false;
 
 	constructor(private readonly host: EditApplierHost) {}
+
+	/**
+	 * Register a terrain mesh for ground queries — but only if it is still the
+	 * active world's.
+	 *
+	 * `islandHeight` holds one mesh globally. A replay that outlives its world kept
+	 * re-registering the world we had just left (every sculpt and cave flush does
+	 * this), so the incoming world's props sampled heights from the outgoing world's
+	 * hills: the island's own lamp, sign and pond stones ended up 20 m in the air.
+	 */
+	private registerTerrain(mesh: THREE.Mesh) {
+		if (mesh !== this.host.getTerrainMesh()) return;
+		setIslandTerrain(mesh);
+	}
 
 	flushTerrain() {
 		if (this.pendingTerrainUpdate) {
@@ -160,6 +201,53 @@ export class EditApplier {
 
 	getEntities(): Map<string, TrackedEntity> {
 		return this.entities;
+	}
+
+	private markTerrainSeated(entityId: string, x: number, z: number) {
+		const existing = this.terrainSeated.get(entityId);
+		this.terrainSeated.set(entityId, {
+			entityId,
+			x,
+			z,
+			manual: existing?.manual ?? false,
+		});
+	}
+
+	/**
+	 * Snap every terrain-seated prop back onto the finished surface.
+	 *
+	 * Run after a replay settles. Ops are applied in author order, so a prop placed
+	 * before a sculpt or a water basin was seated on ground that no longer exists —
+	 * which is how a hillside of trees and stones ends up hanging in mid-air after
+	 * re-entering a world. Props moved by hand (`transform-entity`) are left alone.
+	 *
+	 * Returns how many props actually moved, for the debug overlay.
+	 */
+	reseatTerrainProps(): number {
+		let moved = 0;
+		const tm = this.host.getTreeManager();
+		for (const seat of this.terrainSeated.values()) {
+			if (seat.manual) continue;
+			const handle = this.entities.get(seat.entityId);
+			if (!handle || (handle.kind !== "tree" && handle.kind !== "stone")) continue;
+			const group =
+				handle.kind === "tree" ? handle.tree.group : handle.stone.group;
+			const groundY = getPropSeatY(seat.x, seat.z);
+			if (!Number.isFinite(groundY)) continue;
+			if (Math.abs(group.position.y - groundY) < 0.05) continue;
+			group.position.set(seat.x, groundY, seat.z);
+			if (handle.kind === "tree" && tm) {
+				tm.updateTreeTransform(
+					seat.entityId,
+					group.position,
+					group.rotation.y,
+					group.scale.x
+				);
+			}
+			moved++;
+		}
+		if (moved) debugLine(`[props] re-seated ${moved} prop(s) onto the terrain`);
+		return moved;
 	}
 
 
@@ -244,7 +332,7 @@ export class EditApplier {
 					op.radius,
 					op.strength
 				);
-				setIslandTerrain(target.mesh);
+				this.registerTerrain(target.mesh);
 				this.colliderDirty = true;
 				// Mouth footprints are derived from terrain height, so sculpting near
 				// a cave moves where the hole belongs.
@@ -286,6 +374,7 @@ export class EditApplier {
 					this.host.worldGroup.add(stone.group);
 					this.host.addEditorStone(stone);
 					this.entities.set(op.id, { kind: "stone", stone });
+					if (op.y == null) this.markTerrainSeated(op.id, op.x, op.z);
 					return true;
 				}
 				const tree = await createTree({
@@ -302,7 +391,8 @@ export class EditApplier {
 				this.host.worldGroup.add(tree.group);
 				this.host.addEditorTree(tree);
 				this.entities.set(op.id, { kind: "tree", tree });
-				
+				if (op.y == null) this.markTerrainSeated(op.id, op.x, op.z);
+
 				const tm = this.host.getTreeManager();
 				if (tm) {
 					tm.addTree(op.id, tree.group.position, op.rotationY ?? 0, op.scale ?? 1, "#3f6d21");
@@ -320,6 +410,7 @@ export class EditApplier {
 				this.host.worldGroup.add(stone.group);
 				this.host.addEditorStone(stone);
 				this.entities.set(op.id, { kind: "stone", stone });
+				this.markTerrainSeated(op.id, op.x, op.z);
 				return true;
 			}
 			case "place-water": {
@@ -355,7 +446,7 @@ export class EditApplier {
 						target.deferUpdate = this.isBatching;
 						if (this.isBatching) this.pendingTerrainUpdate = true;
 						digWaterBrush(target, op.x, op.z, op.radius);
-						setIslandTerrain(target.mesh);
+						this.registerTerrain(target.mesh);
 						this.colliderDirty = true;
 					}
 					const mesh = this.host.getTerrainMesh();
@@ -398,7 +489,7 @@ export class EditApplier {
 				if (!target || op.nodes.length < 1) return false;
 				
 				sculptCaveMouths(target, op.nodes);
-				setIslandTerrain(target.mesh);
+				this.registerTerrain(target.mesh);
 				this.colliderDirty = true;
 
 				// Meshed off-thread; a few million voxel samples would otherwise freeze
@@ -478,7 +569,8 @@ export class EditApplier {
 					this.host.worldGroup.add(tree.group);
 					this.host.addEditorTree(tree);
 					this.entities.set(id, { kind: "tree", tree });
-					
+					this.markTerrainSeated(id, treeSpec.x, treeSpec.z);
+
 					const tm = this.host.getTreeManager();
 					if (tm) {
 						tm.addTree(id, tree.group.position, treeSpec.rotationY ?? 0, treeSpec.scale ?? 1, "#3f6d21");
@@ -513,6 +605,9 @@ export class EditApplier {
 			case "transform-entity": {
 				const obj = this.getEntityObject(op.entityId);
 				if (obj) {
+					// The author placed this Y by hand; stop re-seating it on the terrain.
+					const seated = this.terrainSeated.get(op.entityId);
+					if (seated) seated.manual = true;
 					obj.position.set(op.x, op.y, op.z);
 					if (op.rotationX != null && op.rotationZ != null) {
 						obj.rotation.set(op.rotationX, op.rotationY, op.rotationZ);
@@ -542,6 +637,7 @@ export class EditApplier {
 	}
 
 	private removeEntity(entityId: string) {
+		this.terrainSeated.delete(entityId);
 		const handle = this.entities.get(entityId);
 		if (!handle) return;
 		if (handle.kind === "tree") {
@@ -649,7 +745,7 @@ export class EditApplier {
 
 		const surfaceY = getWorldTerrainY(x, z);
 		digPondBasin(target, x, z, digRadius);
-		setIslandTerrain(target.mesh);
+		this.registerTerrain(target.mesh);
 		this.colliderDirty = true;
 		// Fill nearly to original ground so banks aren't left dry.
 		const waterY = surfaceY - 0.02;
@@ -688,7 +784,7 @@ export class EditApplier {
 			basin = this.prepareBasinAt(options.x, options.z, digRadius) ?? undefined;
 		} else if (basin.digRadius != null) {
 			digPondBasin(target, options.x, options.z, basin.digRadius);
-			setIslandTerrain(target.mesh);
+			this.registerTerrain(target.mesh);
 			this.colliderDirty = true;
 		}
 
@@ -722,7 +818,7 @@ export class EditApplier {
 					pondRadius * 1.25,
 					3
 				);
-				setIslandTerrain(target.mesh);
+				this.registerTerrain(target.mesh);
 				this.colliderDirty = true;
 			}
 			// Raise / expand water to the rim (legacy / digRadius ponds only).
@@ -873,7 +969,7 @@ export class EditApplier {
 				terrainCellSize(target.size, target.nrows, target.ncols)
 			);
 		}
-		setIslandTerrain(mesh);
+		this.registerTerrain(mesh);
 	}
 
 	async applyMany(ops: WorldEditOp[]) {
@@ -881,12 +977,23 @@ export class EditApplier {
 		this.isBatching = true;
 		this.queuedPaints = [];
 		const t0 = performance.now();
+		// A 1 km world takes ~11 s of awaits and yields to replay. Leaving the world
+		// during that window used to let the loop run on: it kept spawning props into
+		// whichever world was now active, seated at heights sampled from a terrain
+		// that had been swapped out, and its settle pass then masked the new world's
+		// grass with this world's road and cave circles. Both symptoms — props in the
+		// air and a stripped grass field — come from a replay that outlived its world.
+		const replayWorldId = this.host.getActiveWorldId();
 		try {
 			const pendingHeavy: Promise<boolean>[] = [];
 
 			const tSeqStart = performance.now();
 			let lastYield = performance.now();
 			for (const op of ops) {
+				if (this.host.getActiveWorldId() !== replayWorldId) {
+					debugLine(`[replay] aborted: world changed to ${this.host.getActiveWorldId()}`);
+					break;
+				}
 				if (op.type === "paint-cave" || op.type === "paint-water") {
 					// Fire off heavy background tasks to the worker pool / async compiler
 					// but DON'T await them yet, allowing them to run concurrently

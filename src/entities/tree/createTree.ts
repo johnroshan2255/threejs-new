@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { getWorld } from "../../physics/world";
 import RAPIER from "@dimforge/rapier3d-compat";
-import { getWorldTerrainY } from "../../terrain/islandHeight";
+import { getPropSeatY } from "../../terrain/islandHeight";
 import {
 	createFoliageMaterial,
 	setFoliageLeafColor,
@@ -155,7 +155,7 @@ export async function createTree(
 
 	let y = y0;
 	if (placeOnTerrain) {
-		y = getWorldTerrainY(x0, z0);
+		y = getPropSeatY(x0, z0);
 	}
 	group.position.set(x0, y, z0);
 
@@ -229,7 +229,8 @@ export async function createTree(
 		},
 		snapToTerrain() {
 			const { x, z } = group.position;
-			const nextY = getWorldTerrainY(x, z);
+			// Ground, not cave rock — see getTerrainSurfaceY.
+			const nextY = getPropSeatY(x, z);
 			group.position.y = nextY;
 			if (rigidBody) {
 				rigidBody.setTranslation({ x, y: nextY, z }, true);

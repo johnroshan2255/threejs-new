@@ -1465,3 +1465,22 @@ button.settings-toggle svg {
 		transition-duration: 0.001s !important;
 	}
 }
+
+/* ── Returning to a world ──────────────────────────────────────────────
+ * A world switch reloads the page (main.ts reloadIntoWorld) so the world is
+ * rebuilt by the boot path rather than swapped in place. That load is a
+ * continuation of play, not a fresh visit, so the title, menu and account row
+ * are hidden and only the progress line remains. Set by the inline script in
+ * index.html before any module parses, so nothing flashes.
+ */
+html.autoplay-boot .shell-topbar,
+html.autoplay-boot nav.shell-menu,
+html.autoplay-boot .eyebrow,
+html.autoplay-boot .shell-title {
+	display: none;
+}
+
+html.autoplay-boot .shell-hero {
+	/* Without the title and menu the hero would sit oddly high. */
+	justify-content: center;
+}

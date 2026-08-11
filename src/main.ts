@@ -79,6 +79,7 @@ import { EditModeController } from "./editor/EditModeController";
 import {
 	createLargeBlankWorld,
 	createProceduralTerrain,
+	ensureTerrainVertexColors,
 	grassCountForSize,
 	ISLAND_GRASS_DENSITY,
 	ISLAND_WORLD,
@@ -825,6 +826,7 @@ export class FluffyGrass {
 
 			this.loadingScreenController = new LoadingScreenController({
 				auth: this.authService,
+				autoPlay: this.consumeAutoPlayFlag(),
 				onPlay: () => proceed("play", this.userData),
 				onAccountCreated: (user) => {
 					this.userData = user;
@@ -1985,9 +1987,13 @@ export class FluffyGrass {
 		this.worldGroup.add(this.pond.mesh);
 		this.resizePondTargets();
 
-		// Green → muddy shore → water on the island pond basin.
+		// Green → muddy shore → water on the island pond basin. The colour buffer
+		// is created before the flag flips so the snow patch compiles a graph that
+		// actually reads it — see `ensureTerrainVertexColors`.
+		ensureTerrainVertexColors(mesh.geometry as THREE.BufferGeometry);
 		this.terrainMat.vertexColors = true;
 		this.terrainMat.color.setHex(0xffffff);
+		applySnowToMaterial(this.terrainMat);
 		this.terrainMat.needsUpdate = true;
 		paintTerrainMudShore(mesh, -20, 5, 10, 16);
 
@@ -3405,8 +3411,10 @@ export class FluffyGrass {
 		// doesn't slide the grass ring in a weird direction.
 		let cullPos: THREE.Vector3;
 		if (this.editMode?.isEnabled) {
-			if (this.editorTopDown) cullPos = this.camera.position;
-			else cullPos = this.editMode.target;
+			// Both editor views centre on what the author is looking at. The top view
+			// used to centre on the chase camera instead, which parks the grass ring
+			// wherever the player was standing rather than under the map view.
+			cullPos = this.editMode.target;
 		} else if (this.activePlayer === "human" && this.human?.mesh) {
 			cullPos = this.human.mesh.position;
 		} else if (this.car?.mesh) {
@@ -3414,15 +3422,29 @@ export class FluffyGrass {
 		} else {
 			cullPos = this.camera.position;
 		}
+		// Cull against the camera that will actually draw this frame. In the editor
+		// that is the orbit / top camera; feeding it the parked chase camera instead
+		// tested every blade and tree against a frustum pointing wherever the player
+		// was left standing, so whole regions of the map rendered as bare ground —
+		// with a dead-straight edge where the wrong frustum's side plane fell, and
+		// props placed there vanishing on the spot.
+		const cullCam = this.editMode?.isEnabled
+			? (this.editMode.activeCamera ?? this.camera)
+			: this.camera;
+		if (cullCam !== this.camera) {
+			// The renderer refreshes this during render(); the compute pass runs first.
+			cullCam.updateMatrixWorld(true);
+			cullCam.matrixWorldInverse.copy(cullCam.matrixWorld).invert();
+		}
 		if (this.renderFrameCounter % 2 === 0) {
 			if (this.currentWorld === "island" && this.worldGroup.visible) {
-				this.islandGrassField?.updateCompute(this.renderer, this.camera, cullPos);
+				this.islandGrassField?.updateCompute(this.renderer, cullCam, cullPos);
 			} else if (this.currentWorld === "valley" && this.newWorldGroup.visible) {
-				this.valleyGrassField?.updateCompute(this.renderer, this.camera, cullPos);
+				this.valleyGrassField?.updateCompute(this.renderer, cullCam, cullPos);
 			} else if (this.activeWorldDef.kind === "custom" && this.customWorldGroup.visible) {
-				this.customGrassField?.updateCompute(this.renderer, this.camera, cullPos);
+				this.customGrassField?.updateCompute(this.renderer, cullCam, cullPos);
 			}
-			this.treeManager.updateCompute(this.renderer, this.camera, cullPos);
+			this.treeManager.updateCompute(this.renderer, cullCam, cullPos);
 			this.grassMaterial.uniforms.uPlayerPosition.value.copy(cullPos);
 			this.updateMeshDistanceCulling(cullPos);
 		}
@@ -5235,15 +5257,21 @@ export class FluffyGrass {
 						? this.valleyTerrainMesh
 						: this.islandTerrainMesh;
 				const mat = (mesh?.material as MeshPhongNodeMaterial | undefined) ?? this.terrainMat;
+				// Order matters: the buffer has to exist before the material is
+				// patched, because NodeMaterial only emits the vertex-colour multiply
+				// when the attribute is there at build time. Painting creates it
+				// lazily, and a batched stroke paints a tick or more later — long
+				// after the shader for this material was compiled.
+				if (mesh) ensureTerrainVertexColors(mesh.geometry as THREE.BufferGeometry);
 				if (!mat.vertexColors) {
 					mat.vertexColors = true;
 					mat.color.setHex(0xffffff);
-					// NodeMaterial graph was built without vertexColors. We must clear the flag
-					// and re-apply snow so stockAlbedoNode picks up the vertexColor() multiplier.
-					delete (mat as any)["snowPatched"];
-					applySnowToMaterial(mat);
-					mat.needsUpdate = true;
 				}
+				// Unconditional: the flag can already be true while the compiled graph
+				// still predates it (the editor's baseline restore flips it directly),
+				// and only a fresh `colorNode` makes NodeMaterial rebuild. The patch
+				// is a no-op once the graph matches the material.
+				applySnowToMaterial(mat);
 			},
 			setMapMode: (enabled) => {
 				this.sceneProps.mapMode = enabled;
@@ -5289,6 +5317,9 @@ export class FluffyGrass {
 			},
 			switchToWorldId: async (worldId) => {
 				await this.switchWorld(worldId);
+			},
+			reloadIntoWorld: (worldId) => {
+				this.reloadIntoWorld(worldId as GameWorldId);
 			},
 			listLocalCustomWorlds: () => [...this.customWorldDefs],
 			rebuildEditGrass: () => this.rebuildActiveEditGrass(),
@@ -5496,8 +5527,8 @@ export class FluffyGrass {
 		const previousCount = this.grassCount;
 		this.grassCount = grassCountForSize(def.size);
 		// Off-thread so opening a world does not freeze on blade placement.
-		this.grassBuildGeneration++;
-		this.customGrassField = await this.addGrassAsync(
+		const generation = ++this.grassBuildGeneration;
+		const field = await this.addGrassAsync(
 			mesh,
 			this.grassGeometry,
 			this.customWorldGroup,
@@ -5515,7 +5546,14 @@ export class FluffyGrass {
 			}
 		);
 		this.grassCount = previousCount;
-		this.customGrassField.setDensity(this.grassDensity);
+		if (generation !== this.grassBuildGeneration) {
+			// Another world switch overtook this build; keeping it would resurrect the
+			// field after the dispose pass and leak its buffers.
+			field.dispose();
+			return;
+		}
+		this.customGrassField = field;
+		field.setDensity(this.grassDensity);
 		this.grassMaterial.setTerrainSize(def.size);
 	}
 
@@ -5769,8 +5807,63 @@ export class FluffyGrass {
 		return fetched;
 	}
 
+	/**
+	 * Session flag that survives the reload below and is consumed on boot.
+	 *
+	 * `sessionStorage`, not `localStorage`: it must apply to this navigation only, so
+	 * a manual refresh later still lands on the menu like a fresh visit.
+	 */
+	private static readonly AUTOPLAY_KEY = "autoplayAfterWorldReload";
+
+	/**
+	 * Hard-reload into a world instead of swapping it in place.
+	 *
+	 * Returning to the hub in-process has to unwind everything the previous world
+	 * built — terrain registry, grass fields, prop heights, the instanced tree
+	 * buffer, an edit replay that may still be mid-flight — and any thread left
+	 * dangling shows up as floating props or missing grass. A reload rebuilds from a
+	 * clean process instead, and the boot path is the one code path that is always
+	 * correct. `AUTOPLAY_KEY` makes the reload land straight in the game rather than
+	 * on the title screen.
+	 */
+	/**
+	 * Read and clear the auto-play flag. Called once, during boot.
+	 *
+	 * Clearing it here rather than after the game starts means a failed load cannot
+	 * strand the player in a reload loop — the next refresh behaves like a fresh
+	 * visit and shows the menu.
+	 */
+	private consumeAutoPlayFlag(): boolean {
+		let flag: string | null = null;
+		try {
+			flag = sessionStorage.getItem(FluffyGrass.AUTOPLAY_KEY);
+			if (flag) sessionStorage.removeItem(FluffyGrass.AUTOPLAY_KEY);
+		} catch {
+			return false;
+		}
+		return Boolean(flag);
+	}
+
+	private reloadIntoWorld(target: GameWorldId): void {
+		try {
+			sessionStorage.setItem(FluffyGrass.AUTOPLAY_KEY, target);
+		} catch {
+			/* private browsing — the menu will just show, which is harmless */
+		}
+		const url = new URL(window.location.href);
+		url.searchParams.set("world", target);
+		window.location.replace(url.toString());
+	}
+
 	private async switchWorld(target: GameWorldId) {
 		if (target === this.currentWorld || this.isWorldSwitching) return;
+
+		// Coming back to the hub from another world (or out of the editor) rebuilds
+		// from scratch — see reloadIntoWorld.
+		if (target === "island" && this.isGameActive) {
+			this.reloadIntoWorld(target);
+			return;
+		}
 
 		const tStart = performance.now();
 
@@ -5781,6 +5874,14 @@ export class FluffyGrass {
 		const previousDef = this.activeWorldDef;
 		// Claim the switch before awaiting the DB fetch so no second switch races in.
 		this.isWorldSwitching = true;
+		// Retire any off-thread grass build started in the world we are leaving. The
+		// generation guard existed only for rapid sculpt strokes, so a build that was
+		// still in flight landed in the *new* world: it re-assigned the field after
+		// the dispose pass had cleared it, parented to the outgoing world's group.
+		// That left ~1.2M invisible blades and their storage buffers resident, and a
+		// late island build could overwrite the live field with one sampled from the
+		// old heights.
+		this.grassBuildGeneration++;
 		const targetDef = await this.resolveWorldDefinition(target).catch(() => null);
 		const tDb = performance.now();
 		if (this.editMode) {
@@ -5803,6 +5904,31 @@ export class FluffyGrass {
 		try {
 			this.worldLoading.setProgress(15, "Generating terrain and physics...");
 			await this.nextFrame();
+
+			// Commit the incoming world's identity BEFORE building it.
+			//
+			// Ground queries, group lookups and every editor callback key off
+			// `activeWorldDef`. Leaving it pointed at the outgoing world for the whole
+			// build meant the new world's own props were seated while the app still
+			// believed it was elsewhere: coming back to the island from a 1 km world put
+			// its lamp, sign and pond stones 20 m in the air, seated on 1 km hills. It
+			// also let a replay that outlived its world re-register that world's terrain
+			// as the surface everything samples.
+			this.activeWorldDef = targetDef;
+			this.currentWorld = target;
+			// Mask spans the world on XZ, so its extent is per-world. Also clears
+			// coverage, which is correct: snow belongs to the world it was painted
+			// in and edit ops replay right after this.
+			configureSnowMask(targetDef.size);
+			this.worldGroup.visible = target === "island";
+			this.newWorldGroup.visible = target === "valley";
+			this.customWorldGroup.visible = targetDef.kind === "custom";
+			const activeGroup = targetDef.kind === "custom" ? this.customWorldGroup : this.worldGroup;
+			activeGroup.add(this.treeManager.group);
+			// The manager outlives worlds — a switch re-parents it rather than rebuilding
+			// it — so the outgoing world's tree instances have to go here, before the
+			// incoming world's replay adds its own.
+			this.treeManager.clear();
 
 			if (target === "island") {
 				await this.buildIslandWorld();
@@ -5830,18 +5956,6 @@ export class FluffyGrass {
 				});
 			}
 
-			this.activeWorldDef = targetDef;
-			// Mask spans the world on XZ, so its extent is per-world. Also clears
-			// coverage, which is correct: snow belongs to the world it was painted
-			// in and edit ops replay right after this.
-			configureSnowMask(targetDef.size);
-			this.currentWorld = target;
-			this.worldGroup.visible = target === "island";
-			this.newWorldGroup.visible = target === "valley";
-			this.customWorldGroup.visible = targetDef.kind === "custom";
-
-			const activeGroup = targetDef.kind === "custom" ? this.customWorldGroup : this.worldGroup;
-			activeGroup.add(this.treeManager.group);
 
 			this.applyWorldEnvironment(target);
 			this.syncFireflies();
@@ -6030,6 +6144,22 @@ export class FluffyGrass {
 		return tip ? tint.lerp(tip, 0.7) : tint;
 	}
 
+	/**
+	 * Push a world's soil colour onto the shared terrain material.
+	 *
+	 * Once roads, water or the pond shore have painted, the ground is shaded by
+	 * the vertex-colour buffer and `.color` *multiplies* it, so it has to stay
+	 * white — the tint already lives in the attribute. Writing the soil colour on
+	 * top squared the green and rendered the whole map near-black. That is what a
+	 * world switch did on the way back to the hub: the fresh island came up with a
+	 * white material, and re-applying the environment darkened it.
+	 */
+	private applyTerrainTint(color: THREE.ColorRepresentation) {
+		if (!this.terrainMat) return;
+		if (this.terrainMat.vertexColors) this.terrainMat.color.setHex(0xffffff);
+		else this.terrainMat.color.set(color);
+	}
+
 	private applyWorldEnvironment(world: GameWorldId) {
 		const sky = this.scene.getObjectByName("sky-dome");
 		const def = this.knownWorldDefinition(world);
@@ -6048,9 +6178,7 @@ export class FluffyGrass {
 			this.grassMaterial.uniforms.tipColor1.value.set("#3f6d21");
 			this.grassMaterial.uniforms.tipColor2.value.set("#4c8129");
 			this.sceneProps.terrainColor = "#1d360c";
-			if (this.terrainMat) {
-				this.terrainMat.color.set("#1d360c");
-			}
+			this.applyTerrainTint("#1d360c");
 			this.scene.background = new THREE.Color(
 				def.kind === "custom" ? "#87a4c0" : this.sceneProps.fogColor
 			);
@@ -6075,9 +6203,7 @@ export class FluffyGrass {
 			this.grassMaterial.uniforms.tipColor1.value.set(0x799894);
 			this.grassMaterial.uniforms.tipColor2.value.set(0x56726e);
 			this.sceneProps.terrainColor = "#3e524e";
-			if (this.terrainMat) {
-				this.terrainMat.color.set("#3e524e");
-			}
+			this.applyTerrainTint("#3e524e");
 		}
 		// Cave mouths fade into the ground they open onto, so they follow whatever
 		// colour this world just picked. Biased toward the grass canopy rather than

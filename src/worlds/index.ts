@@ -16,6 +16,7 @@ export {
 } from "./worldTypes";
 export {
 	createProceduralTerrain,
+	ensureTerrainVertexColors,
 	paintTerrainMud,
 	paintTerrainMudShore,
 	paintTerrainWater,

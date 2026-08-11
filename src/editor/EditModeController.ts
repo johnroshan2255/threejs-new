@@ -26,6 +26,8 @@ import {
 } from "../terrain/caveShape";
 import { createTerrainCollider } from "../physics/terrainCollider";
 import { clearSnowMask } from "../terrain/snowMask";
+import { applySnowToMaterial } from "../terrain/snowShading";
+import { getCaveMeshes } from "../terrain/caveRegistry";
 import { WorldEditStore } from "./WorldEditStore";
 import { WorldEditPersistence } from "./WorldEditPersistence";
 import { WorldEditApi } from "./WorldEditApi";
@@ -68,6 +70,8 @@ export type EditModeHost = {
 	createNewLargeWorld: (sizeKm: number) => Promise<void>;
 	/** Switch active world (used when joining a room bound to a worldId). */
 	switchToWorldId: (worldId: string) => Promise<void>;
+	/** Leave for another world by reloading the page — see main.ts reloadIntoWorld. */
+	reloadIntoWorld: (worldId: string) => void;
 	/** In-memory custom world defs (created this session, not yet in the DB). */
 	listLocalCustomWorlds: () => WorldDefinition[];
 	/** Rebuild fluffy grass from the current terrain (used after undo/redo). */
@@ -118,7 +122,10 @@ export class EditModeController {
 	private caveNodes: CaveNode[] = [];
 	private caveDraftGroup: THREE.Group | null = null;
 	private frustumSize = 120;
-	private target = new THREE.Vector3(0, 0, 0);
+	/** Point both editor cameras look at; the render loop culls around it. */
+	readonly target = new THREE.Vector3(0, 0, 0);
+	/** World that was active when the editor opened — where Exit Edit returns to. */
+	private enterEditFromWorldId: string | null = null;
 	private orbitYaw = 0.7;
 	private orbitPitch = 0.55;
 	private orbitDistance = 160;
@@ -205,6 +212,7 @@ export class EditModeController {
 			removeEditorStone: (stone) => host.removeEditorStone(stone),
 			removeEditorPond: (pond) => host.removeEditorPond(pond),
 			getScenePropsTerrainColor: () => host.getScenePropsTerrainColor(),
+			getActiveWorldId: () => host.getActiveWorldDefinition().id,
 			getTreeManager: () => host.getTreeManager(),
 		});
 
@@ -480,6 +488,8 @@ export class EditModeController {
 			this.ui.setSaveState("saved", "Log in to edit your worlds.");
 			return;
 		}
+		// Remember where we came from so Exit Edit can put us back there.
+		this.enterEditFromWorldId = this.host.getActiveWorldDefinition().id;
 		this.ui.openWorldPicker();
 		try {
 			const remote = await this.persistence.listMineWorlds();
@@ -559,19 +569,28 @@ export class EditModeController {
 		this.ui.syncEnabled(true);
 	}
 
-	/** Leave edit tools and return to the main multiplayer Island hub. */
+	/**
+	 * Leave edit tools and go back where the author came from.
+	 *
+	 * This used to hard-code the Island, so editing the world you were already
+	 * standing in threw you out of it — Exit Edit is "put the tools away", not
+	 * "teleport me to the hub". `enterEditFromWorldId` records the world that was
+	 * active when the editor opened; when that is the world being edited there is
+	 * nothing to switch to at all.
+	 */
 	private async exitEditToHub() {
 		this.ui.closeWorldPicker();
 		if (this.enabled) this.setEnabled(false);
 		this.ui.syncEnabled(false);
 		const active = this.host.getActiveWorldDefinition();
-		if (active.id !== "island") {
-			try {
-				await this.host.switchToWorldId("island");
-			} catch {
-				/* keep current world if hub switch fails */
-			}
-		}
+		const target = this.enterEditFromWorldId ?? "island";
+		this.enterEditFromWorldId = null;
+		if (active.id === target) return;
+		// Reload rather than swap in place. An edit session leaves a lot behind — a
+		// replay that may still be mid-flight, a rebuilt terrain registry, grass
+		// masks, the instanced tree buffer — and unwinding all of it in-process is
+		// what produced floating props and stripped grass on the way out.
+		this.host.reloadIntoWorld(target);
 	}
 
 	setEnabled(enabled: boolean, force = false) {
@@ -1049,6 +1068,10 @@ export class EditModeController {
 			const mat = mesh.material as THREE.MeshPhongMaterial;
 			mat.vertexColors = true;
 			mat.color.setHex(0xffffff);
+			// The snow patch owns `colorNode`, and NodeMaterial only re-reads the
+			// vertex-colour flag when that node is rebuilt. Without this the ground
+			// keeps shading from the flat white `.color` and the map renders blank.
+			applySnowToMaterial(mat);
 			mat.needsUpdate = true;
 		} else {
 			if (geo.getAttribute("color")) geo.deleteAttribute("color");
@@ -1059,6 +1082,7 @@ export class EditModeController {
 			} else {
 				mat.color.setHex(0xffffff);
 			}
+			applySnowToMaterial(mat);
 			mat.needsUpdate = true;
 		}
 
@@ -1420,13 +1444,25 @@ export class EditModeController {
 	 * over dug ground. Same for the player, who can be left inside a hill.
 	 */
 	private onTerrainSettled() {
+		// Props carry no saved Y — they mean "on the ground at (x, z)". The ground
+		// they were spawned on is only final now, after the whole op list has run, so
+		// this is where trees and stones stop hanging in mid-air over terrain that
+		// later ops sculpted or dug out from under them.
+		this.applier.reseatTerrainProps();
 		// Slopes steeper than 65° stay bare — the filter re-runs on every rebuild.
 		// Masks must wait for the rebuild: custom worlds place blades off-thread, and
 		// clearing the outgoing field would leave its replacement covered in grass
 		// over roads, ponds and cave mouths.
-		void Promise.resolve(this.host.rebuildEditGrass()).then(() =>
-			this.reapplyGrassMasksOnly()
-		);
+		//
+		// The world is captured first because that rebuild takes seconds on a 1 km
+		// world. Leaving during it used to mask the *incoming* world's grass with this
+		// world's road and cave circles — a 1 km world's ops sank most of a 200 m
+		// island's blades, which is what "no grass on the island" was.
+		const settledWorldId = this.host.getActiveWorldDefinition().id;
+		void Promise.resolve(this.host.rebuildEditGrass()).then(() => {
+			if (this.host.getActiveWorldDefinition().id !== settledWorldId) return;
+			this.reapplyGrassMasksOnly();
+		});
 		this.host.liftPlayersAboveTerrain?.();
 	}
 
@@ -1434,6 +1470,10 @@ export class EditModeController {
 	private async reapplyGrassMasksOnly() {
 		const grass = this.host.getGrassField();
 		if (!grass) return;
+		// The op list belongs to one world; masking another world's field with it
+		// deletes grass that has nothing to do with these roads and caves.
+		const worldId = this.host.getActiveWorldDefinition().id;
+		if (this.store.worldId && this.store.worldId !== worldId) return;
 		const target = this.getSculptTarget();
 		const sampleHeight = target
 			? createHeightSampler(target.heights, target.nrows, target.ncols, target.size)
@@ -1864,6 +1904,16 @@ export class EditModeController {
 		this.target.z = THREE.MathUtils.clamp(this.target.z, -half, half);
 	}
 
+	/**
+	 * Surface under the cursor: terrain *and* cave shells.
+	 *
+	 * Carving a cave deletes the terrain triangles over its mouth, and the shell's
+	 * rock takes their place — ground you can walk on in play mode, because every
+	 * gameplay ground query runs against terrain plus shells. Picking only the
+	 * terrain mesh made those strips dead to the editor: the ray fell through the
+	 * missing triangles and returned nothing, so props could not be placed on
+	 * ground that looks and behaves exactly like the rest of the map.
+	 */
 	private pickTerrain(clientX: number, clientY: number): THREE.Vector3 | null {
 		const rect = this.host.canvas.getBoundingClientRect();
 		this.pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
@@ -1871,9 +1921,12 @@ export class EditModeController {
 		this.raycaster.setFromCamera(this.pointer, this.activeCamera);
 		const mesh = this.host.getTerrainMesh();
 		if (!mesh) return null;
-		const hits = this.raycaster.intersectObject(mesh, false);
+		const caves = getCaveMeshes();
+		const hits = caves.length
+			? this.raycaster.intersectObjects([mesh, ...caves], false)
+			: this.raycaster.intersectObject(mesh, false);
 		if (!hits.length) return null;
-		this.hitPoint.copy(hits[0].point);
+		this.hitPoint.copy(hits[0]!.point);
 		return this.hitPoint;
 	}
 

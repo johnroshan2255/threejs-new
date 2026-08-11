@@ -23,6 +23,19 @@
   <meta name="twitter:title" content="The Car Game" />
   <meta name="twitter:description" content="Drive through fluffy grass in a Three.js world with day and night." />
   <meta name="twitter:image" content="/social2.webp" />
+  <script>
+    // Returning to a world reloads the page so it rebuilds from a clean process
+    // (main.ts reloadIntoWorld). This runs before any module parses, so the title
+    // shell never flashes on that load — CSS below keeps only the progress line.
+    // The key is shared with main.ts AUTOPLAY_KEY: change both together.
+    try {
+      if (sessionStorage.getItem("autoplayAfterWorldReload")) {
+        document.documentElement.classList.add("autoplay-boot");
+      }
+    } catch (e) {
+      /* private browsing: fall through to the normal menu */
+    }
+  </script>
 </head>
 
 <body>

@@ -4,6 +4,14 @@ type LoadingScreenOptions = {
 	auth: AuthService;
 	onPlay: () => void;
 	onAccountCreated?: (user: AuthUser) => void;
+	/**
+	 * Skip the title screen and drop straight into the game.
+	 *
+	 * Set when this page load is a return to a world rather than a fresh visit —
+	 * the world switch reloads the page to rebuild from a clean process, and
+	 * stopping at "Play" in the middle of that would be nonsense.
+	 */
+	autoPlay?: boolean;
 };
 
 export class LoadingScreenController {
@@ -41,6 +49,12 @@ export class LoadingScreenController {
 				}
 				this.options.onPlay();
 			});
+
+			// Returning to a world: enter immediately. No fullscreen request here —
+			// that needs a real user gesture, and this load did not have one.
+			if (this.options.autoPlay) {
+				this.options.onPlay();
+			}
 		}
 
 		createAccountButton?.addEventListener("click", () => {

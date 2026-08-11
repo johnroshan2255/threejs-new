@@ -50,6 +50,31 @@ export function createProceduralTerrain(
 	return { mesh, heights, nrows, ncols, size };
 }
 
+/** Base ground tint the vertex-colour buffer starts from. */
+const TERRAIN_GRASS_TINT = new THREE.Color("#3f6d21");
+
+/**
+ * Make sure the terrain carries a vertex-colour buffer, seeded with grass.
+ *
+ * Creating it lazily inside each paint helper was enough while painting was the
+ * only consumer, but the material has to be told about vertex colours *before*
+ * its shader compiles, and `NodeMaterial` bakes in the vertex-colour multiply
+ * only when the attribute already exists at build time. Batched strokes flip the
+ * material flag and paint on a later tick, so the attribute has to be created up
+ * front or the ground compiles as flat white.
+ */
+export function ensureTerrainVertexColors(geometry: THREE.BufferGeometry) {
+	if (geometry.attributes.color) return;
+	const positions = geometry.attributes.position as THREE.BufferAttribute;
+	const arr = new Float32Array(positions.count * 3);
+	for (let i = 0; i < positions.count; i++) {
+		arr[i * 3] = TERRAIN_GRASS_TINT.r;
+		arr[i * 3 + 1] = TERRAIN_GRASS_TINT.g;
+		arr[i * 3 + 2] = TERRAIN_GRASS_TINT.b;
+	}
+	geometry.setAttribute("color", new THREE.BufferAttribute(arr, 3));
+}
+
 /** Paint light-blue water tint onto terrain vertex colors. */
 export function paintTerrainWater(
 	mesh: THREE.Mesh,
@@ -59,18 +84,9 @@ export function paintTerrainWater(
 ) {
 	const geometry = mesh.geometry as THREE.BufferGeometry;
 	const positions = geometry.attributes.position as THREE.BufferAttribute;
-	const grass = new THREE.Color("#3f6d21");
 	const water = new THREE.Color("#7eb8e8");
 
-	if (!geometry.attributes.color) {
-		const arr = new Float32Array(positions.count * 3);
-		for (let i = 0; i < positions.count; i++) {
-			arr[i * 3] = grass.r;
-			arr[i * 3 + 1] = grass.g;
-			arr[i * 3 + 2] = grass.b;
-		}
-		geometry.setAttribute("color", new THREE.BufferAttribute(arr, 3));
-	}
+	ensureTerrainVertexColors(geometry);
 	const colors = geometry.attributes.color as THREE.BufferAttribute;
 	const radiusSq = radius * radius;
 	const inv = 1 / Math.max(radius, 0.0001);
@@ -104,19 +120,10 @@ export function paintTerrainMud(
 ) {
 	const geometry = mesh.geometry as THREE.BufferGeometry;
 	const positions = geometry.attributes.position as THREE.BufferAttribute;
-	const grass = new THREE.Color("#3f6d21");
 	/** Light mud road — readable on green terrain, no grass (masked separately). */
 	const mud = new THREE.Color("#a8906e");
 
-	if (!geometry.attributes.color) {
-		const arr = new Float32Array(positions.count * 3);
-		for (let i = 0; i < positions.count; i++) {
-			arr[i * 3] = grass.r;
-			arr[i * 3 + 1] = grass.g;
-			arr[i * 3 + 2] = grass.b;
-		}
-		geometry.setAttribute("color", new THREE.BufferAttribute(arr, 3));
-	}
+	ensureTerrainVertexColors(geometry);
 	const colors = geometry.attributes.color as THREE.BufferAttribute;
 
 	const radiusSq = radius * radius;
@@ -155,19 +162,10 @@ export function paintTerrainMudShore(
 ) {
 	const geometry = mesh.geometry as THREE.BufferGeometry;
 	const positions = geometry.attributes.position as THREE.BufferAttribute;
-	const grass = new THREE.Color("#3f6d21");
 	const mud = new THREE.Color("#9a8060");
 	const wetMud = new THREE.Color("#7a6848");
 
-	if (!geometry.attributes.color) {
-		const arr = new Float32Array(positions.count * 3);
-		for (let i = 0; i < positions.count; i++) {
-			arr[i * 3] = grass.r;
-			arr[i * 3 + 1] = grass.g;
-			arr[i * 3 + 2] = grass.b;
-		}
-		geometry.setAttribute("color", new THREE.BufferAttribute(arr, 3));
-	}
+	ensureTerrainVertexColors(geometry);
 	const colors = geometry.attributes.color as THREE.BufferAttribute;
 	const inner = Math.max(1, innerRadius);
 	const outer = Math.max(inner + 1.5, outerRadius);

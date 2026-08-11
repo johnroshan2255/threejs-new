@@ -8,7 +8,6 @@ import {
 	smoothstep,
 	step,
 	texture,
-	vertexColor,
 } from "three/tsl";
 import { snowUniforms } from "./snowMask";
 
@@ -70,8 +69,28 @@ export function snowShaderUniforms() {
 	};
 }
 
-/** Marks a material as already patched, so repeat calls are free. */
+/**
+ * Signature of the albedo inputs the patch was built for.
+ *
+ * `NodeMaterial` compiles `colorNode` once and caches the result, so the graph
+ * has to be rebuilt whenever an input to it changes. `needsUpdate` alone is not
+ * enough — assigning a *new* `colorNode` is what actually invalidates the cached
+ * build. Storing the signature instead of a plain `true` flag makes repeat calls
+ * free while still catching a material whose inputs moved under it.
+ *
+ * `vertexColors` is part of the signature even though `stockAlbedoNode` no
+ * longer reads it: `NodeMaterial.setupDiffuseColor` appends its own
+ * `vertexColor()` multiply at build time, so flipping the flag after the first
+ * build has no effect until the graph is rebuilt. That is exactly how the
+ * editor's terrain went white — vertex colours were switched on for road/water
+ * paint, the cached graph kept returning the (now white) flat `.color`, and the
+ * whole map rendered as blank paper.
+ */
 const SNOW_PATCH_FLAG = "snowPatched";
+
+function albedoSignature(material: any): string {
+	return `${material.map ? material.map.uuid : "-"}|${material.vertexColors ? 1 : 0}`;
+}
 
 /**
  * The albedo a stock material would have produced on its own, as a node.
@@ -81,11 +100,14 @@ const SNOW_PATCH_FLAG = "snowPatched";
  * disappears. Stones arrive from a GLB with a map; terrain is a flat `.color`
  * the GUI can still change, which is why this reads `materialColor` — a live
  * reference — rather than baking the colour in at patch time.
+ *
+ * Vertex colours are deliberately *not* multiplied in here: three applies them
+ * on top of whatever `colorNode` returns. Doing it here as well squared the
+ * terrain's vertex colour and turned the ground near-black.
  */
 function stockAlbedoNode(material: any) {
 	let albedo: any = materialColor;
 	if (material.map) albedo = albedo.mul(texture(material.map).rgb);
-	if (material.vertexColors) albedo = albedo.mul(vertexColor());
 	return albedo;
 }
 
@@ -104,15 +126,17 @@ function stockAlbedoNode(material: any) {
  */
 export function applySnowToMaterial(material: THREE.Material) {
 	const m = material as any;
-	if (m[SNOW_PATCH_FLAG]) return;
-	m[SNOW_PATCH_FLAG] = true;
+	const signature = albedoSignature(m);
+	if (m[SNOW_PATCH_FLAG] === signature) return;
+	const firstPatch = m[SNOW_PATCH_FLAG] === undefined;
+	m[SNOW_PATCH_FLAG] = signature;
 
 	// A stock material accepts `colorNode` as an ordinary property and then
 	// ignores it, so snow silently does nothing and the surface just never turns
 	// white. That is exactly how terrain, cave rock and tree trunks lost their
 	// snow: grass and foliage are node materials and kept working, which made it
 	// look like a snow-mask bug rather than a material-type one.
-	if (!m.isNodeMaterial) {
+	if (firstPatch && !m.isNodeMaterial) {
 		console.warn(
 			`[snow] ${material.type} "${material.name || "unnamed"}" is not a node ` +
 				"material; colorNode is ignored and it will never show snow. Construct " +
