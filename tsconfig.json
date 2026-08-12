@@ -13,7 +13,7 @@
        entirely, so `tsc --noEmit` exits reporting nothing while real errors go
        unseen. Listing them explicitly keeps a stray directory from ever
        silencing the check again. */
-    "types": ["three", "dat.gui", "stats.js", "webxr"],
+    "types": ["three", "dat.gui"],
 
     /* Bundler mode */
     "moduleResolution": "bundler",
