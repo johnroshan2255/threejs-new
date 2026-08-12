@@ -438,6 +438,19 @@ export class FluffyGrass {
 	private pendingGpuDisposals: Array<() => void> = [];
 	private lastGpuPanelUpdate = 0;
 	/**
+	 * Instances actually drawn per indirect buffer, from the last GPU readback.
+	 *
+	 * GPU-culled meshes (grass, trees) keep `InstancedMesh.count` at full capacity
+	 * and let the indirect buffer decide how many instances the draw really
+	 * submits, so `count` is the wrong number for a stats panel — it reported the
+	 * whole world's blades rather than the handful inside the cull radius. The real
+	 * figure only exists on the GPU, so it is read back on a slow cadence and
+	 * cached; the panel uses the cached value when one is available.
+	 */
+	private indirectDrawCounts = new WeakMap<object, number>();
+	private indirectReadInFlight = false;
+	private lastIndirectRead = 0;
+	/**
 	 * Frame timings for the stats panel, in milliseconds.
 	 *
 	 * CPU is wall time inside `render()`. GPU comes from WebGPU's timestamp-query
@@ -4590,6 +4603,11 @@ export class FluffyGrass {
 			this.editMode.update();
 		}
 
+		if (now - this.lastIndirectRead >= 500) {
+			this.lastIndirectRead = now;
+			void this.refreshIndirectDrawCounts();
+		}
+
 		if (now - this.lastGpuPanelUpdate >= 250) {
 			this.lastGpuPanelUpdate = now;
 			const gpuPanel = document.getElementById("custom-gpu-panel");
@@ -4604,7 +4622,17 @@ export class FluffyGrass {
 
 					const instanced = (mesh as unknown as THREE.InstancedMesh);
 					// InstancedMesh with count=0 contributes no GPU work (distance-culled)
-					const instanceCount = instanced.isInstancedMesh ? instanced.count : 1;
+					let instanceCount = instanced.isInstancedMesh ? instanced.count : 1;
+
+					// A GPU-culled mesh draws whatever its indirect buffer says, not its
+					// capacity. Without this the grass field reported every blade in the
+					// world (1.24 M on a 1 km map, ~20 M triangles) instead of the ~8 k
+					// inside the cull radius.
+					const indirect = (mesh.geometry as any).indirect;
+					if (indirect) {
+						const drawn = this.indirectDrawCounts.get(indirect);
+						if (drawn !== undefined) instanceCount = drawn;
+					}
 					if (instanceCount === 0) return;
 
 					// Each draw call = 1 GPU draw, regardless of instance count
@@ -6142,6 +6170,36 @@ export class FluffyGrass {
 	 * world and asking for 40 bots fills that world rather than the hub. The
 	 * character sheet is loaded once and cloned per bot.
 	 */
+	/**
+	 * Refresh the per-indirect-buffer instance counts used by the stats panel.
+	 *
+	 * `getArrayBufferAsync` is a GPU->CPU copy plus a map, so this runs on a slow
+	 * cadence and never more than one at a time. Element 1 of an indirect draw
+	 * buffer is `instanceCount` — the same value the compute cull writes with
+	 * `atomicAdd`, and the same one I used to verify culling works.
+	 */
+	private async refreshIndirectDrawCounts(): Promise<void> {
+		if (this.indirectReadInFlight) return;
+		this.indirectReadInFlight = true;
+		try {
+			const buffers: any[] = [];
+			this.scene.traverseVisible((obj) => {
+				const geo = (obj as THREE.Mesh).geometry as any;
+				if (geo?.indirect && !buffers.includes(geo.indirect)) buffers.push(geo.indirect);
+			});
+			for (const buffer of buffers) {
+				const raw = await (this.renderer as any).getArrayBufferAsync(buffer);
+				const view = new Uint32Array(raw);
+				this.indirectDrawCounts.set(buffer, view[1] ?? 0);
+			}
+		} catch {
+			// Readback unsupported or the buffer went away mid-switch: keep the last
+			// values rather than falling back to capacity, which is the wrong number.
+		} finally {
+			this.indirectReadInFlight = false;
+		}
+	}
+
 	private async syncBots(): Promise<void> {
 		const manager = this.botManager;
 		if (!manager) return;
