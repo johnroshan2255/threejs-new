@@ -61,7 +61,16 @@ export function updateChaseCamera(
 	car: CarEntity,
 	input: ChaseCameraInput,
 	dt: number,
-	isFpv: boolean = false
+	isFpv: boolean = false,
+	/**
+	 * Horizontal chassis speed for this frame, if the caller already has it.
+	 *
+	 * The caller reads `linvel()` once per frame and shares it (see
+	 * `CarController.syncVelocityCache`); passing it here avoids a second wasm
+	 * crossing for the auto-centre check below. Omit it and this falls back to
+	 * reading the body directly.
+	 */
+	carSpeedXZ?: number
 ): void {
 	if (isFpv) {
 		// Driver seat is typically slightly behind the center of the car (-Z) and to the left (-X)
@@ -93,8 +102,11 @@ export function updateChaseCamera(
 
 	// Auto-center camera if car is moving and user isn't dragging
 	if (!input.isDragging) {
-		const v = car.body.linvel();
-		const speed = Math.hypot(v.x, v.z);
+		let speed = carSpeedXZ;
+		if (speed === undefined) {
+			const v = car.body.linvel();
+			speed = Math.hypot(v.x, v.z);
+		}
 		if (speed > 1.0) {
 			// Gently lerp relative yaw back to 0
 			input.yaw *= Math.exp(-2.0 * dt);

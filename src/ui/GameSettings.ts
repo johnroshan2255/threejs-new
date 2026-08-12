@@ -2,6 +2,56 @@ export type QualityLevel = "Low" | "Medium" | "High";
 export type GameWorldId = string;
 export type VehicleId = "none" | "hummer" | "jeep";
 
+/**
+ * Edge-antialiasing technique.
+ *
+ * There is no 2x or 8x here because WebGPU cannot express them: the spec only
+ * requires sample counts 1 and 4, and three's `WebGPUUtils.getSampleCount` is
+ * literally `sampleCount >= 4 ? 4 : 1`. Asking for 2 builds pipelines at one
+ * sample while the canvas still attaches a resolve target, and every frame dies
+ * as "cannot set as a resolve target" with nothing drawn. Sample density beyond
+ * 4x is reached with `supersample` instead, which is a real ladder.
+ */
+export type AaMode = "off" | "fxaa" | "msaa" | "msaa+fxaa";
+
+/**
+ * Supersample factor as a multiple of *pixel count*, not of an axis.
+ *
+ * 2x means twice the pixels (1.41x per axis), 4x means four times (2x per axis).
+ */
+export type SupersampleLevel = 1 | 2 | 4;
+
+export const AA_MODES: AaMode[] = ["off", "fxaa", "msaa", "msaa+fxaa"];
+
+/**
+ * Shipping default.
+ *
+ * MSAA keeps grass in the opaque, depth-sorted queue (alpha-to-coverage needs real
+ * samples), and FXAA does the edge work the 1.25x supersample floor used to do —
+ * cheaper, and measurably steadier. Because this mode includes FXAA, the floor is
+ * released and the renderer draws 1:1 with the display: measured 167 -> 211 fps in
+ * fullscreen at 1080p, with isolated flicker 0.09 -> 0.07 per 1000 px.
+ */
+export const DEFAULT_AA_MODE: AaMode = "msaa+fxaa";
+export const AA_MODE_LABELS = ["Off", "FXAA", "MSAA 4x", "MSAA+FXAA"];
+export const SUPERSAMPLE_LEVELS: SupersampleLevel[] = [1, 2, 4];
+export const SUPERSAMPLE_LABELS = ["1x", "2x", "4x"];
+
+/** Per-axis pixel ratio that yields the requested pixel-count multiple. */
+export function supersampleAxisScale(level: SupersampleLevel): number {
+	return Math.sqrt(level);
+}
+
+/** True when the mode wants the renderer built with MSAA. Fixed per session. */
+export function aaModeUsesMsaa(mode: AaMode): boolean {
+	return mode === "msaa" || mode === "msaa+fxaa";
+}
+
+/** True when the mode wants the FXAA node in the composite. Fixed per session. */
+export function aaModeUsesFxaa(mode: AaMode): boolean {
+	return mode === "fxaa" || mode === "msaa+fxaa";
+}
+
 type DayPeriod = "morning" | "noon" | "evening" | /* "sunset" | */ "night";
 
 /** Describes a single tunable car parameter shown in the UI. */
@@ -20,6 +70,14 @@ type GameSettingsOptions = {
 	resolutionQuality: QualityLevel;
 	/** Multiplier on the resolution tier's pixel ratio, 0.5–2. */
 	renderScale: number;
+	/** Edge AA technique. Takes effect on the next load — see `AaMode`. */
+	aaMode: AaMode;
+	/** Supersample pixel-count multiple. Applies immediately. */
+	supersample: SupersampleLevel;
+	/** Room capacity the host asks for. Used at create-room time. */
+	roomMaxPlayers: number;
+	/** AI bots to spawn on match start. */
+	botCount: number;
 	waterQuality: QualityLevel;
 	postFx: boolean;
 	showStats: boolean;
@@ -35,6 +93,11 @@ type GameSettingsOptions = {
 	onShadowQualityChange: (quality: QualityLevel) => void;
 	onResolutionQualityChange: (quality: QualityLevel) => void;
 	onRenderScaleChange: (scale: number) => void;
+	/** Persisted now, honoured on the next load. */
+	onAaModeChange: (mode: AaMode) => void;
+	onSupersampleChange: (level: SupersampleLevel) => void;
+	onRoomMaxPlayersChange: (count: number) => void;
+	onBotCountChange: (count: number) => void;
 	onWaterQualityChange: (quality: QualityLevel) => void;
 	onPostFxChange: (enabled: boolean) => void;
 	onShowStatsChange: (enabled: boolean) => void;
@@ -81,12 +144,23 @@ export class GameSettings {
 	private worldSelect!: HTMLSelectElement;
 	/** Suppresses "custom preset" marking while a preset is being applied. */
 	private applyingPreset = false;
+	/**
+	 * The AA mode this session was actually built with, as opposed to the one
+	 * currently selected. They differ once the user picks a new mode, which is
+	 * what the restart note is keyed on.
+	 */
+	private readonly sessionAaMode: AaMode;
 
 	constructor(private readonly options: GameSettingsOptions) {
+		this.sessionAaMode = options.aaMode;
 		this.state = {
 			shadowQuality: options.shadowQuality,
 			resolutionQuality: options.resolutionQuality,
 			renderScale: options.renderScale,
+			aaMode: options.aaMode,
+			supersample: options.supersample,
+			roomMaxPlayers: options.roomMaxPlayers,
+			botCount: options.botCount,
 			waterQuality: options.waterQuality,
 			postFx: options.postFx,
 			showStats: options.showStats,
@@ -429,9 +503,13 @@ export class GameSettings {
 						${this.row("Shadow quality", "Map resolution and update rate", this.notch("shadowQuality", QUALITY_TIERS, tierIndex(s.shadowQuality)), s.shadowQuality)}
 						${this.row("Resolution", "Base render resolution tier", this.notch("resolutionQuality", QUALITY_TIERS, tierIndex(s.resolutionQuality)), s.resolutionQuality)}
 						${this.row("Render scale", "Multiplies the resolution tier. Frame cost scales with pixel count.", this.slider("renderScale", 50, 200, 5, Math.round(s.renderScale * 100), "%"), Math.round(s.renderScale * 100) + "%")}
+						${this.row("Antialiasing", "Edge smoothing. MSAA is 4x — WebGPU has no 2x or 8x. MSAA also keeps grass depth-sorted.", this.chips("aaMode", AA_MODE_LABELS, AA_MODES.indexOf(s.aaMode)), AA_MODE_LABELS[AA_MODES.indexOf(s.aaMode)] ?? "Off")}
+						${this.row("Supersampling", "Renders above native and downsamples. 4x = four times the pixels.", this.chips("supersample", SUPERSAMPLE_LABELS, SUPERSAMPLE_LEVELS.indexOf(s.supersample)), SUPERSAMPLE_LABELS[SUPERSAMPLE_LEVELS.indexOf(s.supersample)] ?? "1x")}
 						${this.row("Water physics", "Wave simulation and buoyancy", this.notch("waterQuality", QUALITY_TIERS, tierIndex(s.waterQuality)), s.waterQuality)}
 						${this.row("Atmospheric FX", "God rays, bloom and the colour grade", this.toggle("postFx", s.postFx), s.postFx ? "On" : "Off")}
 						${this.row("Frame counter", "Shows FPS and draw calls", this.toggle("showStats", s.showStats), s.showStats ? "On" : "Off")}
+						<p class="caution" id="aa-restart-note">Antialiasing changes apply the next time the game loads.</p>
+						<p class="caution" id="aa-grass-note">Without MSAA the grass loses alpha-to-coverage and returns to the blended queue, so blades shimmer as they sway. FXAA smooths still edges but cannot fix that.</p>
 						<p class="caution" id="scale-caution">Render scale above 100% will cost frames on most machines.</p>
 					</section>
 
@@ -493,6 +571,9 @@ export class GameSettings {
 							<h3>Multiplayer</h3>
 							<p>Host a room for others to join, or join an existing one. An account is required.</p>
 						</div>
+						${this.row("Room size", "Players allowed in a room you host. Applies to the next room you create.", this.slider("roomMaxPlayers", 2, 100, 1, s.roomMaxPlayers), String(s.roomMaxPlayers))}
+						${this.row("Bots", "AI players that spawn into the world you are in. Takes effect immediately.", this.slider("botCount", 0, 100, 1, s.botCount), String(s.botCount))}
+						<p class="caution is-on" id="bot-note">Bots shoot but do not deal damage yet \u2014 each client simulates its own copy, so damage needs the host-authoritative pass.</p>
 						<div class="stack" id="system-actions-container"></div>
 					</section>
 				</div>
@@ -594,6 +675,9 @@ export class GameSettings {
 		});
 
 		this.updateScaleCaution(Math.round(this.state.renderScale * 100), overlay);
+		// Runs before `this.overlay` is assigned, hence the explicit root — same
+		// reason as updateScaleCaution above.
+		this.updateAaRestartHint(overlay);
 	}
 
 	private dispatchChip(key: string, index: number, label: string): void {
@@ -609,6 +693,23 @@ export class GameSettings {
 			}
 			return;
 		}
+		if (key === "aaMode") {
+			const mode = AA_MODES[index];
+			if (mode) {
+				this.state.aaMode = mode;
+				this.options.onAaModeChange(mode);
+				this.updateAaRestartHint();
+			}
+			return;
+		}
+		if (key === "supersample") {
+			const level = SUPERSAMPLE_LEVELS[index];
+			if (level) {
+				this.state.supersample = level;
+				this.options.onSupersampleChange(level);
+			}
+			return;
+		}
 		if (key === "vehicle") {
 			const vehicle = VEHICLES[index];
 			if (vehicle) {
@@ -620,8 +721,46 @@ export class GameSettings {
 		}
 	}
 
+	/**
+	 * Show or hide the "takes effect after restart" note for the AA row.
+	 *
+	 * Both halves of the mode are baked in at startup: MSAA is fixed when the
+	 * renderer is constructed (assigning `renderer.samples` later is silently
+	 * ignored — it still reads 4 afterwards), and the FXAA node is part of the
+	 * composite's node graph, which cannot be swapped without rebuilding
+	 * `PostProcessing` — and that has no `dispose()`, so each rebuild strands
+	 * ~26 MB of render targets. Persist now, apply on the next load.
+	 */
+	private updateAaRestartHint(root?: HTMLElement): void {
+		const host = root ?? this.overlay;
+		const pending = this.state.aaMode !== this.sessionAaMode;
+		host?.querySelector("#aa-restart-note")?.classList.toggle("is-on", pending);
+
+		// Dropping MSAA costs more than edge quality, so it is called out rather
+		// than left as a surprise.
+		//
+		// Alpha-to-coverage needs real samples to distribute coverage across, so it
+		// switches off with MSAA — and that moves the grass out of the opaque queue
+		// and back into the blended one, where a field this dense cannot be
+		// depth-sorted meaningfully and overlapping blades trade places frame to
+		// frame. Measured on the island ridge, isolated flickering pixels per 1000:
+		// MSAA 0.29, MSAA+FXAA 0.23, FXAA alone 1.29, Off 2.01. FXAA smooths a
+		// static edge well but cannot put the sort order back.
+		host
+			?.querySelector("#aa-grass-note")
+			?.classList.toggle("is-on", !aaModeUsesMsaa(this.state.aaMode));
+	}
+
 	private dispatchSlider(key: string, value: number): void {
 		switch (key) {
+			case "roomMaxPlayers":
+				this.state.roomMaxPlayers = value;
+				this.options.onRoomMaxPlayersChange(value);
+				return;
+			case "botCount":
+				this.state.botCount = value;
+				this.options.onBotCountChange(value);
+				return;
 			case "renderScale":
 				this.state.renderScale = value / 100;
 				this.options.onRenderScaleChange(value / 100);

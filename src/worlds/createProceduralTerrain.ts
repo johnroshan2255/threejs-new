@@ -36,10 +36,24 @@ export function createProceduralTerrain(
 	geometry.rotateX(-Math.PI / 2);
 
 	geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
-	geometry.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
+
+	// Right-size the attributes that do not need 32-bit precision.
+	//
+	// This is the one geometry that grows with world size — at 2048 segments it is
+	// 4.2 M vertices — so per-vertex bytes dominate here.
+	//   normal: a unit vector, so Int8 normalized covers its full range with well
+	//           under a degree of error. 12 B -> 4 B (three pads x3 to snorm8x4).
+	//   uv:     PlaneGeometry emits exactly 0..1, so Unorm16 is lossless. 8 B -> 4 B.
+	geometry.setAttribute("normal", packNormalInt8(normals));
+	packUvUint16(geometry);
 
 	geometry.computeBoundingBox();
 	geometry.computeBoundingSphere();
+	// Left on the default build. `indirect: true` / `setIndex: false` were tried to
+	// keep the index 16-bit and measured no change — PlaneGeometry emits a Uint32
+	// index itself — so the default is kept rather than altering the BVH's raycast
+	// path for nothing. The BVH is not optional: gameplay height queries raycast
+	// this mesh (islandHeight.ts).
 	geometry.computeBoundsTree();
 
 	const mesh = new THREE.Mesh(geometry, material);
@@ -214,4 +228,26 @@ export function paintTerrainMudShore(
 		);
 	}
 	colors.needsUpdate = true;
+}
+
+/** Float32 unit normals -> Int8 normalized. See the call site for why this is safe. */
+function packNormalInt8(normals: Float32Array): THREE.BufferAttribute {
+	const packed = new Int8Array(normals.length);
+	for (let i = 0; i < normals.length; i++) {
+		packed[i] = Math.max(-127, Math.min(127, Math.round(normals[i]! * 127)));
+	}
+	return new THREE.BufferAttribute(packed, 3, true);
+}
+
+/** Float32 uvs in [0,1] -> Uint16 normalized. Leaves tiling uvs (>1) untouched. */
+function packUvUint16(geometry: THREE.BufferGeometry): void {
+	const src = geometry.getAttribute("uv");
+	if (!src || !(src.array instanceof Float32Array)) return;
+	const arr = src.array as Float32Array;
+	for (let i = 0; i < arr.length; i++) {
+		if (arr[i]! < 0 || arr[i]! > 1) return;
+	}
+	const packed = new Uint16Array(arr.length);
+	for (let i = 0; i < arr.length; i++) packed[i] = Math.round(arr[i]! * 65535);
+	geometry.setAttribute("uv", new THREE.BufferAttribute(packed, 2, true));
 }

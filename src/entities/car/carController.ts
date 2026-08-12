@@ -23,6 +23,31 @@ export class CarController {
 	private smokeAccum = 0;
 	private nitroActive = false;
 
+	/**
+	 * Chassis velocity as of the last `syncVelocityCache()` call.
+	 *
+	 * `body.linvel()` is not a getter — it crosses into wasm and builds a fresh
+	 * `{x,y,z}` every call. Three consumers want the same velocity in the same
+	 * frame (the engine-sound speedo, the chase camera's auto-centre check, and
+	 * the network state packet), so the caller reads it once per frame via
+	 * `syncVelocityCache()` and those three read out of here.
+	 *
+	 * This is deliberately *not* refreshed from inside `clampSpeed`, even though
+	 * that is the last thing `afterPhysics` does. Velocity is still mutated after
+	 * `afterPhysics` returns — the grapple reels the chassis in, explosion
+	 * impulses land on it, and a destroyed car gets zeroed — and Rapier's
+	 * `applyImpulse` moves `linvel` immediately rather than at the next step. A
+	 * cache filled during `afterPhysics` would therefore be stale by the time the
+	 * three readers run. The refresh has to sit after the last writer.
+	 */
+	private velX = 0;
+	private velY = 0;
+	private velZ = 0;
+	private speedXZ = 0;
+
+	/** Reusable out-param for `getVelocity` — never handed out by reference. */
+	private readonly velOut = { x: 0, y: 0, z: 0 };
+
 	constructor(
 		private body: RAPIER.RigidBody,
 		private vehicle: DynamicRayCastVehicleController,
@@ -48,9 +73,35 @@ export class CarController {
 		return this.throttle;
 	}
 
-	getSpeed(): number {
+	/**
+	 * Take the frame's single `linvel()` reading.
+	 *
+	 * Call once per frame, after everything that can change chassis velocity and
+	 * before anything that reads it. See the `velX` comment for why this cannot
+	 * live inside `afterPhysics`.
+	 */
+	syncVelocityCache() {
 		const v = this.body.linvel();
-		return Math.hypot(v.x, v.z);
+		this.velX = v.x;
+		this.velY = v.y;
+		this.velZ = v.z;
+		this.speedXZ = Math.hypot(v.x, v.z);
+	}
+
+	/** Horizontal speed as of the last `syncVelocityCache()`. No wasm crossing. */
+	getSpeed(): number {
+		return this.speedXZ;
+	}
+
+	/**
+	 * Cached chassis velocity. The returned object is reused between calls, so
+	 * copy out of it rather than holding on to it.
+	 */
+	getVelocity(): Readonly<{ x: number; y: number; z: number }> {
+		this.velOut.x = this.velX;
+		this.velOut.y = this.velY;
+		this.velOut.z = this.velZ;
+		return this.velOut;
 	}
 
 	/** Driven rear axle (non-steering) — engine tires. */
@@ -249,6 +300,10 @@ export class CarController {
 		this.driftFactor = 0;
 		this.drifting = false;
 		this.smokeAccum = 0;
+		this.velX = 0;
+		this.velY = 0;
+		this.velZ = 0;
+		this.speedXZ = 0;
 
 		const { drift } = this.config;
 		for (let i = 0; i < this.vehicle.numWheels(); i++) {

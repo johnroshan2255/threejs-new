@@ -151,6 +151,19 @@ export function createLargeTerrain(material: THREE.Material): {
 	geometry.computeVertexNormals();
 	geometry.computeBoundingBox();
 	geometry.computeBoundingSphere();
+
+	// Right-size the attributes that do not need 32-bit precision.
+	//
+	// Terrain is the one geometry that grows with world size, so per-vertex bytes
+	// matter here more than anywhere else: at 2048 segments it is 4.2 M vertices.
+	//   normal: unit vector, Int8 normalized is ~0.8 degrees of error -> 12 B -> 4 B
+	//           (three pads x3 to snorm8x4 for alignment, so 4 not 3)
+	//   uv:     PlaneGeometry emits 0..1 exactly, so Unorm16 is lossless here -> 8 B -> 4 B
+	packNormalsInt8(geometry);
+	packUvUint16(geometry);
+
+	// The BVH is not optional: gameplay height queries raycast this mesh
+	// (islandHeight.ts), so it is built here rather than lazily in the editor.
 	geometry.computeBoundsTree();
 
 	const mesh = new THREE.Mesh(geometry, material);
@@ -175,4 +188,41 @@ export function createLargeTerrain(material: THREE.Material): {
 	}
 
 	return { mesh, heights, nrows, ncols };
+}
+
+/**
+ * Convert a Float32 normal attribute to Int8 normalized in place.
+ *
+ * Normals are unit-length, so the useful range is exactly [-1, 1] — the range a
+ * signed normalized 8-bit attribute represents. Worst-case angular error is well
+ * under a degree, which terrain lighting cannot show.
+ */
+function packNormalsInt8(geometry: THREE.BufferGeometry): void {
+	const src = geometry.getAttribute("normal");
+	if (!src || !(src.array instanceof Float32Array)) return;
+	const n = src.count * 3;
+	const packed = new Int8Array(n);
+	for (let i = 0; i < n; i++) {
+		const v = (src.array as Float32Array)[i]!;
+		packed[i] = Math.max(-127, Math.min(127, Math.round(v * 127)));
+	}
+	geometry.setAttribute("normal", new THREE.BufferAttribute(packed, 3, true));
+}
+
+/**
+ * Convert a Float32 uv attribute to Uint16 normalized in place.
+ *
+ * Only valid because PlaneGeometry's uvs are within [0, 1]; a tiling uv (>1)
+ * would clamp. 1/65535 of a unit is far finer than any texel this samples.
+ */
+function packUvUint16(geometry: THREE.BufferGeometry): void {
+	const src = geometry.getAttribute("uv");
+	if (!src || !(src.array instanceof Float32Array)) return;
+	const arr = src.array as Float32Array;
+	for (let i = 0; i < arr.length; i++) {
+		if (arr[i]! < 0 || arr[i]! > 1) return; // tiling uvs — leave alone
+	}
+	const packed = new Uint16Array(arr.length);
+	for (let i = 0; i < arr.length; i++) packed[i] = Math.round(arr[i]! * 65535);
+	geometry.setAttribute("uv", new THREE.BufferAttribute(packed, 2, true));
 }

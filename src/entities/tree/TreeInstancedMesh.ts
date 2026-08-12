@@ -130,6 +130,9 @@ export class TreeInstancedMesh {
 	
 	private trunkIndirectBuffer!: IndirectStorageBufferAttribute;
 	private foliageIndirectBuffer!: IndirectStorageBufferAttribute;
+	private culledTrunkData?: StorageInstancedBufferAttribute;
+	private culledFoliageData?: StorageInstancedBufferAttribute;
+	private culledFoliageColorData?: StorageInstancedBufferAttribute;
 	private resetComputeNode?: any;
 	private cullingComputeNode?: any;
 	private frustumPlanesUniform?: any;
@@ -159,7 +162,16 @@ export class TreeInstancedMesh {
 	private lodMidLayers = 2;
 	private lodFarLayers = 1;
 
-	constructor(private manager?: THREE.LoadingManager, leafLayers = 4) {
+	/**
+	 * `leafLayers` defaults to 2, down from 4.
+	 *
+	 * The canopy is the whole cost of a tree — alpha-tested camera-facing cards
+	 * drawn once per layer — and layers are rotated copies of the same blob, so
+	 * dropping two thins the canopy rather than changing its silhouette. Measured
+	 * on the 1 km world: 4 -> 2 took the frame's GPU half from 6.92 ms to 5.34 ms,
+	 * the single largest win available without touching resolution.
+	 */
+	constructor(private manager?: THREE.LoadingManager, leafLayers = 2) {
 		this.leafLayers = leafLayers;
 		this.group.name = "Trees";
 	}
@@ -197,13 +209,19 @@ export class TreeInstancedMesh {
 		const masterFoliageColorNode = storage(this.masterFoliageColorData, 'vec4', foliageCapacity);
 
 		// 2. Setup Culled Buffers
-		const culledTrunkData = new StorageInstancedBufferAttribute(this.capacity, 16);
-		const culledFoliageData = new StorageInstancedBufferAttribute(foliageCapacity, 16);
-		const culledFoliageColorData = new StorageInstancedBufferAttribute(foliageCapacity, 4);
-		
-		const culledTrunkNode = storage(culledTrunkData, 'mat4', this.capacity);
-		const culledFoliageNode = storage(culledFoliageData, 'mat4', foliageCapacity);
-		const culledFoliageColorNode = storage(culledFoliageColorData, 'vec4', foliageCapacity);
+		//
+		// Kept on the instance so `dispose()` can reach them. This manager happens
+		// to be created once and reused across worlds, so as locals they never
+		// actually leaked — but the grass field had the identical pattern and did
+		// leak hundreds of MB per world load, so the same footgun is closed here
+		// rather than left for whoever next makes this per-world.
+		this.culledTrunkData = new StorageInstancedBufferAttribute(this.capacity, 16);
+		this.culledFoliageData = new StorageInstancedBufferAttribute(foliageCapacity, 16);
+		this.culledFoliageColorData = new StorageInstancedBufferAttribute(foliageCapacity, 4);
+
+		const culledTrunkNode = storage(this.culledTrunkData, 'mat4', this.capacity);
+		const culledFoliageNode = storage(this.culledFoliageData, 'mat4', foliageCapacity);
+		const culledFoliageColorNode = storage(this.culledFoliageColorData, 'vec4', foliageCapacity);
 
 		// 3. Setup Indirect Buffers
 		const trunkIndexCount = template.trunk.geometry.index ? template.trunk.geometry.index.count : template.trunk.geometry.attributes.position.count;
@@ -229,7 +247,7 @@ export class TreeInstancedMesh {
 		this.trunkMesh.receiveShadow = true;
 		this.trunkMesh.frustumCulled = false;
 		this.trunkMesh.geometry.indirect = this.trunkIndirectBuffer;
-		this.trunkMesh.instanceMatrix = culledTrunkData;
+		this.trunkMesh.instanceMatrix = this.culledTrunkData;
 
 		this.foliageMaterial = createFoliageMaterial({
 			leafColor: "#3f6d21",
@@ -245,8 +263,8 @@ export class TreeInstancedMesh {
 		this.foliageMesh.receiveShadow = true;
 		this.foliageMesh.frustumCulled = false;
 		this.foliageMesh.geometry.indirect = this.foliageIndirectBuffer;
-		this.foliageMesh.instanceMatrix = culledFoliageData;
-		this.foliageMesh.instanceColor = culledFoliageColorData as any;
+		this.foliageMesh.instanceMatrix = this.culledFoliageData;
+		this.foliageMesh.instanceColor = this.culledFoliageColorData as any;
 		
 		setFoliageInstanceSource(this.foliageMaterial, this.foliageMesh.instanceMatrix);
 
@@ -552,6 +570,34 @@ export class TreeInstancedMesh {
 		this.masterFoliageColorData.needsUpdate = true;
 	}
 	
+	/**
+	 * Release every GPU buffer this manager owns.
+	 *
+	 * Separate from `clear()`, which only empties the instance counts and physics
+	 * bodies so the same manager can be refilled for the next world. Call this only
+	 * when the manager itself is going away.
+	 */
+	dispose() {
+		this.clear();
+		this.trunkMesh?.geometry.dispose();
+		this.trunkMesh?.dispose();
+		this.foliageMesh?.geometry.dispose();
+		this.foliageMesh?.dispose();
+		this.masterTrunkData?.dispose();
+		this.masterFoliageData?.dispose();
+		this.masterFoliageColorData?.dispose();
+		this.culledTrunkData?.dispose();
+		this.culledFoliageData?.dispose();
+		this.culledFoliageColorData?.dispose();
+		this.trunkIndirectBuffer?.dispose();
+		this.foliageIndirectBuffer?.dispose();
+		this.culledTrunkData = undefined;
+		this.culledFoliageData = undefined;
+		this.culledFoliageColorData = undefined;
+		this.group.removeFromParent();
+		this.group.clear();
+	}
+
 	clear() {
 		this.count = 0;
 		if (this.countUniform) this.countUniform.value = 0;

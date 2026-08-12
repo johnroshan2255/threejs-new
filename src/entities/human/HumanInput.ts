@@ -1034,14 +1034,25 @@ export class HumanInput {
         this.moveDir.addScaledVector(this.cameraFwd, forward);
         this.moveDir.addScaledVector(this.cameraRight, right);
 
+        // Horizontal velocity this frame ends up written by exactly one of the two
+        // branches below, so it is tracked here rather than read back off the body
+        // for the swim correction further down — nothing steps physics in between,
+        // so `linvel()` there would only return what was just set.
+        let appliedVelX = 0;
+        let appliedVelZ = 0;
+        const appliedVelY = currentVel.y;
+
         if (this.moveDir.lengthSq() > 0.01) {
             this.moveDir.normalize();
-            
+
+            appliedVelX = this.moveDir.x * currentSpeed;
+            appliedVelZ = this.moveDir.z * currentSpeed;
+
             // Set horizontal velocity, preserve vertical (gravity or jump)
             this.human.body.setLinvel({
-                x: this.moveDir.x * currentSpeed,
-                y: currentVel.y,
-                z: this.moveDir.z * currentSpeed
+                x: appliedVelX,
+                y: appliedVelY,
+                z: appliedVelZ
             }, true);
 
             if (this.isAimingGun()) {
@@ -1066,9 +1077,9 @@ export class HumanInput {
         } else {
             // Apply preserved vertical velocity even when not moving horizontally
             this.human.body.setLinvel({
-                x: 0,
-                y: currentVel.y,
-                z: 0
+                x: appliedVelX,
+                y: appliedVelY,
+                z: appliedVelZ
             }, true);
 
             // Idle ADS: face camera aim
@@ -1112,12 +1123,11 @@ export class HumanInput {
             const targetMeshY = waterSurfaceY - 1.5;
             const depth = targetMeshY - meshY; 
             
-            const vel = this.human.body.linvel();
             const targetYVel = depth * 4.0;
-            this.human.body.setLinvel({ 
-                x: vel.x, 
-                y: vel.y + (targetYVel - vel.y) * 5.0 * dt, 
-                z: vel.z 
+            this.human.body.setLinvel({
+                x: appliedVelX,
+                y: appliedVelY + (targetYVel - appliedVelY) * 5.0 * dt,
+                z: appliedVelZ
             }, true);
         }
 

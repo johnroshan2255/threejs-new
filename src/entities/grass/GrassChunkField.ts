@@ -57,9 +57,18 @@ export class GrassChunkField {
 	private densityUniform: any;
 
 	private allMatrices?: Float32Array;
-	private pristineMatrices?: Float32Array;
-	private roadMasked?: boolean[];
+	/**
+	 * Original values of only the blades that masking has touched.
+	 *
+	 * Replaces a full `pristineMatrices` duplicate of every blade. Masking mutates
+	 * four floats per blade (the three scale diagonals and Y), so restoring needs
+	 * four floats per *masked* blade — not sixteen per blade in the world. On the
+	 * 1 km world that duplicate was 75.5 MB; roads touch a small fraction of it.
+	 */
+	private maskedOriginals = new Map<number, Float32Array>();
+	private roadMasked?: Uint8Array;
 	private instanceDataBuffer?: StorageBufferAttribute;
+	private culledDataBuffer?: StorageInstancedBufferAttribute;
 
 	private frustum = new THREE.Frustum();
 	private projScreenMatrix = new THREE.Matrix4();
@@ -106,11 +115,8 @@ export class GrassChunkField {
 
 		if (totalCount === 0) return;
 
-		if (this.allMatrices) {
-			this.pristineMatrices = new Float32Array(this.allMatrices);
-		}
-
-		this.roadMasked = new Array(totalCount).fill(false);
+		// Uint8Array, not boolean[]: a JS array of booleans costs ~8 bytes an entry.
+		this.roadMasked = new Uint8Array(totalCount);
 
 		if (!options.geometry.boundingSphere) options.geometry.computeBoundingSphere();
 		const bladeReach = (options.geometry.boundingSphere?.radius ?? 1) * 1.2 + BOUND_PADDING;
@@ -118,12 +124,23 @@ export class GrassChunkField {
 
 		// 1. Storage buffer for ALL raw instance matrices
 		this.instanceDataBuffer = new StorageBufferAttribute(totalCount, 16);
-		this.instanceDataBuffer.array.set(this.allMatrices);
+		// Share `allMatrices` rather than copying into the attribute's own array.
+		// `StorageBufferAttribute` allocates a Float32Array of exactly this size, so
+		// the copy left two identical 75 MB arrays alive for the world's lifetime.
+		// TreeInstancedMesh already does this (`masterTrunkData.array = ...`).
+		this.instanceDataBuffer.array = this.allMatrices;
 		const instanceDataNode = storage(this.instanceDataBuffer, 'mat4', totalCount);
 
 		// 2. Storage buffer for CULLED instance matrices
-		const culledDataBuffer = new StorageInstancedBufferAttribute(totalCount, 16);
-		const culledDataNode = storage(culledDataBuffer, 'mat4', totalCount);
+		//
+		// Held on the instance, not in a local, so `dispose()` can free it. As a
+		// bare const it was unreachable at teardown and stayed resident for the
+		// lifetime of the page: one mat4 per blade, so on a 1 km custom world every
+		// load stranded hundreds of MB of VRAM. Measured by switching
+		// custom -> valley -> custom repeatedly, total GPU memory climbed
+		// 599 -> 911 -> 1223 MB and never came back down.
+		this.culledDataBuffer = new StorageInstancedBufferAttribute(totalCount, 16);
+		const culledDataNode = storage(this.culledDataBuffer, 'mat4', totalCount);
 
 		// 3. Indirect draw buffer: [indexCount, instanceCount, firstIndex, baseVertex, firstInstance]
 		const indexCount = options.geometry.index ? options.geometry.index.count : options.geometry.attributes.position.count;
@@ -147,7 +164,7 @@ export class GrassChunkField {
 		this.grassMesh.boundingSphere = new THREE.Sphere();
 		boundingBox.getBoundingSphere(this.grassMesh.boundingSphere);
 		this.grassMesh.geometry.indirect = this.indirectBuffer;
-		this.grassMesh.instanceMatrix = culledDataBuffer;
+		this.grassMesh.instanceMatrix = this.culledDataBuffer;
 
 		this.group.add(this.grassMesh);
 
@@ -321,8 +338,10 @@ export class GrassChunkField {
 					},
 					[this.allMatrices.buffer]
 				);
+				// The worker transfers a fresh buffer, so the shared reference has to
+				// be re-pointed rather than copied into.
 				this.allMatrices = res.matrices;
-				this.instanceDataBuffer.array.set(this.allMatrices);
+				this.instanceDataBuffer.array = this.allMatrices;
 				this.instanceDataBuffer.needsUpdate = true;
 				return;
 			} catch (error) {
@@ -364,7 +383,15 @@ export class GrassChunkField {
 
 			if (!inside) continue;
 
-			this.roadMasked[i] = true;
+			this.roadMasked[i] = 1;
+			if (!this.maskedOriginals.has(i)) {
+				this.maskedOriginals.set(i, Float32Array.of(
+					this.allMatrices[offset + 0]!,
+					this.allMatrices[offset + 5]!,
+					this.allMatrices[offset + 10]!,
+					this.allMatrices[offset + 13]!
+				));
+			}
 			// Sink into ground
 			this.allMatrices[offset + 13] = -50;
 			// Scale down
@@ -375,26 +402,67 @@ export class GrassChunkField {
 		}
 
 		if (changed) {
-			this.instanceDataBuffer.array.set(this.allMatrices);
+			// array is shared with allMatrices — nothing to copy, just re-upload
 			this.instanceDataBuffer.needsUpdate = true;
 		}
 	}
 
 	clearMask() {
-		if (!this.allMatrices || !this.pristineMatrices || !this.roadMasked || !this.instanceDataBuffer) return;
-		this.allMatrices.set(this.pristineMatrices);
-		this.roadMasked.fill(false);
-		this.instanceDataBuffer.array.set(this.allMatrices);
+		if (!this.allMatrices || !this.roadMasked || !this.instanceDataBuffer) return;
+		// Restore only what was actually changed.
+		for (const [i, original] of this.maskedOriginals) {
+			const offset = i * 16;
+			this.allMatrices[offset + 0] = original[0]!;
+			this.allMatrices[offset + 5] = original[1]!;
+			this.allMatrices[offset + 10] = original[2]!;
+			this.allMatrices[offset + 13] = original[3]!;
+		}
+		this.maskedOriginals.clear();
+		this.roadMasked.fill(0);
 		this.instanceDataBuffer.needsUpdate = true;
 	}
 
-	dispose() {
+	/**
+	 * Release this field, including its GPU storage buffers.
+	 *
+	 * `renderer` is required to actually free the storage buffers. Calling
+	 * `BufferAttribute.dispose()` on them does nothing: it only dispatches a
+	 * 'dispose' event, and in three 0.185 nothing listens to that for a standalone
+	 * storage attribute — `Attributes.delete()` is reached only from
+	 * `Geometries.js`, i.e. for buffers a geometry owns. These three are created
+	 * loose, so the backend kept every one of them for the lifetime of the page.
+	 *
+	 * Measured on the 1 km custom world by switching custom -> valley -> custom:
+	 * GPU memory went 599 -> 911 -> 1223 MB, ~312 MB stranded per load, with
+	 * `info.memory.storageAttributes` climbing 8 -> 24 and never once dropping.
+	 *
+	 * The renderer's attribute cache is the only thing that calls
+	 * `backend.destroyAttribute()`, and it has no public accessor, hence the
+	 * `_attributes` reach-through.
+	 */
+	dispose(renderer?: any) {
 		this.group.removeFromParent();
 		this.grassMesh?.geometry.dispose();
 		this.grassMesh?.dispose();
-		this.indirectBuffer?.dispose();
-		this.instanceDataBuffer?.dispose();
+
+		const cache = renderer?._attributes;
+		const release = (attr?: THREE.BufferAttribute) => {
+			if (!attr) return;
+			if (cache) cache.delete(attr);
+			else attr.dispose();
+		};
+		release(this.indirectBuffer);
+		release(this.instanceDataBuffer);
+		release(this.culledDataBuffer);
 		this.group.clear();
+		// Drop the compute graphs too: they reference the buffers above, and holding
+		// them keeps the whole node chain — and its bindings — alive.
+		this.cullingComputeNode = undefined;
+		this.resetComputeNode = undefined;
+		this.indirectBuffer = undefined;
+		this.instanceDataBuffer = undefined;
+		this.culledDataBuffer = undefined;
+		this.maskedOriginals.clear();
 		this.allMatrices = undefined;
 		this.roadMasked = undefined;
 	}

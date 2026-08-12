@@ -102,7 +102,11 @@ export class EditSyncTransport {
 			this.handlers.onWorldSaved(payload);
 		});
 
-		if (this.watchedWorldId) {
+		// Guarded like every other emit here. A socket can be handed over while it
+		// is already CLOSING — a world switch re-attaches mid-teardown — and emitting
+		// on that transport throws "WebSocket is already in CLOSING or CLOSED state".
+		// The re-subscribe is not lost: `attachSocket` runs again on reconnect.
+		if (this.watchedWorldId && socket.connected) {
 			socket.emit(WORLD_EDIT_SOCKET.watchWorld, this.watchedWorldId);
 		}
 	}

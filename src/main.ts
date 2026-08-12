@@ -17,7 +17,13 @@ import {
 	createTerrainCollider,
 	type TerrainColliderHandle,
 } from "./physics/terrainCollider";
-import { setIslandTerrain, getWorldTerrainY, findSafeTerrainSpawn, isOutsideTerrain } from "./terrain/islandHeight";
+import {
+	setIslandTerrain,
+	getWorldTerrainY,
+	findSafeTerrainSpawn,
+	hasTerrainAt,
+	isOutsideTerrain,
+} from "./terrain/islandHeight";
 import { createLargeTerrain, TERRAIN_CONFIG } from "./terrain/createLargeTerrain";
 import { clearCaves } from "./terrain/caveRegistry";
 import { configureSnowMask } from "./terrain/snowMask";
@@ -30,6 +36,8 @@ import { setCaveTerrainColor } from "./entities/cave/createCave";
 import { Pond, REFERENCE_WATER_LOOK } from "./entities/water";
 import { createCar, type CarEntity } from "./entities/car/createCar";
 import { loadJeepVisual } from "./entities/car/jeepCarVisual";
+import { loadHummerVisual } from "./entities/car/hummerCarVisual";
+import { BotManager } from "./entities/bot/BotManager";
 import { CarController } from "./entities/car/carController";
 import { CarInput } from "./entities/car/carInput";
 import { resetCarUpright, respawnCarAtStart, isCarOutsideWorld } from "./entities/car/resetCar";
@@ -128,6 +136,7 @@ import {
 	sin,
 } from "three/tsl";
 import { godrays } from "three/addons/tsl/display/GodraysNode.js";
+import { fxaa } from "three/addons/tsl/display/FXAANode.js";
 import { setCharacterAlbedo } from "./entities/human/toonCharacter";
 import { SmokeTrailSystem } from "./environment/smokeTrail";
 import { ExplosionSystem } from "./environment/ExplosionSystem";
@@ -153,19 +162,30 @@ import { AuthService, type AuthUser } from "./auth/AuthService";
 import { GameNavigation } from "./ui/GameNavigation";
 import { LoadingScreenController } from "./ui/LoadingScreenController";
 import {
+	DEFAULT_AA_MODE,
 	GameSettings,
+	aaModeUsesFxaa,
+	aaModeUsesMsaa,
+	supersampleAxisScale,
+	type AaMode,
 	type CarTuningDef,
 	type GameWorldId,
 	type QualityLevel,
+	type SupersampleLevel,
 } from "./ui/GameSettings";
 import { renderLobbyAvatar } from "./ui/pixelBug";
 import { WorldLoadingOverlay } from "./ui/WorldLoadingOverlay";
 import { HealthHud } from "./ui/HealthHud";
 
+/** Car's local +X in world space, for stepping out of the driver's side. */
+const _exitSide = new THREE.Vector3();
+
 type RemotePlayer = {
 	loaded: boolean;
 	humanGroup?: THREE.Group;
 	carGroup?: THREE.Group;
+	/** Which vehicle the remote visual was built from, so a swap can be detected. */
+	vehicleId?: string;
 	humanBody?: RAPIER.RigidBody;
 	carBody?: RAPIER.RigidBody;
 	engineSound?: EngineSound;
@@ -368,6 +388,18 @@ export class FluffyGrass {
 	private sharedMultiplayerWorlds: WorldListItem[] = [];
 	private shadowQuality: QualityLevel = "High";
 	private resolutionQuality: QualityLevel = "High";
+	/**
+	 * Edge AA technique for this session.
+	 *
+	 * Read straight out of localStorage before the renderer is built rather than
+	 * in loadSettings(), because both halves of it are construction-time
+	 * decisions: `antialias` is what fixes the sample count for good (assigning
+	 * `renderer.samples` afterwards is silently dropped), and the FXAA node has
+	 * to be in the composite's graph from the start.
+	 */
+	private aaMode: AaMode = FluffyGrass.readPersistedAaMode();
+	/** Supersample pixel-count multiple. Safe to change at runtime. */
+	private supersample: SupersampleLevel = 1;
 	private waterQuality: QualityLevel = "High";
 	private vehicleId: any = "jeep";
 	private waterUpdateInterval = 1;
@@ -405,6 +437,28 @@ export class FluffyGrass {
 	/** GPU teardown deferred to the top of a frame — see queueGpuDispose. */
 	private pendingGpuDisposals: Array<() => void> = [];
 	private lastGpuPanelUpdate = 0;
+	/**
+	 * Frame timings for the stats panel, in milliseconds.
+	 *
+	 * CPU is wall time inside `render()`. GPU comes from WebGPU's timestamp-query
+	 * via `resolveTimestampsAsync`, which is the only way to get it on this
+	 * backend — stats-gl's GPU panel is a WebGL2 disjoint-timer query and never
+	 * initialises here.
+	 */
+	private frameCpuMs = 0;
+	private frameGpuMs = 0;
+	/** CPU ms accumulated since the panel last refreshed, for averaging. */
+	private cpuMsAccum = 0;
+	private cpuMsSamples = 0;
+	/** Time inside the draw submission, accumulated over the same window. */
+	private drawMsAccum = 0;
+	/** Rolling frame count for the panel's own FPS figure. */
+	private fpsFrames = 0;
+	private fpsLastSample = 0;
+	private fpsValue = 0;
+	/** Per-frame budget in ms; the panel colours anything past these. */
+	private static readonly BUDGET_GOOD_MS = 2;
+	private static readonly BUDGET_WARN_MS = 3;
 	private lastSettingsSync = 0;
 	private lastRippleInjection = 0;
 	private lastEditorRippleInjection = 0;
@@ -465,6 +519,14 @@ export class FluffyGrass {
 
 	private socket: Socket | null = null;
 	private roomCode = "";
+	/**
+	 * Capacity the host asks for when creating a room. The server clamps this to
+	 * its own ceiling; 2 is the floor because a room of one is not multiplayer.
+	 */
+	private roomMaxPlayers = 8;
+	/** How many AI bots to spawn once a match starts. */
+	private botCount = 0;
+	private botManager: BotManager | null = null;
 
 	private userData: AuthUser | null = null;
 	private readonly authService = new AuthService(SERVER_URL);
@@ -686,8 +748,19 @@ export class FluffyGrass {
 			// multisampled target, and the only thing drawn to the default
 			// framebuffer is the composite's fullscreen quad. It still covers the
 			// edit-mode dig PIP, which does render the scene straight to the canvas.
-			antialias: !isMobileDevice(),
+			// Driven by the Antialiasing setting, which is why it is read from
+			// storage statically above: this flag is the only chance to choose a
+			// sample count. Mobile never gets MSAA regardless.
+			antialias: !isMobileDevice() && aaModeUsesMsaa(this.aaMode),
 			alpha: true,
+			// No `trackTimestamp`. The adapter does expose `timestamp-query`, and
+			// `resolveTimestampsAsync()` returns a number, but that number is not
+			// physically consistent here: it sums per-pass durations across whatever
+			// frames a batched async resolve happens to cover, so it read 18.5 ms
+			// while vsync pinned the frame to 12.2 ms — a GPU cannot exceed frame
+			// time when presentation-locked. Enabling it would cost a query write per
+			// pass to produce an unusable figure, so the panel derives GPU time as
+			// frame time minus CPU time instead.
 		});
 		// MSAA stays at the 4x that `antialias: true` implies.
 		//
@@ -798,6 +871,27 @@ export class FluffyGrass {
 		this.scene.add(this.nitroSystem.mesh);
 
 		this.bulletSystem = new BulletSystem();
+		this.botManager = new BotManager({
+			scene: this.scene,
+			characterScale: this.sceneProps.humanScale,
+			// Bots aim at the local player and at every remote player.
+			getTargets: () => {
+				const targets: THREE.Vector3[] = [];
+				if (this.isGameActive && this.human?.mesh && !this.localDead) {
+					targets.push(this.human.mesh.position);
+				}
+				for (const rp of this.remotePlayers.values()) {
+					if (rp.loaded && !rp.dead && rp.humanGroup) targets.push(rp.humanGroup.position);
+				}
+				return targets;
+			},
+			// Tracers only for now: bots are visibly shooting, but routing their
+			// damage into the player needs the host-authoritative pass, so
+			// `dealDamage` stays off rather than letting every client's own copy of
+			// the crowd injure them independently.
+			fire: (origin, dir, ownerId) =>
+				this.bulletSystem?.spawn(origin, dir, { dealDamage: false, ownerId }),
+		});
 		this.scene.add(this.bulletSystem.group);
 		this.bulletSystem.getGroundY = (x, z) => getWorldTerrainY(x, z);
 
@@ -849,6 +943,7 @@ export class FluffyGrass {
 				document.body.classList.add("is-playing");
 				const engineType = this.vehicleId === "hummer" ? "hummer" : (this.vehicleId === "jeep" ? "rally" : "diesel");
 				this.engineSound = new EngineSound(false, engineType);
+				void this.syncBots();
 				this.hornSound = new HornSound();
 				this.nitroSound = new NitroSound();
 
@@ -1406,7 +1501,11 @@ export class FluffyGrass {
 					animations.set(nameLower, action);
 				});
 
-				const layout = await loadJeepVisual(JEEP_CONFIG.colliderYOffset, this.loadingManager);
+				// Build the peer's actual vehicle. This was hardcoded to the jeep, so a
+				// remote player in a hummer rendered as a jeep on every other screen.
+				const remoteVehicle = state?.vehicleId === "hummer" ? "hummer" : "jeep";
+				rp.vehicleId = remoteVehicle;
+				const layout = await this.loadRemoteCarVisual(remoteVehicle);
 				const carGroup = new THREE.Group();
 				carGroup.add(layout.body);
 				layout.physicsWheelPositions.forEach((pos, i) => {
@@ -1458,6 +1557,11 @@ export class FluffyGrass {
 			}
 
 			if (!rp.loaded) return;
+
+			// A peer can change vehicle mid-session; rebuild their visual if so.
+			if (rp.loaded && state.vehicleId && rp.vehicleId !== state.vehicleId) {
+				void this.rebuildRemoteCarVisual(rp, state.vehicleId === "hummer" ? "hummer" : "jeep");
+			}
 
 			// Apply State Target
 			if (state.humanPosition) {
@@ -1607,6 +1711,7 @@ export class FluffyGrass {
 					user: { ...this.userData, sharedWorlds: this.savedWorldList },
 					worldId,
 					worldDefinition,
+					maxPlayers: this.roomMaxPlayers,
 				},
 				(res: any) => {
 					if (res.success) {
@@ -1656,6 +1761,14 @@ export class FluffyGrass {
 	}
 
 	private disconnectMultiplayer() {
+		// Hand the editor's sync transport the null socket *before* dropping ours.
+		//
+		// `EditSyncTransport` keeps its own reference (see attachSocket there), so
+		// nulling `this.socket` alone left it holding the dead one and still
+		// emitting on it — which is where the "WebSocket is already in CLOSING or
+		// CLOSED state" errors came from after a client switched into another
+		// player's world, since that path re-binds the watched world and emits.
+		this.editMode?.attachSocket(null);
 		this.socket?.disconnect();
 		this.socket = null;
 		this.roomCode = "";
@@ -2299,6 +2412,33 @@ export class FluffyGrass {
 		this.worldGroup.add(this.fireflies.points);
 	}
 	private isSwitchingCar = false;
+	/** Visual layout for a remote player's vehicle. */
+	private loadRemoteCarVisual(vehicleId: string) {
+		return vehicleId === "hummer"
+			? loadHummerVisual(HUMMER_CONFIG.colliderYOffset, this.loadingManager)
+			: loadJeepVisual(JEEP_CONFIG.colliderYOffset, this.loadingManager);
+	}
+
+	/**
+	 * Swap a remote player's car visual when they change vehicle mid-session.
+	 *
+	 * The wheels and body are replaced in place so the existing kinematic bodies,
+	 * interpolation targets and engine sound all keep working.
+	 */
+	private async rebuildRemoteCarVisual(rp: RemotePlayer, vehicleId: string) {
+		if (!rp.carGroup || rp.vehicleId === vehicleId) return;
+		rp.vehicleId = vehicleId;
+		const group = rp.carGroup;
+		for (const child of [...group.children]) group.remove(child);
+		const layout = await this.loadRemoteCarVisual(vehicleId);
+		group.add(layout.body);
+		layout.physicsWheelPositions.forEach((pos, i) => {
+			const wheel = layout.visualWheels[i];
+			wheel.position.copy(pos);
+			group.add(wheel);
+		});
+	}
+
 	private async switchCar(vehicleId: any) {
 		if (this.isSwitchingCar) return;
 		this.isSwitchingCar = true;
@@ -3462,6 +3602,11 @@ export class FluffyGrass {
 	private render = () => {
 		requestAnimationFrame(this.render);
 
+		// Opens this frame's CPU sample for the stats overlay. Paired with end()
+		// after the draw calls are issued, just above stats.update().
+		this.stats.begin();
+		const cpuFrameStart = performance.now();
+
 		// Teardown queued since the last frame runs here, before anything is
 		// encoded. See queueGpuDispose for why it cannot run where it was asked.
 		if (this.pendingGpuDisposals.length > 0) {
@@ -3936,6 +4081,16 @@ export class FluffyGrass {
 				if (this.nitroSound && this.nitroSound.isPlaying) this.nitroSound.stop();
 			}
 
+			// Take the frame's one chassis-velocity reading.
+			//
+			// Everything above this line that can move the car has already run —
+			// afterPhysics and its speed clamp, the grapple reel, the explosion
+			// impulse, the respawn zeroing — and the three consumers below all read
+			// the same value: the engine speedo, the chase camera's auto-centre
+			// check, and the network state packet. `linvel()` crosses into wasm and
+			// allocates per call, so it is read once here rather than three times.
+			this.carController?.syncVelocityCache();
+
 			if (this.engineSound && this.carController) {
 				if (this.activePlayer === "car") {
 					const speed = this.carController.getSpeed();
@@ -3977,7 +4132,14 @@ export class FluffyGrass {
 
 			if (!this.sceneProps.mapMode) {
 				if (this.activePlayer === "car") {
-					updateChaseCamera(this.camera, this.car, this.chaseCameraInput, dt, this.carFpvMode);
+					updateChaseCamera(
+						this.camera,
+						this.car,
+						this.chaseCameraInput,
+						dt,
+						this.carFpvMode,
+						this.carController?.getSpeed()
+					);
 				} else {
 					const aimMode = Boolean(this.humanInput?.isAimingGun());
 					const scopeMode = Boolean(this.humanInput?.isScopeMode());
@@ -4198,6 +4360,8 @@ export class FluffyGrass {
 
 				state.hp = this.localHp;
 				state.dead = this.localDead;
+				// So peers can render the car we are actually driving.
+				state.vehicleId = this.vehicleId;
 				state.aiming = Boolean(this.humanInput?.isAimingGun());
 				state.firing = Boolean(this.humanInput?.isFiringGun());
 
@@ -4321,7 +4485,14 @@ export class FluffyGrass {
 			// ACES itself, the direct path needs the renderer to do it. Assigned
 			// only on a change — it is part of the pipeline cache key, so writing
 			// it every frame would recompile the world.
-			const wantToneMapping = usePostFx
+			//
+			// Keyed on the chain that actually exists, not on whether one was
+			// wanted. `usePostFx` alone said "the composite will tonemap this" even
+			// on frames where the composite had not been built and the direct path
+			// below was doing the drawing, so those frames pushed linear HDR
+			// straight at an 8-bit canvas with no curve on it at all.
+			const postFxActive = usePostFx && this.postProcessing !== null;
+			const wantToneMapping = postFxActive
 				? THREE.NoToneMapping
 				: THREE.ACESFilmicToneMapping;
 			if (this.renderer.toneMapping !== wantToneMapping) {
@@ -4329,7 +4500,14 @@ export class FluffyGrass {
 				this.renderer.toneMappingExposure = 1.0;
 			}
 
-			if (usePostFx && this.postProcessing) {
+			// Everything up to here was simulation and scene-graph work; the draw
+			// below is where the GPU cost shows up. Split at that boundary so the
+			// stats panel can attribute the two separately: timing the whole of
+			// render() as "CPU" lumps in the back-pressure stall that
+			// `renderer.render()` takes when the GPU queue is full, which made JS
+			// look like it cost 5.89 of a 6.04 ms frame when its real share is ~2 ms.
+			const drawStart = performance.now();
+			if (postFxActive && this.postProcessing) {
 				// The beauty pass owns its camera, so the editor's view has to be
 				// pushed into it — otherwise the composite keeps rendering the
 				// gameplay camera while the editor thinks it is in control.
@@ -4340,6 +4518,7 @@ export class FluffyGrass {
 			} else {
 				this.renderer.render(this.scene, renderCam);
 			}
+			this.drawMsAccum += performance.now() - drawStart;
 
 			if (this.editMode?.isEnabled && this.editMode.isDigging) {
 				// setViewport / setScissor take *logical* pixels — three multiplies
@@ -4368,7 +4547,44 @@ export class FluffyGrass {
 				this.renderer.setScissorTest(false);
 			}
 		}
+		// `end()` closes the CPU sample that `begin()` opened at the top of the
+		// frame; `update()` is what folds it into the ms panel and repaints the FPS
+		// panel. Calling only `update()` — as this used to — left the panel's
+		// "cpu-started" mark missing, so `endProfiling` had nothing to measure
+		// against and the ms readout sat at 0 forever.
+		this.stats.end();
 		this.stats.update();
+
+		if (this.isGameActive && this.botManager) {
+			this.botManager.update(dt, this.human?.mesh.position ?? this.camera.position);
+		}
+
+		// CPU cost of this frame: wall time across everything render() just did.
+		//
+		// Accumulated and averaged over the panel's refresh window rather than shown
+		// raw — a single frame's figure swings between ~1 ms and tens of ms as GC and
+		// streaming land, so the instantaneous value is unreadable.
+		this.cpuMsAccum += performance.now() - cpuFrameStart;
+		this.cpuMsSamples++;
+
+		// The panel's own FPS, so nothing depends on stats-gl's hidden graphs.
+		this.fpsFrames++;
+		if (this.fpsLastSample === 0) this.fpsLastSample = now;
+		else if (now - this.fpsLastSample >= 500) {
+			this.fpsValue = (this.fpsFrames * 1000) / (now - this.fpsLastSample);
+			const n = this.cpuMsSamples > 0 ? this.cpuMsSamples : 1;
+			const drawMs = this.drawMsAccum / n;
+			// CPU is the simulation and scene-graph half: total time in render()
+			// minus the draw submission, so a GPU stall inside the draw is not
+			// charged to JS.
+			this.frameCpuMs = Math.max(0, this.cpuMsAccum / n - drawMs);
+			this.frameGpuMs = drawMs;
+			this.fpsFrames = 0;
+			this.cpuMsAccum = 0;
+			this.drawMsAccum = 0;
+			this.cpuMsSamples = 0;
+			this.fpsLastSample = now;
+		}
 
 		if (this.editMode?.isEnabled) {
 			this.editMode.update();
@@ -4415,7 +4631,23 @@ export class FluffyGrass {
 					: tris >= 1_000
 						? `${(tris / 1_000).toFixed(1)}K`
 						: `${tris}`;
-				gpuPanel.innerHTML = `GPU LOAD<br/>Draws: ${draws}<br/>Tris: ${triStr}`;
+
+				// Colour against the frame budget so a regression is visible at a
+				// glance rather than needing the number read.
+				const tint = (ms: number) =>
+					ms <= FluffyGrass.BUDGET_GOOD_MS
+						? "#4ade80"
+						: ms <= FluffyGrass.BUDGET_WARN_MS
+							? "#f0b429"
+							: "#ff5470";
+				const frameMs = this.fpsValue > 0 ? 1000 / this.fpsValue : 0;
+
+				gpuPanel.innerHTML =
+					`<span style="color:#e6e6e6">${this.fpsValue.toFixed(0)} FPS · ` +
+					`<span style="color:${tint(frameMs)}">${frameMs.toFixed(2)}</span> ms</span><br/>` +
+					`CPU <span style="color:${tint(this.frameCpuMs)}">${this.frameCpuMs.toFixed(2)}</span> ms<br/>` +
+					`GPU <span style="color:${tint(this.frameGpuMs)}">${this.frameGpuMs.toFixed(2)}</span> ms<br/>` +
+					`<span style="color:#8b8b8b">Draws ${draws} · Tris ${triStr}</span>`;
 			}
 		}
 	};
@@ -4443,6 +4675,18 @@ export class FluffyGrass {
 				if (parsed.resolutionQuality) this.resolutionQuality = parsed.resolutionQuality;
 				if (parsed.renderScale !== undefined) {
 					this.renderScale = THREE.MathUtils.clamp(parsed.renderScale, 0.5, 2);
+				}
+				// aaMode is deliberately not read here — the renderer was already
+				// built from readPersistedAaMode() before this runs. Re-reading it
+				// would only risk `this.aaMode` disagreeing with the live pipeline.
+				if (parsed.supersample === 1 || parsed.supersample === 2 || parsed.supersample === 4) {
+					this.supersample = parsed.supersample;
+				}
+				if (parsed.roomMaxPlayers !== undefined) {
+					this.roomMaxPlayers = THREE.MathUtils.clamp(parsed.roomMaxPlayers, 2, 100);
+				}
+				if (parsed.botCount !== undefined) {
+					this.botCount = THREE.MathUtils.clamp(parsed.botCount, 0, 100);
 				}
 				if (parsed.waterQuality) this.waterQuality = parsed.waterQuality;
 				if (parsed.vehicleId) this.vehicleId = parsed.vehicleId;
@@ -4473,6 +4717,10 @@ export class FluffyGrass {
 				shadowQuality: this.shadowQuality,
 				resolutionQuality: this.resolutionQuality,
 				renderScale: this.renderScale,
+				aaMode: this.aaMode,
+				supersample: this.supersample,
+				roomMaxPlayers: this.roomMaxPlayers,
+				botCount: this.botCount,
 				waterQuality: this.waterQuality,
 				vehicleId: this.vehicleId,
 				postFxEnabled: this.postFxEnabled,
@@ -4500,10 +4748,20 @@ export class FluffyGrass {
 
 	private setupSettings() {
 		this.loadSettings();
+		// Re-apply the overlay's visibility now that the saved value is actually
+		// known. setupStats() runs earlier in the constructor and applied
+		// `showStatsEnabled` while it was still its `false` default, so a saved
+		// "Frame counter: On" never survived a reload — the panel stayed hidden
+		// until the switch was toggled by hand.
+		this.setShowStatsEnabled(this.showStatsEnabled);
 		this.settings = new GameSettings({
 			shadowQuality: this.shadowQuality,
 			resolutionQuality: this.resolutionQuality,
 			renderScale: this.renderScale,
+			aaMode: this.aaMode,
+			supersample: this.supersample,
+			roomMaxPlayers: this.roomMaxPlayers,
+			botCount: this.botCount,
 			waterQuality: this.waterQuality,
 			postFx: this.postFxEnabled,
 			showStats: this.showStatsEnabled,
@@ -4519,6 +4777,13 @@ export class FluffyGrass {
 			onShadowQualityChange: (quality) => { this.applyShadowQuality(quality); this.saveSettings(); },
 			onResolutionQualityChange: (quality) => { this.applyResolutionQuality(quality); this.saveSettings(); },
 			onRenderScaleChange: (scale) => { this.setRenderScale(scale); this.saveSettings(); },
+			// Stored only. The renderer's sample count and the composite's node
+			// graph are both already built by now, so this lands on the next load;
+			// the panel shows a note saying so.
+			onAaModeChange: (mode) => { this.aaMode = mode; this.saveSettings(); },
+			onSupersampleChange: (level) => { this.setSupersample(level); this.saveSettings(); },
+			onRoomMaxPlayersChange: (n) => { this.roomMaxPlayers = n; this.saveSettings(); },
+			onBotCountChange: (n) => { this.botCount = n; this.saveSettings(); void this.syncBots(); },
 			onWaterQualityChange: (quality) => { this.applyWaterQuality(quality); this.saveSettings(); },
 			onPostFxChange: (enabled) => { this.setPostFxEnabled(enabled); this.saveSettings(); },
 			onShowStatsChange: (enabled) => { this.setShowStatsEnabled(enabled); this.saveSettings(); },
@@ -4635,6 +4900,26 @@ export class FluffyGrass {
 	 *  We store these once so "revert" always goes back to the code defaults.  */
 	private static readonly DEFAULT_HUMMER = JSON.parse(JSON.stringify(HUMMER_CONFIG));
 	private static readonly DEFAULT_JEEP = JSON.parse(JSON.stringify(JEEP_CONFIG));
+
+	/**
+	 * Pull the saved AA mode out of storage before any instance state exists.
+	 *
+	 * The renderer is constructed in the constructor's field initialisers, which
+	 * run long before `loadSettings()`, so the mode cannot come from `this`.
+	 */
+	private static readPersistedAaMode(): AaMode {
+		try {
+			const saved = localStorage.getItem("game_settings");
+			if (!saved) return DEFAULT_AA_MODE;
+			const mode = JSON.parse(saved)?.aaMode;
+			return mode === "off" || mode === "fxaa" || mode === "msaa" || mode === "msaa+fxaa"
+				? mode
+				: DEFAULT_AA_MODE;
+		} catch {
+			// Private browsing, or a corrupt blob.
+			return DEFAULT_AA_MODE;
+		}
+	}
 	private getDefaultConfig(vehicleId: string): any {
 		return vehicleId === "hummer"
 			? (this.constructor as any).DEFAULT_HUMMER
@@ -4711,7 +4996,23 @@ export class FluffyGrass {
 		// cost of that step is ~11% (129 -> 115 fps unthrottled), which is a good
 		// trade for the two tiers that are about looking right. `Low` is the tier
 		// that exists to buy frames back, so it keeps its 0.75x and its speckle.
-		const supersampleFloor = quality === "Low" ? target : 1.25;
+		//
+		// FXAA also lifts the floor, because it does the same job cheaper.
+		//
+		// The numbers above were measured when brute-force sampling was the only
+		// tool available. With an FXAA pass in the composite it is no longer the
+		// best one: measured in fullscreen on a 1920x1080 panel, where the floor
+		// makes the renderer draw 2400x1350 (3.24 MP) for a 2.07 MP display —
+		//
+		//   floor 1.25x, MSAA      3.24 MP  167.7 fps  0.09 isolated flicker/kpx
+		//   native 1.0x,  MSAA      2.07 MP  235.0 fps  0.13
+		//   native 1.0x,  MSAA+FXAA 2.07 MP  211.0 fps  0.07
+		//
+		// so FXAA at native is both 26% faster than the floor *and* measurably
+		// steadier than it. Keeping the floor on top of FXAA would be paying twice
+		// for one problem, so the mode that has FXAA renders 1:1 with the display.
+		const supersampleFloor =
+			quality === "Low" || aaModeUsesFxaa(this.aaMode) ? target : 1.25;
 		this.basePixelRatio = Math.max(target, supersampleFloor);
 		this.applyPixelRatio();
 		this.resizePondTargets();
@@ -4726,7 +5027,17 @@ export class FluffyGrass {
 		// Render scale multiplies whatever the quality tier settled on, and is
 		// clamped so a stored value can never drive the buffer to something the
 		// backend will refuse to allocate.
-		const ratio = THREE.MathUtils.clamp(base * this.renderScale, 0.4, 4);
+		//
+		// Supersampling multiplies the same base by axis, so its labels mean pixel
+		// count relative to the 1x setting: 2x is 1.41 per axis, 4x is 2.0. 1x
+		// leaves the tier exactly where it was, which is what keeps the default
+		// identical to before this setting existed — including the 1.25x
+		// speckle floor the tier applies.
+		const ratio = THREE.MathUtils.clamp(
+			base * supersampleAxisScale(this.supersample) * this.renderScale,
+			0.4,
+			4
+		);
 		if (this.renderer.getPixelRatio() !== ratio) {
 			this.renderer.setPixelRatio(ratio);
 			this.resizePondTargets();
@@ -4737,6 +5048,19 @@ export class FluffyGrass {
 	private setRenderScale(scale: number) {
 		this.renderScale = THREE.MathUtils.clamp(scale, 0.5, 2);
 		this.applyPixelRatio();
+	}
+
+	/**
+	 * Supersample factor, as a multiple of the 1x setting's pixel count.
+	 *
+	 * Unlike the AA mode this needs no restart: it only moves the pixel ratio, and
+	 * the renderer reallocates its targets for that on its own — the same path the
+	 * render-scale slider has always used.
+	 */
+	private setSupersample(level: SupersampleLevel) {
+		this.supersample = level;
+		this.applyPixelRatio();
+		this.resizePondTargets();
 	}
 
 	/**
@@ -4800,12 +5124,57 @@ export class FluffyGrass {
 		// allocated by the light's ShadowNode the first time a lit material is
 		// compiled, so the chain cannot be assembled until at least one ordinary
 		// frame has been drawn — the render loop retries until it can.
-		if (!keyLight.shadow.map) return;
+		//
+		// When shadows are switched off entirely, though, that map is never
+		// allocated at all, so waiting for it never ends. The retry in render()
+		// then ran every frame forever, `postProcessing` stayed null, and the whole
+		// composite was silently skipped: the frame fell back to drawing the scene
+		// straight to the canvas, which is both untonemapped and *slower* than the
+		// composite it was standing in for (measured ~11% slower at 1080p, because
+		// the scene then pays the canvas's own 4x MSAA and alpha compositing
+		// instead of the offscreen pass it was designed around).
+		//
+		// So the shafts are optional rather than required. No shadow map means no
+		// shafts — they are a shadow-map effect, there is nothing to march — but
+		// the grade, vignette and dither still get built and the tier keeps a
+		// working composite.
+		const shadowsEnabled = this.renderer.shadowMap.enabled;
+		if (shadowsEnabled && !keyLight.shadow.map) return;
+		const withShafts = shadowsEnabled && !!keyLight.shadow.map;
 
 		const scenePass = pass(this.scene, this.camera);
 		this.scenePass = scenePass;
 
 		const sceneColor = scenePass.getTextureNode("output");
+
+		let hdr: any = sceneColor;
+		if (withShafts) {
+			hdr = this.buildGodRayLayer(scenePass, sceneColor, keyLight);
+		} else {
+			this.godRays = null;
+			// Nothing marches the map, so the sun mask has no consumer. Zeroed so
+			// syncGodRaySun's bookkeeping cannot resurrect a shaft that the graph
+			// does not contain.
+			this.sunScreenStrength.value = 0;
+		}
+
+		// Tonemap the HDR input
+		const tonemappedRays = toneMappingTsl(
+			THREE.ACESFilmicToneMapping,
+			this.gradeExposure,
+			hdr
+		);
+
+		this.finishPostProcessing(tonemappedRays);
+	}
+
+	/**
+	 * Build the god-ray shaft layer and screen-blend it over the beauty pass.
+	 *
+	 * Split out of `setupPostProcessing` so the composite can be assembled without
+	 * it when there is no shadow map to march (see the note there).
+	 */
+	private buildGodRayLayer(scenePass: any, sceneColor: any, keyLight: any): any {
 		const sceneDepth = scenePass.getTextureNode("depth");
 
 		const rays = godrays(sceneDepth as any, this.camera, keyLight);
@@ -4837,18 +5206,15 @@ export class FluffyGrass {
 
 		// SCREEN blend, as the WebGL GodRaysEffect used: rays lift the image
 		// toward white without ever pushing it past it, which additive would.
-		const withRays: any = blendScreen(
-			sceneColor,
-			rays.mul(this.godRayWeight).mul(sunMask)
-		);
+		return blendScreen(sceneColor, rays.mul(this.godRayWeight).mul(sunMask));
+	}
 
-		// Tonemap the HDR input (withRays)
-		const tonemappedRays = toneMappingTsl(
-			THREE.ACESFilmicToneMapping,
-			this.gradeExposure,
-			withRays
-		);
-
+	/**
+	 * Grade the tonemapped composite and install it as the output node.
+	 *
+	 * The tail of the chain, shared by both the with-shafts and no-shafts builds.
+	 */
+	private finishPostProcessing(tonemappedRays: any) {
 		// No bloom node. One used to be built here — a 5-level mip chain plus a
 		// bright pass — and then never referenced by `graded` below, so the graph
 		// never contained it and it never contributed a pixel. Building it anyway
@@ -4867,6 +5233,22 @@ export class FluffyGrass {
 		// Dithering to prevent color banding in dark gradients
 		const noise = fract(sin(dot(uv(), vec2(12.9898, 78.233))).mul(43758.5453));
 		graded = graded.add(noise.sub(0.5).mul(1.5 / 255.0));
+
+		// FXAA goes last, on the graded LDR image.
+		//
+		// It is a luminance-edge filter, so it wants the values the eye will
+		// actually see: run before the ACES curve it would be measuring contrast in
+		// linear HDR, where a bright edge's luma difference is huge and the filter
+		// smears far more than it should. After the grade — and after the dither,
+		// which is sub-LSB noise it ignores — is where the edges it is looking for
+		// are the edges on screen.
+		//
+		// Whether this node exists is fixed for the session (see the AaMode docs):
+		// swapping it in or out means rebuilding the graph, and `PostProcessing` has
+		// no dispose, so each rebuild strands ~26 MB of render targets.
+		if (aaModeUsesFxaa(this.aaMode)) {
+			graded = fxaa(graded);
+		}
 
 		this.postProcessing = new PostProcessing(this.renderer);
 		// Since we already tonemapped and graded, outputNode is just the graded result!
@@ -4889,6 +5271,9 @@ export class FluffyGrass {
 	 */
 	private syncGodRaySun() {
 		if (!this.dayNight) return;
+		// Built without shafts (no shadow map to march), so there is no sun mask in
+		// the graph for any of this to feed.
+		if (!this.godRays) return;
 		const cam = this.editMode?.isEnabled
 			? (this.editMode.activeCamera ?? this.camera)
 			: this.camera;
@@ -5033,7 +5418,27 @@ export class FluffyGrass {
 			this._fogCenter.copy(this.camera.position);
 		}
 
-		if (this.sunMesh) this.sunMesh.position.copy(this.dayNight.getSunDirection()).multiplyScalar(400);
+		if (this.sunMesh) {
+			// Anchor the sun to the camera, far outside the world.
+			//
+			// It used to sit 400 m from the world *origin*, which works on the 200 m
+			// island and breaks on anything large: on a 10 km map the terrain spans
+			// ±5000 m, so 400 m from origin is well inside the ground. As the sun
+			// dropped toward sunset the sphere descended into and then under the
+			// terrain, and because it tracked the origin rather than the player it
+			// also drifted off to one side once you travelled away from spawn.
+			//
+			// Camera-relative at a fraction of the far plane keeps it beyond any
+			// world's extent while staying renderable, and the scale compensates so
+			// it keeps the apparent size it had at 400 m. Hills near the horizon
+			// still occlude it, which is correct — it is only the burial that was wrong.
+			const SUN_REFERENCE_DIST = 400;
+			const dist = this.camera.far * 0.45;
+			this.sunMesh.position
+				.copy(this.camera.position)
+				.addScaledVector(this.dayNight.getSunDirection(), dist);
+			this.sunMesh.scale.setScalar(dist / SUN_REFERENCE_DIST);
+		}
 		const override = this.dayNight.overrideColors;
 		const fogColor = override
 			? this.scene.fog instanceof THREE.FogExp2
@@ -5506,12 +5911,23 @@ export class FluffyGrass {
 			customGpuPanel.style.fontFamily = "Helvetica, Arial, sans-serif";
 			customGpuPanel.style.fontSize = "10px";
 			customGpuPanel.style.fontWeight = "bold";
-			customGpuPanel.style.padding = "2px 0 0 4px";
-			customGpuPanel.style.width = "80px";
-			customGpuPanel.style.height = "48px";
+			customGpuPanel.style.padding = "3px 6px";
+			customGpuPanel.style.width = "auto";
+			customGpuPanel.style.minWidth = "104px";
+			customGpuPanel.style.height = "auto";
+			customGpuPanel.style.lineHeight = "1.45";
+			customGpuPanel.style.whiteSpace = "nowrap";
 			customGpuPanel.style.boxSizing = "border-box";
-			customGpuPanel.innerHTML = "GPU LOAD<br/>Draws: 0<br/>Tris: 0";
+			customGpuPanel.innerHTML = "0 FPS<br/>CPU 0.00 ms<br/>GPU 0.00 ms<br/>Draws 0 · Tris 0";
 			statsDom.appendChild(customGpuPanel);
+
+			// Drop stats-gl's own panels: they are scrolling graph canvases, and the
+			// readout above supersedes them with plain numbers. Its FPS graph was the
+			// only working one anyway — the ms panel needs the CPU marks and the GPU
+			// panel does not exist on WebGPU at all.
+			statsDom.querySelectorAll("canvas").forEach((c) => {
+				(c as HTMLCanvasElement).style.display = "none";
+			});
 		}, 100); // small delay to ensure stats-gl has created the children
 
 		document.body.appendChild(statsDom);
@@ -5719,6 +6135,28 @@ export class FluffyGrass {
 		return options;
 	}
 
+	/**
+	 * Bring the bot population in line with the `botCount` setting.
+	 *
+	 * Spawns around the player, in whatever world is active, so hosting a 1 km
+	 * world and asking for 40 bots fills that world rather than the hub. The
+	 * character sheet is loaded once and cloned per bot.
+	 */
+	private async syncBots(): Promise<void> {
+		const manager = this.botManager;
+		if (!manager) return;
+		if (this.botCount <= 0) {
+			manager.clear();
+			return;
+		}
+		if (!manager.hasTemplate) {
+			const gltf = await this.loadGltfFull("/poutine.glb");
+			manager.setTemplate(gltf.scene, gltf.animations);
+		}
+		const center = this.human?.mesh.position ?? this.camera.position;
+		manager.setCount(this.botCount, center);
+	}
+
 	private async createAndEnterCustomWorld(sizeKm = 1) {
 		const kmLabel =
 			sizeKm >= 1 ? `${sizeKm.toFixed(sizeKm % 1 === 0 ? 0 : 1)}km` : `${Math.round(sizeKm * 1000)}m`;
@@ -5792,14 +6230,14 @@ export class FluffyGrass {
 				return;
 			}
 			// Swap in the same tick the new field is added, so no frame draws both.
-			this.customGrassField?.dispose();
+			this.customGrassField?.dispose(this.renderer);
 			this.customGrassField = field;
 			field.setDensity(this.grassDensity);
 			return;
 		}
 
 		if (this.currentWorld === "valley") {
-			this.valleyGrassField?.dispose();
+			this.valleyGrassField?.dispose(this.renderer);
 			this.valleyGrassField = this.addGrass(
 				mesh,
 				this.grassGeometry,
@@ -5810,7 +6248,7 @@ export class FluffyGrass {
 			);
 			this.valleyGrassField.setDensity(this.grassDensity);
 		} else {
-			this.islandGrassField?.dispose();
+			this.islandGrassField?.dispose(this.renderer);
 			this.islandGrassField = this.addGrass(
 				mesh,
 				this.grassGeometry,
@@ -5892,7 +6330,7 @@ export class FluffyGrass {
 		this.disposeEditorPondsIn(this.customWorldGroup);
 		for (const stone of this.editorStones) stone.dispose();
 		this.editorStones = [];
-		this.customGrassField?.dispose();
+		this.customGrassField?.dispose(this.renderer);
 		this.customGrassField = null;
 		this.customTerrainHandle?.dispose();
 		this.customTerrainHandle = null;
@@ -6082,10 +6520,44 @@ export class FluffyGrass {
 				this.carInput.isEnabled = false;
 				this.carInput.releaseControls();
 			}
-			const spawnPos = this.car.mesh.position.clone();
-			spawnPos.x += 3;
-			spawnPos.y += 1;
-			this.human.body.setTranslation(spawnPos, true);
+			// Step out onto the ground beside the car, not to a fixed world offset.
+			//
+			// This used to be `car.position + (3, 1, 0)`: always world +X, and Y taken
+			// from the car rather than the terrain. Park facing a rise, or on any
+			// slope where the ground 3 m away sits above the car's roof, and the
+			// player was placed *inside* the hill — the "stuck in terrain" on exit.
+			//
+			// The side is now the car's own left/right, and the height comes from
+			// `findSafeTerrainSpawn`, which snaps to the surface and spirals outward
+			// if that spot is not on real terrain. Both sides are tried before
+			// falling back to the car's own position, so a wall on the driver's side
+			// puts the player out the other door instead of into the rock.
+			const carPos = this.car.mesh.position;
+			_exitSide
+				.set(1, 0, 0)
+				.applyQuaternion(this.car.mesh.quaternion);
+			_exitSide.y = 0;
+			if (_exitSide.lengthSq() < 1e-6) _exitSide.set(1, 0, 0);
+			_exitSide.normalize();
+
+			const EXIT_DIST = 2.6;
+			let exitPos: THREE.Vector3 | null = null;
+			for (const sign of [1, -1]) {
+				const x = carPos.x + _exitSide.x * EXIT_DIST * sign;
+				const z = carPos.z + _exitSide.z * EXIT_DIST * sign;
+				if (!hasTerrainAt(x, z)) continue;
+				const candidate = findSafeTerrainSpawn(x, z, 1.2);
+				// Reject a "safe" point the spiral pushed far away — better to use the
+				// other door than to teleport across the map.
+				if (candidate.distanceTo(carPos) <= EXIT_DIST * 3) {
+					exitPos = candidate;
+					break;
+				}
+			}
+			this.human.body.setTranslation(
+				exitPos ?? { x: carPos.x, y: carPos.y + 1.2, z: carPos.z },
+				true
+			);
 			this.human.body.setLinvel({ x: 0, y: 0, z: 0 }, true);
 			this.human.mesh.visible = true;
 			if (this.humanInput && this.sitState === "none") {
@@ -6649,7 +7121,7 @@ export class FluffyGrass {
 
 		this.pondStones?.dispose();
 		this.pondStones = null;
-		this.islandGrassField?.dispose();
+		this.islandGrassField?.dispose(this.renderer);
 		this.islandGrassField = null;
 
 		for (const tree of this.trees) tree.dispose();
@@ -6708,7 +7180,7 @@ export class FluffyGrass {
 
 	private disposeValleyWorld() {
 		this.disposeEditorPondsIn(this.newWorldGroup);
-		this.valleyGrassField?.dispose();
+		this.valleyGrassField?.dispose(this.renderer);
 		this.valleyGrassField = null;
 		if (this.valleyTerrainBody) {
 			getWorld().removeRigidBody(this.valleyTerrainBody);
