@@ -22,7 +22,7 @@ import {
 	paintTerrainMudShore,
 	paintTerrainWater,
 } from "../worlds/createProceduralTerrain";
-import type { GrassChunkField } from "../entities/grass/GrassChunkField";
+import type { GrassStreamField } from "../entities/grass/GrassStreamField";
 import {
 	applyTerrainBrush,
 	digPondBasin,
@@ -92,7 +92,7 @@ export type EditApplierHost = {
 	playCamera: THREE.PerspectiveCamera;
 	getSculptTarget: () => TerrainSculptTarget | null;
 	getTerrainMesh: () => THREE.Mesh | null;
-	getGrassField: () => GrassChunkField | null;
+	getGrassField: () => GrassStreamField | null;
 	rebuildCollider: () => void;
 	enableTerrainVertexColors: () => void;
 	addEditorTree: (tree: TreeHandle) => void;

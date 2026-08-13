@@ -529,7 +529,7 @@ export class GameSettings {
 							<p>Grass is the single most expensive thing on screen. Density is the first dial to turn down.</p>
 						</div>
 						${this.row("Density", "Share of blades actually drawn", this.slider("grassDensity", 0, 100, 1, s.grassDensity, "%"), s.grassDensity + "%")}
-						${this.row("Draw distance", "Where grass stops rendering", this.slider("grassCull", 30, 250, 1, s.grassCullDistance, " m"), s.grassCullDistance + " m")}
+						${this.row("Draw distance", "Where grass stops rendering", this.slider("grassCull", 30, 72, 1, s.grassCullDistance, " m"), s.grassCullDistance + " m")}
 					</section>
 
 					<section class="pane" data-pane="atmosphere" role="tabpanel">

@@ -1,97 +1,140 @@
 /**
- * Grass instance placement — pure math, no THREE, so it runs in a worker.
+ * Grass blade placement and packing — pure math, no THREE.
  *
- * Output is per-chunk flat Float32Arrays in THREE's column-major Matrix4 layout,
- * ready to blit straight into an InstancedMesh's instanceMatrix. The main thread
- * therefore does zero per-instance work: at 1.3M blades the old path allocated
- * 1.3M Matrix4 objects (plus a second copy while bucketing), which is where the
- * multi-hundred-millisecond stall after every sculpt stroke came from.
+ * Generation is per *chunk* and deterministic: `generateGrassChunk` is a pure
+ * function of (seed, chunk coordinate), which is what lets GrassStreamField discard
+ * a chunk when it leaves the ring and get the identical blades back when it returns,
+ * and what makes every multiplayer client derive the same field.
+ *
+ * There is no whole-world placement pass any more. `buildGrassPlacement` used to
+ * place every blade in the world up front — 1.3M of them on a 1 km map, which is
+ * where the multi-hundred-millisecond stall after every sculpt stroke came from, and
+ * why it had to be pushed to a worker. Nothing places up front now, so the worker,
+ * its client and the chunk-transfer plumbing are all gone with it.
  */
 
-export type GrassPlacementRequest = {
-	heights: Float32Array;
-	nrows: number;
-	ncols: number;
-	/** Terrain extent on X/Z (m). */
-	size: number;
-	/** Blade spacing of the sampling lattice (m). */
-	spacing: number;
-	/** Chance a lattice cell is kept, thinning uniformly to the blade budget. */
-	keepProb: number;
-	maxCount: number;
-	/** Reject blades on ground steeper than this (cos of the slope limit). */
-	minNormalY: number;
-	chunkSize: number;
-	/** Scales blade height only, not footprint. */
-	heightMultiplier: number;
-	clearPondHole: boolean;
-	pondX: number;
-	pondZ: number;
+/**
+ * Per-blade storage: two vec4s, 32 bytes.
+ *
+ * Was a full Matrix4 — 64 bytes — of which 16 bytes were the constant last column
+ * (0,0,0,1) and the remaining 36 were a 3x3 rotation-times-scale derived from just
+ * a normal, a yaw and two scales. At 1.25M blades that layout cost 80 MB in the JS
+ * heap, 80 MB of VRAM, and 80 MB of reads on every culling dispatch, to carry
+ * ~28 bytes of actual information.
+ *
+ * The matrix is now rebuilt in the culling compute shader and written only for the
+ * blades that survive culling (~8k of 1.25M at the default draw distance), so the
+ * expensive layout is paid for what is drawn rather than for what exists.
+ *
+ * Laid out as two adjacent vec4s rather than a struct so it can be read through a
+ * single `storage(..., 'vec4', count * 2)` node: element(i*2) and element(i*2+1).
+ * Interleaved, so both reads land in the same 64-byte cache line.
+ */
+const FLOATS_PER_INSTANCE = 8;
+
+/**
+ * Distance over which the blade shader sinks grass out of sight, metres.
+ *
+ * Lives here because two places have to agree on it and used to not: the material
+ * hardcoded 48 / 68 in its vertex stage while GrassChunkField kept its own
+ * `fadeStart` / `fadeEnd` that nothing ever read. A blade sinks GRASS_FADE_SINK and
+ * is ~1.3 m tall, so nothing is visible past GRASS_FADE_END — which is what bounds
+ * the streaming ring and caps the draw-distance setting.
+ */
+export const GRASS_FADE_START = 48;
+export const GRASS_FADE_END = 68;
+/** Metres a fully-faded blade is pushed down. Must exceed the tallest blade. */
+export const GRASS_FADE_SINK = 2;
+
+/** vec4 0: world position + yaw. */
+const BLADE_X = 0;
+const BLADE_Y = 1;
+const BLADE_Z = 2;
+const BLADE_YAW = 3;
+/** vec4 1: ground normal XZ + the two scales. */
+const BLADE_NX = 4;
+const BLADE_NZ = 5;
+/** Uniform XZ scale — the 0.8..1.2 size variation. */
+const BLADE_SCALE_XZ = 6;
+/**
+ * Y scale, with the pond taper and the field's height multiplier already folded
+ * in. Zero is reserved: it means "masked", and culling drops the blade outright
+ * rather than emitting a degenerate one. See GrassStreamField.applyMaskToSlot.
+ */
+const BLADE_SCALE_Y = 7;
+
+export {
+	FLOATS_PER_INSTANCE as GRASS_FLOATS_PER_INSTANCE,
+	BLADE_X,
+	BLADE_Y,
+	BLADE_Z,
+	BLADE_YAW,
+	BLADE_NX,
+	BLADE_NZ,
+	BLADE_SCALE_XZ,
+	BLADE_SCALE_Y,
 };
 
-export type GrassChunkData = {
-	count: number;
-	/** count * 16 floats, column-major (THREE Matrix4 element order). */
-	matrices: Float32Array;
-	centerX: number;
-	centerY: number;
-	centerZ: number;
-	minX: number;
-	minY: number;
-	minZ: number;
-	maxX: number;
-	maxY: number;
-	maxZ: number;
-};
-
-export type GrassPlacementResult = {
-	chunks: GrassChunkData[];
-	total: number;
-};
-
-const FLOATS_PER_INSTANCE = 16;
-
-/** Per-chunk growable matrix buffer. Doubling keeps peak memory near 2× final. */
-class ChunkAccumulator {
-	count = 0;
-	data = new Float32Array(64 * FLOATS_PER_INSTANCE);
-	sumX = 0;
-	sumY = 0;
-	sumZ = 0;
-	minX = Infinity;
-	minY = Infinity;
-	minZ = Infinity;
-	maxX = -Infinity;
-	maxY = -Infinity;
-	maxZ = -Infinity;
-
-	reserve() {
-		const needed = (this.count + 1) * FLOATS_PER_INSTANCE;
-		if (needed <= this.data.length) return;
-		const grown = new Float32Array(Math.max(needed, this.data.length * 2));
-		grown.set(this.data);
-		this.data = grown;
-	}
+/**
+ * Write one packed blade.
+ *
+ * `ny` is not stored: placement rejects anything below `minNormalY` (cos 65 deg at
+ * the loosest), so the ground normal always points up and `ny` is recoverable as
+ * `sqrt(1 - nx^2 - nz^2)`. Feeding this a downward normal would silently flip it.
+ */
+export function writeBladePacked(
+	out: Float32Array,
+	offset: number,
+	px: number,
+	py: number,
+	pz: number,
+	nx: number,
+	nz: number,
+	yaw: number,
+	scaleXZ: number,
+	scaleY: number
+) {
+	out[offset + BLADE_X] = px;
+	out[offset + BLADE_Y] = py;
+	out[offset + BLADE_Z] = pz;
+	out[offset + BLADE_YAW] = yaw;
+	out[offset + BLADE_NX] = nx;
+	out[offset + BLADE_NZ] = nz;
+	out[offset + BLADE_SCALE_XZ] = scaleXZ;
+	out[offset + BLADE_SCALE_Y] = scaleY;
 }
 
 /**
- * Fisher-Yates over 16-float blocks.
+ * CPU reference for the matrix the culling shader rebuilds from a packed blade.
  *
- * Distance fade thins a chunk by lowering InstancedMesh.count, which drops the
- * *last* instances. Generated in lattice order that would peel the field off one
- * side in visible rows, so the order has to be randomised.
+ * Exists to be tested: `scratch/grassMathTest.ts` runs pack -> this -> compare
+ * against `writeBladeMatrix`, which is itself verified element-wise against THREE.
+ * If the TSL in `GrassStreamField` and this function ever disagree, the test will
+ * not catch it — so keep the two in step by hand.
  */
-function shuffleBlocks(data: Float32Array, count: number) {
-	const scratch = new Float32Array(FLOATS_PER_INSTANCE);
-	for (let i = count - 1; i > 0; i--) {
-		const j = Math.floor(Math.random() * (i + 1));
-		if (i === j) continue;
-		const oi = i * FLOATS_PER_INSTANCE;
-		const oj = j * FLOATS_PER_INSTANCE;
-		scratch.set(data.subarray(oi, oi + FLOATS_PER_INSTANCE));
-		data.copyWithin(oi, oj, oj + FLOATS_PER_INSTANCE);
-		data.set(scratch, oj);
-	}
+export function unpackBladeMatrix(
+	out: Float32Array,
+	outOffset: number,
+	packed: Float32Array,
+	offset: number
+) {
+	const nx = packed[offset + BLADE_NX]!;
+	const nz = packed[offset + BLADE_NZ]!;
+	const ny = Math.sqrt(Math.max(0, 1 - nx * nx - nz * nz));
+	writeBladeMatrix(
+		out,
+		outOffset,
+		packed[offset + BLADE_X]!,
+		packed[offset + BLADE_Y]!,
+		packed[offset + BLADE_Z]!,
+		nx,
+		ny,
+		nz,
+		packed[offset + BLADE_YAW]!,
+		packed[offset + BLADE_SCALE_XZ]!,
+		packed[offset + BLADE_SCALE_Y]!,
+		packed[offset + BLADE_SCALE_XZ]!
+	);
 }
 
 /**
@@ -173,9 +216,132 @@ export function writeBladeMatrix(
 	out[offset + 15] = 1;
 }
 
-export function buildGrassPlacement(
-	req: GrassPlacementRequest
-): GrassPlacementResult {
+/**
+ * Bilinear height lookup over a terrain grid.
+ *
+ * The rendered surface interpolates between vertices, so nearest-vertex snapping
+ * would sink blades into slopes (or float them) by up to half a cell x tan(slope) —
+ * metres on big worlds, where cells reach ~39 m at the 254-segment cap.
+ *
+ * Module scope rather than a closure so the streaming generator can share it.
+ */
+export function sampleTerrainHeight(
+	heights: Float32Array,
+	nrows: number,
+	ncols: number,
+	size: number,
+	x: number,
+	z: number
+): number {
+	const half = size * 0.5;
+	const stride = nrows + 1;
+	let fx = ((x + half) / size) * ncols;
+	let fz = ((z + half) / size) * nrows;
+	fx = fx < 0 ? 0 : fx > ncols ? ncols : fx;
+	fz = fz < 0 ? 0 : fz > nrows ? nrows : fz;
+	const col0 = Math.floor(fx);
+	const row0 = Math.floor(fz);
+	const col1 = col0 + 1 > ncols ? ncols : col0 + 1;
+	const row1 = row0 + 1 > nrows ? nrows : row0 + 1;
+	const tx = fx - col0;
+	const tz = fz - row0;
+	const h00 = heights[row0 + col0 * stride]!;
+	const h10 = heights[row0 + col1 * stride]!;
+	const h01 = heights[row1 + col0 * stride]!;
+	const h11 = heights[row1 + col1 * stride]!;
+	const hRow0 = h00 + (h10 - h00) * tx;
+	const hRow1 = h01 + (h11 - h01) * tx;
+	return hRow0 + (hRow1 - hRow0) * tz;
+}
+
+/** 32-bit integer avalanche (splitmix-style). */
+function mix32(h: number): number {
+	h = Math.imul(h ^ (h >>> 16), 0x7feb352d);
+	h = Math.imul(h ^ (h >>> 15), 0x846ca68b);
+	return (h ^ (h >>> 16)) >>> 0;
+}
+
+/**
+ * Deterministic [0,1) from a lattice cell plus a stream id.
+ *
+ * Placement has to be a pure function of (seed, cell, stream) rather than of call
+ * order, for two reasons that both matter more than they look:
+ *
+ * - Streaming. A chunk is generated whenever it enters the ring and discarded when
+ *   it leaves. `Math.random()` would hand back different blades each time, so grass
+ *   would rearrange itself every time the player walked away and came back.
+ * - Multiplayer. Every client generates its own grass. With `Math.random()` two
+ *   clients disagree about where blades are — which for prone players in tall grass
+ *   means one client sees someone hidden and another sees them exposed. Keyed on the
+ *   world seed instead, every client derives the identical field.
+ *
+ * `stream` separates the independent decisions taken per cell (keep, jitter, yaw,
+ * ...) so they do not correlate with each other.
+ */
+export function cellRandom(
+	seed: number,
+	cellX: number,
+	cellZ: number,
+	stream: number
+): number {
+	let h = 0x9e3779b9 ^ Math.imul(seed | 0, 0x85ebca6b);
+	h = mix32(h ^ Math.imul(cellX | 0, 0xc2b2ae35));
+	h = mix32(h ^ Math.imul(cellZ | 0, 0x27d4eb2f));
+	h = mix32(h ^ Math.imul(stream | 0, 0x165667b1));
+	return h / 4294967296;
+}
+
+/** Random streams per lattice cell. Keep distinct so decisions stay independent. */
+const STREAM_KEEP = 1;
+const STREAM_JITTER_X = 2;
+const STREAM_JITTER_Z = 3;
+const STREAM_YAW = 4;
+const STREAM_VARIATION = 5;
+const STREAM_POND_KEEP = 6;
+const STREAM_POND_HEIGHT = 7;
+
+export type GrassChunkGenParams = {
+	heights: Float32Array;
+	nrows: number;
+	ncols: number;
+	/** Terrain extent on X/Z (m). */
+	size: number;
+	/** Blade spacing of the sampling lattice (m). */
+	spacing: number;
+	/** Chance a lattice cell is kept, thinning uniformly to the blade budget. */
+	keepProb: number;
+	/** Reject blades on ground steeper than this (cos of the slope limit). */
+	minNormalY: number;
+	/** Scales blade height only, not footprint. */
+	heightMultiplier: number;
+	chunkSize: number;
+	/** Shared across every client and every regeneration of a chunk. */
+	seed: number;
+	clearPondHole: boolean;
+	pondX: number;
+	pondZ: number;
+};
+
+/**
+ * Generate one chunk of blades into `out`, and return how many were written.
+ *
+ * Cells are assigned to a chunk by their *unjittered* lattice centre, so every cell
+ * belongs to exactly one chunk no matter which order chunks are generated in. Jitter
+ * can then push a blade up to half a spacing outside its chunk box, which is why the
+ * ring pads its cull bounds — see GrassStreamField.
+ *
+ * Writes at most `capacity` blades. Overflow is dropped rather than grown: the ring
+ * allocates fixed-size slots, and a chunk that exceeds its slot would otherwise
+ * scribble into its neighbour.
+ */
+export function generateGrassChunk(
+	params: GrassChunkGenParams,
+	chunkX: number,
+	chunkZ: number,
+	out: Float32Array,
+	outOffset: number,
+	capacity: number
+): number {
 	const {
 		heights,
 		nrows,
@@ -183,92 +349,90 @@ export function buildGrassPlacement(
 		size,
 		spacing,
 		keepProb,
-		maxCount,
 		minNormalY,
-		chunkSize,
 		heightMultiplier,
+		chunkSize,
+		seed,
 		clearPondHole,
 		pondX,
 		pondZ,
-	} = req;
+	} = params;
 
 	const half = size * 0.5;
-	const stride = nrows + 1;
-
-	/**
-	 * Bilinear over the terrain grid. The rendered surface interpolates between
-	 * vertices, so nearest-vertex snapping would sink blades into slopes (or float
-	 * them) by up to half a cell × tan(slope) — metres on big worlds, where cells
-	 * reach ~39 m at the 254-segment cap.
-	 */
-	const sampleH = (x: number, z: number) => {
-		let fx = ((x + half) / size) * ncols;
-		let fz = ((z + half) / size) * nrows;
-		fx = fx < 0 ? 0 : fx > ncols ? ncols : fx;
-		fz = fz < 0 ? 0 : fz > nrows ? nrows : fz;
-		const col0 = Math.floor(fx);
-		const row0 = Math.floor(fz);
-		const col1 = col0 + 1 > ncols ? ncols : col0 + 1;
-		const row1 = row0 + 1 > nrows ? nrows : row0 + 1;
-		const tx = fx - col0;
-		const tz = fz - row0;
-		const h00 = heights[row0 + col0 * stride]!;
-		const h10 = heights[row0 + col1 * stride]!;
-		const h01 = heights[row1 + col0 * stride]!;
-		const h11 = heights[row1 + col1 * stride]!;
-		const hRow0 = h00 + (h10 - h00) * tx;
-		const hRow1 = h01 + (h11 - h01) * tx;
-		return hRow0 + (hRow1 - hRow0) * tz;
-	};
-
 	const normalEpsilon = Math.max(spacing * 0.5, size / ncols);
-	const chunks = new Map<number, ChunkAccumulator>();
-	// Chunk indices can go negative; fold into a single integer key.
-	const keyOf = (cx: number, cz: number) => (cx + 4096) * 16384 + (cz + 4096);
+	const sampleH = (x: number, z: number) =>
+		sampleTerrainHeight(heights, nrows, ncols, size, x, z);
 
-	let total = 0;
-	let rowIndex = 0;
+	// Cell centres: x = -half + spacing * (ix + 0.5) + rowShift(iz), and the same for
+	// z without the shift. Every other row is offset half a cell (hex-style packing) —
+	// a square lattice lines blades up in axis-aligned rows, and the seam between rows
+	// reads as a bare stripe on any hillside seen face-on.
+	const minZ = chunkZ * chunkSize;
+	const maxZ = minZ + chunkSize;
+	const minX = chunkX * chunkSize;
+	const maxX = minX + chunkSize;
 
-	for (let gz = -half + spacing * 0.5; gz < half; gz += spacing, rowIndex++) {
-		if (total >= maxCount) break;
-		// Offset every other row by half a cell (hex-style packing). A square
-		// lattice lines blades up in axis-aligned rows, and the seam between rows
-		// reads as a bare stripe on any hillside seen face-on.
-		const rowShift = (rowIndex & 1) * spacing * 0.5;
-		for (let gx = -half + spacing * 0.5 + rowShift; gx < half; gx += spacing) {
-			if (total >= maxCount) break;
-			if (keepProb < 1 && Math.random() > keepProb) continue;
+	const izLo = Math.max(0, Math.ceil((minZ + half) / spacing - 0.5));
+	const izHi = Math.floor((maxZ + half) / spacing - 0.5);
+
+	let count = 0;
+
+	for (let iz = izLo; iz <= izHi; iz++) {
+		const z = -half + spacing * (iz + 0.5);
+		if (z < minZ || z >= maxZ) continue;
+		if (z < -half || z > half) continue;
+
+		const rowShift = (iz & 1) * spacing * 0.5;
+		const ixLo = Math.max(0, Math.ceil((minX - rowShift + half) / spacing - 0.5));
+		const ixHi = Math.floor((maxX - rowShift + half) / spacing - 0.5);
+
+		for (let ix = ixLo; ix <= ixHi; ix++) {
+			if (count >= capacity) return count;
+
+			const cellX = -half + spacing * (ix + 0.5) + rowShift;
+			if (cellX < minX || cellX >= maxX) continue;
+			if (cellX < -half || cellX > half) continue;
+
+			if (
+				keepProb < 1 &&
+				cellRandom(seed, ix, iz, STREAM_KEEP) > keepProb
+			) {
+				continue;
+			}
 
 			// Full-cell jitter (stratified). At 0.9 every cell kept a 5% no-blade
 			// margin, and those margins joined up into grid lines.
-			const x = gx + (Math.random() - 0.5) * spacing;
-			const z = gz + (Math.random() - 0.5) * spacing;
-			if (x < -half || x > half || z < -half || z > half) continue;
+			const x =
+				cellX + (cellRandom(seed, ix, iz, STREAM_JITTER_X) - 0.5) * spacing;
+			const z2 = z + (cellRandom(seed, ix, iz, STREAM_JITTER_Z) - 0.5) * spacing;
+			if (x < -half || x > half || z2 < -half || z2 > half) continue;
 
 			// Slope from central differences, same as the terrain's own normals.
 			const e = normalEpsilon;
-			let nx = sampleH(x - e, z) - sampleH(x + e, z);
+			let nx = sampleH(x - e, z2) - sampleH(x + e, z2);
 			let ny = e * 2;
-			let nz = sampleH(x, z - e) - sampleH(x, z + e);
+			let nz = sampleH(x, z2 - e) - sampleH(x, z2 + e);
 			const nl = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
 			nx /= nl;
 			ny /= nl;
 			nz /= nl;
 			if (ny < minNormalY) continue;
 
-			const y = sampleH(x, z);
+			const y = sampleH(x, z2);
 
 			// Thin and shorten blades approaching the pond so the shore reads wet.
 			let heightScale = 1;
 			if (clearPondHole) {
-				const distToPond = Math.hypot(x - pondX, z - pondZ);
+				const distToPond = Math.hypot(x - pondX, z2 - pondZ);
 				if (distToPond < 14) {
+					const keep = cellRandom(seed, ix, iz, STREAM_POND_KEEP);
+					const shape = cellRandom(seed, ix, iz, STREAM_POND_HEIGHT);
 					if (distToPond < 8) {
-						if (Math.random() > 0.15) continue;
-						heightScale = 0.25 + Math.random() * 0.15;
+						if (keep > 0.15) continue;
+						heightScale = 0.25 + shape * 0.15;
 					} else if (distToPond < 10) {
-						if (Math.random() > 0.4) continue;
-						heightScale = 0.35 + Math.random() * 0.2;
+						if (keep > 0.4) continue;
+						heightScale = 0.35 + shape * 0.2;
 					} else {
 						const t = (distToPond - 10) / 4;
 						heightScale = 0.45 + 0.55 * t;
@@ -276,77 +440,26 @@ export function buildGrassPlacement(
 				}
 			}
 
-			const variation = 0.8 + Math.random() * 0.4;
-			const scaleX = variation;
-			const scaleY = heightScale * variation * heightMultiplier;
-			const scaleZ = variation;
+			const variation =
+				0.8 + cellRandom(seed, ix, iz, STREAM_VARIATION) * 0.4;
+			const yaw = cellRandom(seed, ix, iz, STREAM_YAW) * Math.PI * 2;
 
-			const yaw = Math.random() * Math.PI * 2;
-
-			const cx = Math.floor(x / chunkSize);
-			const cz = Math.floor(z / chunkSize);
-			const key = keyOf(cx, cz);
-			let chunk = chunks.get(key);
-			if (!chunk) {
-				chunk = new ChunkAccumulator();
-				chunks.set(key, chunk);
-			}
-			chunk.reserve();
-			writeBladeMatrix(
-				chunk.data,
-				chunk.count * FLOATS_PER_INSTANCE,
+			writeBladePacked(
+				out,
+				outOffset + count * FLOATS_PER_INSTANCE,
 				x,
 				y,
-				z,
+				z2,
 				nx,
-				ny,
 				nz,
 				yaw,
-				scaleX,
-				scaleY,
-				scaleZ
+				variation,
+				heightScale * variation * heightMultiplier
 			);
-
-			chunk.count++;
-			chunk.sumX += x;
-			chunk.sumY += y;
-			chunk.sumZ += z;
-			// Track bounds against the float32 values actually stored in the buffer.
-			// Accumulating the doubles instead leaves instances a rounding step
-			// outside the reported box, which would be a (tiny) culling pop.
-			const fx = Math.fround(x);
-			const fy = Math.fround(y);
-			const fz2 = Math.fround(z);
-			if (fx < chunk.minX) chunk.minX = fx;
-			if (fy < chunk.minY) chunk.minY = fy;
-			if (fz2 < chunk.minZ) chunk.minZ = fz2;
-			if (fx > chunk.maxX) chunk.maxX = fx;
-			if (fy > chunk.maxY) chunk.maxY = fy;
-			if (fz2 > chunk.maxZ) chunk.maxZ = fz2;
-			total++;
+			count++;
 		}
 	}
 
-	const out: GrassChunkData[] = [];
-	for (const chunk of chunks.values()) {
-		if (chunk.count === 0) continue;
-		shuffleBlocks(chunk.data, chunk.count);
-		// Trim to exactly count so the buffer transfers without slack.
-		const matrices = chunk.data.subarray(0, chunk.count * FLOATS_PER_INSTANCE);
-		out.push({
-			count: chunk.count,
-			matrices: new Float32Array(matrices),
-			centerX: chunk.sumX / chunk.count,
-			centerY: chunk.sumY / chunk.count,
-			centerZ: chunk.sumZ / chunk.count,
-			minX: chunk.minX,
-			minY: chunk.minY,
-			minZ: chunk.minZ,
-			maxX: chunk.maxX,
-			maxY: chunk.maxY,
-			maxZ: chunk.maxZ,
-		});
-	}
-
-	return { chunks: out, total };
+	return count;
 }
+

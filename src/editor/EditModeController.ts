@@ -5,7 +5,7 @@ import type { Socket } from "socket.io-client";
 import type { TreeHandle } from "../entities/tree";
 import type { PlacedStoneHandle } from "../entities/stone/placeStone";
 import type { Pond } from "../entities/water";
-import type { GrassChunkField } from "../entities/grass/GrassChunkField";
+import type { GrassStreamField } from "../entities/grass/GrassStreamField";
 import { setIslandTerrain } from "../terrain/islandHeight";
 import type { TerrainSculptTarget } from "./TerrainSculpt";
 import {
@@ -48,7 +48,7 @@ export type EditModeHost = {
 	getTerrainHeights: () => Float32Array | null;
 	getTerrainHandle: () => TerrainColliderHandle | null;
 	setTerrainHandle: (handle: TerrainColliderHandle | null) => void;
-	getGrassField: () => GrassChunkField | null;
+	getGrassField: () => GrassStreamField | null;
 	getActiveWorldDefinition: () => WorldDefinition;
 	/** Resolve any world def known this session (island / valley / custom). */
 	getWorldDefinitionById: (worldId: string) => WorldDefinition | null;

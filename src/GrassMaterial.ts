@@ -31,6 +31,11 @@ import {
 	positionGeometry,
 	attribute
 } from "three/tsl";
+import {
+	GRASS_FADE_START,
+	GRASS_FADE_END,
+	GRASS_FADE_SINK,
+} from "./entities/grass/grassPlacementCore";
 import { snowMaskAt } from "./terrain/snowShading";
 import { snowUniforms } from "./terrain/snowMask";
 import { isMobileDevice } from "./ui/mobileControls";
@@ -317,12 +322,14 @@ export class GrassMaterial {
 
 			// Distance fade: sink grass into the ground at the edges
 			const distToCamera = distance(bladeWorld, u.uPlayerPosition);
-			// fadeStart = 48, fadeEnd = 68
-			const fadeStart = float(48.0);
-			const fadeEnd = float(68.0);
+			// Shared with the streaming field, which sizes its ring from GRASS_FADE_END
+			// and caps the draw-distance setting there. These were local literals while
+			// the field kept its own unread copies, so the two could drift apart.
+			const fadeStart = float(GRASS_FADE_START);
+			const fadeEnd = float(GRASS_FADE_END);
 			const scale = float(1.0).sub(smoothstep(fadeStart, fadeEnd, distToCamera));
-			
-			const sinkOffset = float(1.0).sub(scale).mul(float(-2.0));
+
+			const sinkOffset = float(1.0).sub(scale).mul(float(-GRASS_FADE_SINK));
 			const scaledPos = positionLocal.add(vec3(0.0, sinkOffset, 0.0));
 
 			// Wind. Amplitude scales with blade height so short grass sways less.
